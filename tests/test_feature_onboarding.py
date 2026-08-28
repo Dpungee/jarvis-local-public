@@ -328,7 +328,8 @@ class FeatureOnboardingTests(unittest.TestCase):
         secret = "sk-test-this-must-never-be-returned"
         # Deliberate fake canary verifies unmanaged secrets survive locally but never
         # cross the chat-safe result boundary.
-        env_path.write_text(  # lgtm[py/clear-text-storage-sensitive-data]
+        # codeql[py/clear-text-storage-sensitive-data]
+        env_path.write_text(
             "# operator-owned line\n"
             f"OPENAI_API_KEY={secret}\n"
             "JARVIS_COMMAND_TIMEOUT=77\n"
@@ -446,7 +447,8 @@ class FeatureOnboardingTests(unittest.TestCase):
             "OPERATOR_SETTING=preserve-this\n"
         ).encode("utf-8")
         # Deliberate fake canary verifies rollback restores exact operator-owned bytes.
-        env_path.write_bytes(original)  # lgtm[py/clear-text-storage-sensitive-data]
+        # codeql[py/clear-text-storage-sensitive-data]
+        env_path.write_bytes(original)
 
         with patch.object(
             self.store,

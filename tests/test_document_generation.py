@@ -153,7 +153,8 @@ class DocumentGenerationTests(unittest.TestCase):
             workspace = Path(directory)
             secret = "sk-proj-" + "A" * 32
             # Deliberate fake canary proves the generated document redacts secrets.
-            (workspace / "report.json").write_text(  # lgtm[py/clear-text-storage-sensitive-data]
+            # codeql[py/clear-text-storage-sensitive-data]
+            (workspace / "report.json").write_text(
                 json.dumps({
                     "title": "Safe report",
                     "sections": [{

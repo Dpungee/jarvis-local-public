@@ -184,9 +184,9 @@ class CapabilityGatewayTests(unittest.TestCase):
             with self.subTest(index=index):
                 # Synthetic invalid connector fixture; it contains an environment-variable
                 # name, never a credential value.
-                self.manifest_path.write_text(  # lgtm[py/clear-text-storage-sensitive-data]
-                    json.dumps(manifest), encoding="utf-8"
-                )
+                serialized = json.dumps(manifest)
+                # codeql[py/clear-text-storage-sensitive-data]
+                self.manifest_path.write_text(serialized, encoding="utf-8")
                 with self.assertRaises(ConnectorError):
                     self.gateway.validate_workspace_manifest("connector.json")
 

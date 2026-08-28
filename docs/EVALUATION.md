@@ -1,0 +1,47 @@
+# Evaluation approach
+
+Jarvis is evaluated by observable behavior rather than model-authored claims. The test
+suite combines deterministic unit and integration coverage with bounded stress and
+recovery scenarios.
+
+## What is measured
+
+- Natural conversation routing, latency classification, cancellation, and context
+  continuity.
+- Tool selection, argument validation, authorization, approval scope, and one-shot
+  consumption.
+- Memory provenance, contradiction handling, temporal confidence, retrieval relevance,
+  and safety leakage.
+- Web research source collection, citation traceability, synthesis gates, and honest
+  incomplete outcomes.
+- Code and document workflows, real execution evidence, artifact verification, and
+  vacuous-test rejection.
+- Specialist isolation, delegation budgets, project scoping, and restart recovery.
+- Proactive and initiative gates, recovery attestations, daily limits, and drift
+  detection.
+- Redaction, path containment, external mutation, desktop adapters, and self-repair
+  immutability boundaries.
+
+## Reproducing the deterministic suite
+
+```powershell
+python -m pip install -e ".[documents]"
+python -m unittest discover -s tests
+python -m jarvis doctor
+```
+
+GitHub Actions runs the deterministic suite on the supported Windows platform with
+cloud models, local models, computer access, host execution, and external access
+disabled. Provider-dependent and live UI evaluations remain separate so a network or
+subscription outage cannot be mistaken for a source regression.
+
+## Evidence policy
+
+Public reports must contain the exact commit, configuration class, test command,
+platform, pass/fail result, and known limitations. Raw prompts, conversation logs,
+postal codes, usernames, local paths, provider responses, and account data are private
+development artifacts and must not be committed.
+
+Benchmark numbers are historical observations, not permanent product guarantees.
+Results should be refreshed on the release commit and never copied forward after code,
+models, providers, or hardware change.

@@ -1,0 +1,88 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "jarvis-local"
+version = "0.6.0"
+description = "Windows-first, local-first personal AI agent with automatic model routing, provenance-aware memory, bounded tools, and approval-gated automation."
+readme = "README.md"
+requires-python = ">=3.11,<3.14"
+license = "Apache-2.0"
+license-files = ["LICENSE", "NOTICE"]
+dependencies = []
+keywords = [
+    "ai-agent",
+    "anthropic",
+    "local-ai",
+    "memory",
+    "multi-agent",
+    "ollama",
+    "openai",
+    "personal-assistant",
+    "tool-use",
+    "windows",
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: Win32 (MS Windows)",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+]
+
+[project.urls]
+Homepage = "https://github.com/Dpungee/jarvis-local-public"
+Repository = "https://github.com/Dpungee/jarvis-local-public"
+Issues = "https://github.com/Dpungee/jarvis-local-public/issues"
+
+[project.optional-dependencies]
+drive = [
+    "google-api-python-client==2.199.0",
+    "google-auth==2.56.3",
+    "google-auth-httplib2==0.4.1",
+    "google-auth-oauthlib==1.4.0",
+]
+documents = [
+    "python-pptx>=0.6.23",
+    "python-docx>=1.1",
+    "openpyxl>=3.1",
+    "reportlab>=4.0",
+    "pypdf>=5.0",
+    "Pillow>=10.0",
+    "matplotlib>=3.8",
+]
+training = [
+    "accelerate>=1.0,<2",
+    "bitsandbytes>=0.49,<1",
+    "datasets>=3.0,<5",
+    "peft>=0.19,<1",
+    "torch>=2.4,<3",
+    "transformers>=5.12,<6",
+    "trl>=1.9,<2",
+]
+
+[project.scripts]
+jarvis = "jarvis.cli:main"
+jarvis-ui = "jarvis.ui:main"
+jarvis-presence = "jarvis.presence:main"
+jarvis-public-presence = "jarvis.public_presence_service:main"
+
+[tool.setuptools]
+packages = ["jarvis", "jarvis.gateway"]
+include-package-data = false
+
+[tool.setuptools.package-data]
+jarvis = [
+    "SOUL.md",
+    "CONSTITUTION.md",
+    "presence.html",
+    "presence.css",
+    "presence.js",
+    "builtin_skills/*/SKILL.md",
+    "builtin_skills/*/agents/*.yaml",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

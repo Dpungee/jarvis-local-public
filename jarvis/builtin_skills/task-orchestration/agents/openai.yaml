@@ -1,0 +1,4 @@
+interface:
+  display_name: "Task Orchestration"
+  short_description: "Coordinate bounded multi-step work and dependencies."
+  default_prompt: "Use $task-orchestration to plan and coordinate this multi-step outcome."

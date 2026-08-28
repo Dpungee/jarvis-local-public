@@ -1,0 +1,4 @@
+interface:
+  display_name: "Evidence Research"
+  short_description: "Research questions with traceable authoritative evidence."
+  default_prompt: "Use $evidence-research to produce a source-backed answer with explicit uncertainty."

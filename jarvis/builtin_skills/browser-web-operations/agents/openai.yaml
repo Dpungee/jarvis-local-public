@@ -1,0 +1,4 @@
+interface:
+  display_name: "Browser and Web Operations"
+  short_description: "Navigate web workflows and verify page outcomes."
+  default_prompt: "Use $browser-web-operations to complete this browser workflow and verify each state change."

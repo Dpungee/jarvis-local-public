@@ -1,0 +1,4 @@
+interface:
+  display_name: "Long-running Operations"
+  short_description: "Run durable tasks with checkpoints and recovery."
+  default_prompt: "Use $long-running-operations to make this long task resumable and verifiable."

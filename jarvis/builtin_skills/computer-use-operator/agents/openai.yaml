@@ -1,0 +1,4 @@
+interface:
+  display_name: "Computer Use Operator"
+  short_description: "Operate supported desktop apps with verified actions."
+  default_prompt: "Use $computer-use-operator to complete this desktop application task safely and verify the result."

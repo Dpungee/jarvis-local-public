@@ -1,0 +1,4 @@
+interface:
+  display_name: "Safety and Reliability"
+  short_description: "Harden workflows against unsafe effects and false success."
+  default_prompt: "Use $safety-reliability to threat-model and harden this agent workflow."

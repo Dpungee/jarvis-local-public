@@ -1,0 +1,16 @@
+include .env.example
+include *.bat
+include *.ps1
+include CHANGELOG.md
+include CONSTITUTION.md
+include CONTRIBUTING.md
+include Dockerfile.sandbox
+include PUBLIC_POLICY.md
+include PUBLIC_PROFILE.json
+include PUBLIC_SOUL.md
+include SECURITY.md
+include SOUL.md
+include TRAINING.md
+recursive-include docs *.md
+recursive-include scripts *.py
+recursive-include tests/fixtures *.json

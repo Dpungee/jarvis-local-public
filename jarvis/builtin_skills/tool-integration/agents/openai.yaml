@@ -1,0 +1,4 @@
+interface:
+  display_name: "Tool Integration"
+  short_description: "Select and combine tools or APIs with least authority."
+  default_prompt: "Use $tool-integration to choose and validate the minimum tools needed for this outcome."

@@ -1,0 +1,4 @@
+title = "JARVIS Local public-release secret scanning"
+
+[extend]
+useDefault = true

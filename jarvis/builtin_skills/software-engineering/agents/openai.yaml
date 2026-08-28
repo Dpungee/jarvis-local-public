@@ -1,0 +1,4 @@
+interface:
+  display_name: "Software Engineering"
+  short_description: "Implement, debug, refactor, and verify software changes."
+  default_prompt: "Use $software-engineering to inspect, implement, reread, and verify this software task."

@@ -1,0 +1,296 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <title>JARVIS Presence</title>
+  <link rel="stylesheet" href="/presence.css">
+</head>
+<body>
+  <div class="shell">
+    <aside class="rail">
+      <div class="brand-row">
+        <div class="brand">
+          <div class="mark" aria-hidden="true">J</div>
+          <div><strong>Jarvis</strong><small>Personal AI</small></div>
+        </div>
+        <button id="rail-toggle" class="icon-button rail-toggle" type="button" title="Toggle sidebar" aria-label="Toggle sidebar">☰</button>
+      </div>
+
+      <div class="mode-tabs" role="tablist" aria-label="Workspace mode">
+        <button id="home-mode" class="mode-tab active" type="button" role="tab" aria-selected="true"><span>⌂</span> Home</button>
+        <button id="code-mode" class="mode-tab" type="button" role="tab" aria-selected="false"><span>‹/›</span> Code</button>
+      </div>
+
+      <nav class="primary-nav" aria-label="Jarvis navigation">
+        <button id="new-chat" class="nav-item" type="button"><span class="nav-icon">＋</span><span>New</span></button>
+        <button class="nav-item" type="button" data-view="projects"><span class="nav-icon">▰</span><span>Projects</span></button>
+        <button class="nav-item" type="button" data-view="artifacts"><span class="nav-icon">◇</span><span>Project files</span></button>
+        <button class="nav-item" type="button" data-view="scheduled"><span class="nav-icon">◷</span><span>Scheduled</span></button>
+        <button class="nav-item" type="button" data-view="dispatch"><span class="nav-icon">⇄</span><span>Dispatch</span><span class="beta-badge">Beta</span></button>
+        <button class="nav-item" type="button" data-view="devices"><span class="nav-icon">⌑</span><span>Devices</span></button>
+        <button class="nav-item" type="button" data-view="companion"><span class="nav-icon">◉</span><span>Companion</span></button>
+        <button class="nav-item" type="button" data-view="public-presence"><span class="nav-icon">◎</span><span>Public Presence</span></button>
+        <button class="nav-item" type="button" data-view="customize"><span class="nav-icon">☷</span><span>Settings</span></button>
+      </nav>
+
+      <section class="project-switcher" aria-label="Current project workspace">
+        <div class="project-switcher-head"><span>Current project</span><span class="isolation-badge">Isolated</span></div>
+        <div class="project-row">
+          <select id="project" aria-label="Active project"></select>
+          <button id="new-project" class="icon-button" title="Create isolated project" aria-label="Create isolated project">＋</button>
+        </div>
+        <small id="project-scope-copy">Chats and files stay inside this project.</small>
+      </section>
+
+      <div class="section-title"><span>Pinned projects</span><span class="section-rule"></span><button id="pin-project" class="section-add" type="button" title="Pin current project" aria-label="Pin current project">＋</button></div>
+      <nav id="pinned-projects" class="pinned-projects" aria-label="Pinned projects"></nav>
+
+      <div class="section-title"><span>Chats in this project</span><span class="section-rule"></span></div>
+      <nav id="conversation-list" class="conversation-list" aria-label="Chats in the active project"></nav>
+
+      <div class="rail-footer">
+        <button id="approvals" class="sidebar-action full">
+          <span class="sidebar-icon">✓</span><span>Approvals</span><span id="approval-count" class="badge">0</span>
+        </button>
+        <label class="toggle sidebar-action"><input id="speak-toggle" type="checkbox"><span class="switch"></span><span>Voice responses</span></label>
+        <section class="system-card" aria-label="System status">
+          <div class="status-line"><span id="status-dot" class="dot"></span><b id="status-label">Connecting</b></div>
+          <div id="provider-label" class="muted">Model provider pending</div>
+          <div id="control-label" class="muted">Runtime state pending</div>
+          <div id="agent-label" class="muted">Agent pool pending</div>
+        </section>
+      </div>
+    </aside>
+
+    <main class="workspace">
+      <header class="topbar">
+        <div class="title-group">
+          <button id="mobile-rail-toggle" class="icon-button mobile-rail-toggle" type="button" title="Open sidebar" aria-label="Open sidebar">☰</button>
+          <div>
+            <button id="project-context" class="project-context" type="button" title="Open project workspace">Default workspace</button>
+            <h1 id="chat-title">New task</h1>
+            <p id="activity">Ready</p>
+          </div>
+        </div>
+        <div class="top-actions">
+          <div class="companion-quick">
+            <button id="companion-chip" class="companion-chip" type="button" aria-expanded="false" aria-controls="companion-popover">
+              <span id="companion-chip-dot" class="companion-chip-dot" aria-hidden="true"></span>
+              <span id="companion-chip-label">Companion</span>
+            </button>
+            <section id="companion-popover" class="companion-popover" aria-label="Screen Companion quick controls" hidden>
+              <div class="companion-popover-head">
+                <div><strong id="companion-quick-status">Companion</strong><small id="companion-quick-detail">Checking status…</small></div>
+                <button id="companion-settings" class="ghost" type="button">Settings</button>
+              </div>
+              <label for="companion-quick-mode">Mode</label>
+              <select id="companion-quick-mode">
+                <option value="observe">Observe</option>
+                <option value="suggest">Suggest</option>
+                <option value="collaborate">Collaborate</option>
+              </select>
+              <div class="companion-quick-actions">
+                <button id="companion-on" type="button">On</button>
+                <button id="companion-pause" type="button">Pause</button>
+                <button id="companion-off" class="danger" type="button">Off</button>
+              </div>
+            </section>
+          </div>
+          <select id="model">
+            <option value="auto">Auto</option>
+            <option value="fast">Fast</option>
+            <option value="reasoning">Reasoning</option>
+            <option value="coding">Coding</option>
+            <option value="deep">Deep / Security</option>
+          </select>
+          <button id="split-view" class="ghost split-view-toggle" type="button" aria-pressed="false" title="Open a second independent Jarvis chat">Split</button>
+          <button id="stop" class="danger" disabled>Stop</button>
+        </div>
+      </header>
+
+      <nav id="agent-tabs" class="agent-tabs" aria-label="Jarvis agent roster">
+        <button class="agent-tab active" type="button" data-agent-key="jarvis" aria-selected="true">
+          <span class="agent-state ready" aria-hidden="true"></span><span>JARVIS</span>
+        </button>
+        <button class="agent-tab" type="button" data-agent-key="agents" aria-selected="false">
+          <span class="agent-state ready" aria-hidden="true"></span><span>AGENTS</span>
+        </button>
+      </nav>
+      <section id="agent-detail" class="agent-detail" aria-live="polite" hidden></section>
+
+      <section id="utility-view" class="utility-view" aria-live="polite" hidden>
+        <div class="utility-shell">
+          <header class="utility-head">
+            <div><p id="utility-kicker">Workspace</p><h2 id="utility-title">Projects</h2><p id="utility-description"></p></div>
+            <button id="close-utility" class="ghost" type="button">Back to chat</button>
+          </header>
+          <div id="utility-content" class="utility-content"></div>
+        </div>
+      </section>
+
+      <section id="messages" class="messages" aria-live="polite">
+        <article class="message assistant welcome">
+          <div class="message-inner">
+            <div class="avatar">J</div>
+            <div class="bubble">
+              <div class="role">Jarvis</div>
+              <div class="content">Ready when you are. Ask a question, start a project, or give me something to work on.</div>
+            </div>
+          </div>
+        </article>
+      </section>
+
+      <div class="composer-area">
+        <form id="composer" class="composer">
+          <textarea id="prompt" rows="1" maxlength="50000" placeholder="Message Jarvis" autocomplete="off"></textarea>
+          <div class="composer-actions">
+            <div class="composer-left">
+              <button id="attach-image" class="composer-button" type="button" title="Attach images" aria-label="Attach images">＋</button>
+              <input id="image-input" type="file" accept="image/png,image/jpeg,image/webp,image/gif" multiple hidden>
+              <button id="microphone" class="composer-button" type="button" title="Voice input" aria-label="Voice input">⌁</button>
+              <span class="composer-context">Jarvis can use tools and work across projects</span>
+            </div>
+            <button id="send" class="send" type="submit" title="Send message" aria-label="Send message">↑</button>
+          </div>
+        </form>
+        <div id="image-preview" class="image-preview" hidden></div>
+        <div class="hint">Jarvis can make mistakes. Review consequential actions before approving them.</div>
+      </div>
+
+      <section id="secondary-pane" class="secondary-pane" aria-label="Second Jarvis chat" hidden>
+        <header class="secondary-pane-head">
+          <div class="secondary-pane-identity">
+            <span class="agent-state ready" aria-hidden="true"></span>
+            <div><strong>JARVIS</strong><small id="secondary-activity">Independent chat ready</small></div>
+          </div>
+          <div class="secondary-pane-actions">
+            <select id="secondary-conversation" aria-label="Conversation in second pane"></select>
+            <button id="secondary-new-chat" class="ghost" type="button" title="Start a new chat in this pane">＋ New</button>
+            <button id="secondary-stop" class="danger" type="button" disabled>Stop</button>
+            <button id="close-split-view" class="icon-button" type="button" title="Close split view" aria-label="Close split view">×</button>
+          </div>
+        </header>
+        <section id="secondary-messages" class="secondary-messages" aria-live="polite"></section>
+        <div class="secondary-composer-area">
+          <form id="secondary-composer" class="composer secondary-composer">
+            <textarea id="secondary-prompt" rows="1" maxlength="50000" placeholder="Message Jarvis in this chat" autocomplete="off"></textarea>
+            <div class="composer-actions">
+              <div class="composer-left"><span class="composer-context">Independent conversation · shared Jarvis agent pool</span></div>
+              <button id="secondary-send" class="send" type="submit" title="Send message" aria-label="Send message in second chat">↑</button>
+            </div>
+          </form>
+          <div class="hint">Both panes can work at the same time. Each keeps separate conversation context.</div>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <dialog id="approval-dialog">
+    <div class="dialog-head">
+      <div><h2>Action approvals</h2><p>Review the exact target before authorizing it.</p></div>
+      <button id="close-approvals" class="ghost">Close</button>
+    </div>
+    <div id="approval-list" class="approval-list"></div>
+  </dialog>
+
+  <dialog id="project-dialog" class="project-dialog">
+    <form id="project-form" class="project-form">
+      <div class="dialog-head">
+        <div><h2>Create isolated project</h2><p>Jarvis will keep its chats, code, research, documents, images, data, and exports together.</p></div>
+        <button id="cancel-project" class="ghost" type="button">Cancel</button>
+      </div>
+      <div class="project-form-body">
+        <label for="project-name">Project name</label>
+        <input id="project-name" name="project-name" maxlength="100" autocomplete="off" required placeholder="Example: Home network dashboard">
+        <label for="project-kind">Project type</label>
+        <select id="project-kind" name="project-kind">
+          <option value="general">General project</option>
+          <option value="coding">Coding / app</option>
+          <option value="research">Research</option>
+          <option value="creative">Creative / media</option>
+        </select>
+        <label for="project-description">What is this project for? <span>Optional</span></label>
+        <textarea id="project-description" name="project-description" rows="3" maxlength="800" placeholder="A short goal helps Jarvis keep work focused and organized."></textarea>
+        <div class="project-layout-preview">
+          <strong>Dedicated environment</strong>
+          <span>code · research · documents · images · datasets · exports</span>
+        </div>
+        <div class="project-form-actions">
+          <button id="create-project" class="primary" type="submit">Create project</button>
+        </div>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog id="delete-chat-dialog" class="delete-chat-dialog">
+    <div class="dialog-head">
+      <div><h2>Delete this chat?</h2><p id="delete-chat-copy">This removes the conversation history. Project files stay untouched.</p></div>
+      <button id="cancel-delete-chat" class="ghost" type="button">Cancel</button>
+    </div>
+    <div class="delete-chat-actions">
+      <button id="confirm-delete-chat" class="danger" type="button">Delete chat</button>
+    </div>
+  </dialog>
+
+  <dialog id="new-network-device-dialog" class="new-network-device-dialog">
+    <div class="dialog-head">
+      <div>
+        <h2>Device first observed by Jarvis</h2>
+        <p>Review the evidence before deciding whether the device is expected.</p>
+      </div>
+      <button id="close-new-network-device" class="ghost" type="button">Close</button>
+    </div>
+    <div id="new-network-device-list" class="new-network-device-list"></div>
+  </dialog>
+
+  <dialog id="new-bluetooth-device-dialog" class="new-network-device-dialog">
+    <div class="dialog-head">
+      <div>
+        <h2>Bluetooth device first observed by Jarvis</h2>
+        <p>Windows reports this endpoint as paired. Review the evidence before deciding whether it is expected.</p>
+      </div>
+      <button id="close-new-bluetooth-device" class="ghost" type="button">Close</button>
+    </div>
+    <div id="new-bluetooth-device-list" class="new-network-device-list"></div>
+  </dialog>
+
+  <dialog id="network-defense-incident-dialog" class="network-defense-incident-dialog">
+    <div class="dialog-head">
+      <div>
+        <h2>Network defense incident</h2>
+        <p>Evidence and actions are shown separately so you can review exactly what Jarvis observed and did.</p>
+      </div>
+      <button id="close-network-defense-incident" class="ghost" type="button">Close</button>
+    </div>
+    <div id="network-defense-incident-list" class="network-defense-incident-list"></div>
+  </dialog>
+
+  <dialog id="feature-onboarding-dialog" class="feature-onboarding-dialog">
+    <div class="dialog-head">
+      <div>
+        <h2>Choose optional Jarvis features</h2>
+        <p>Set features up now, leave them for later, or keep them disabled. Every choice remains reversible in Settings.</p>
+      </div>
+      <button id="close-feature-onboarding" class="ghost" type="button">Finish later</button>
+    </div>
+    <div id="feature-onboarding-list" class="feature-onboarding-list"></div>
+  </dialog>
+
+  <dialog id="pairing-dialog" class="pairing-dialog">
+    <form id="pairing-form" class="pairing-form">
+      <div class="mark" aria-hidden="true">J</div>
+      <h2>Pair this device</h2>
+      <p>Enter the short-lived code shown by <code>jarvis pairing create</code> on the Jarvis computer.</p>
+      <label for="pairing-code">Pairing code</label>
+      <input id="pairing-code" name="pairing-code" inputmode="text" autocomplete="one-time-code" maxlength="14" required placeholder="XXXX-XXXX-XXXX">
+      <button class="primary" type="submit">Pair securely</button>
+      <small>The code works once and expires after ten minutes.</small>
+    </form>
+  </dialog>
+
+  <div id="toast" class="toast" role="status"></div>
+  <script src="/presence.js" defer></script>
+</body>
+</html>

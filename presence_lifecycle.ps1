@@ -130,6 +130,15 @@ function Test-PresenceHealthIdentity {
     if ($null -eq $Health) {
         return $false
     }
+    $requiredProperties = @(
+        "service", "ready", "version", "installation_id", "source_root",
+        "python_executable", "runtime_epoch", "process_id"
+    )
+    foreach ($property in $requiredProperties) {
+        if ($Health.PSObject.Properties.Name -notcontains $property) {
+            return $false
+        }
+    }
     $processId = 0
     return (
         "$($Health.service)" -ceq "jarvis-presence" -and

@@ -599,6 +599,42 @@ class WindowsScriptTests(unittest.TestCase):
         self.fake_bin.mkdir()
         self.trace = self.temp_path / "native-trace.txt"
 
+    def test_presence_identity_treats_legacy_minimal_health_as_stale(self):
+        lifecycle = ROOT / "presence_lifecycle.ps1"
+        command = "\n".join((
+            '$ErrorActionPreference = "Stop"',
+            f'. "{lifecycle}"',
+            '$runtime = [pscustomobject]@{',
+            '  Version = "0.6.2";',
+            f'  InstallationId = "{"d" * 64}";',
+            f'  SourceRoot = "{self.project}";',
+            f'  Pythonw = "{self.fake_bin / "pythonw.exe"}"',
+            '}',
+            '$health = [pscustomobject]@{',
+            '  service = "jarvis-presence";',
+            '  ready = $true;',
+            f'  runtime_epoch = "{"e" * 32}"',
+            '}',
+            'if (Test-PresenceHealthIdentity -Health $health -Runtime $runtime) { exit 9 }',
+            'Write-Output "STALE"',
+        ))
+        completed = subprocess.run(
+            [
+                str(POWERSHELL), "-NoLogo", "-NoProfile", "-NonInteractive",
+                "-ExecutionPolicy", "Bypass", "-Command", command,
+            ],
+            cwd=self.project,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=15,
+            check=False,
+        )
+
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertIn("STALE", completed.stdout)
+
     def _cleanup(self) -> None:
         target = self.temp_path.resolve()
         if target.parent != TEST_TEMP_ROOT.resolve():

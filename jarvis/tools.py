@@ -70,6 +70,7 @@ from .source_quality import is_authoritative_source
 from .specialists import specialist_for_prompt
 from .vercel_provider import VercelProvider
 from .windows_apps import WindowsAppController
+from .windows_app_repair import WindowsAppRepairController
 
 
 MAX_TOOL_OUTPUT = 24_000
@@ -122,6 +123,7 @@ PROCESS_LIFECYCLE_TOOLS = frozenset({
 })
 EXECUTION_TOOLS = frozenset({
     "run_process", "launch_artifact", "windows_launch_app", "windows_open_url",
+    "windows_app_repair",
     "desktop_interact",
     "photoshop_remove_background", "install_project_dependencies",
     *PROCESS_LIFECYCLE_TOOLS,
@@ -130,6 +132,7 @@ COMPUTER_TOOLS = frozenset({
     "computer_list_files", "computer_read_file", "computer_write_file",
     "computer_search_files", "computer_storage_report", "system_snapshot", "launch_artifact",
     "windows_list_apps", "windows_open_apps", "windows_launch_app", "windows_open_url",
+    "windows_app_diagnose", "windows_app_repair",
     "photoshop_remove_background",
     "desktop_active_window", "desktop_interact",
 })
@@ -171,6 +174,7 @@ MUTATING_TOOLS = frozenset({
     "install_project_dependencies",
     "launch_artifact",
     "windows_launch_app",
+    "windows_app_repair",
     "windows_open_url",
     "desktop_interact",
     "photoshop_remove_background",
@@ -1465,6 +1469,10 @@ class ToolBox:
             Path(getattr(config, "computer_root", None) or Path.home()),
             config.data_dir,
         )
+        self.windows_app_repair = WindowsAppRepairController(
+            Path(getattr(config, "computer_root", None) or Path.home()),
+            self.windows_apps,
+        )
         self.desktop = WindowsDesktopController()
         self.network_inventory_store = (
             NetworkInventory(
@@ -1598,6 +1606,7 @@ class ToolBox:
             "computer_search_files": {"path": "."},
             "computer_storage_report": {"path": ".", "limit": 50},
             "photoshop_remove_background": {"overwrite": False},
+            "windows_app_repair": {"symptom": "blank_or_unrendered"},
             "github_create_repository": {
                 "visibility": "private", "description": "", "remote": "origin",
             },
@@ -1643,6 +1652,49 @@ class ToolBox:
             effective.get("application"), str
         ):
             effective.update(self.windows_apps.launch_snapshot(effective["application"]))
+
+        if (
+            name == "windows_app_repair"
+            and isinstance(effective.get("application"), str)
+            and isinstance(effective.get("plan_id"), str)
+        ):
+            try:
+                repair_plan = self.windows_app_repair.repair_snapshot(
+                    effective["application"],
+                    effective["plan_id"],
+                    str(effective.get("symptom") or "blank_or_unrendered"),
+                )
+            except PermissionError:
+                raise
+            except FileNotFoundError as exc:
+                raise FileNotFoundError(
+                    "The profiled application or repair target is unavailable"
+                ) from exc
+            except OSError as exc:
+                raise RuntimeError(
+                    "The profiled application changed while its approval was prepared"
+                ) from exc
+            effective["repair_plan"] = repair_plan
+            summary = repair_plan.get("approval_summary")
+            if not isinstance(summary, dict):
+                raise PermissionError("Application repair approval summary is unavailable")
+            effective["repair_target"] = str(
+                repair_plan.get("display_name") or repair_plan.get("application") or ""
+            )
+            effective["repair_operation"] = str(repair_plan.get("operation") or "")
+            sources = list(summary.get("sources") or [])
+            backups = list(summary.get("backups") or [])
+            if len(sources) != len(backups) or not sources:
+                raise PermissionError("Application repair approval targets are incomplete")
+            for index, (source, backup) in enumerate(
+                zip(sources, backups, strict=True),
+                start=1,
+            ):
+                effective[f"repair_move_{index:02d}"] = f"{source} -> {backup}"
+            effective["repair_directories"] = int(summary.get("directories") or 0)
+            effective["repair_bytes"] = int(summary.get("bytes") or 0)
+            effective["repair_reversible"] = summary.get("reversible") is True
+            effective["repair_plan_sha256"] = str(summary.get("plan_sha256") or "")
 
         if name == "windows_open_url" and isinstance(effective.get("url"), str):
             effective.update(self.windows_apps.url_snapshot(_public_url(effective["url"])))
@@ -2549,6 +2601,23 @@ class ToolBox:
             Tool("windows_launch_app", "Launch one exact installed desktop application by name without shell arguments. Requires one-shot approval and blocks shells, installers, and system-management tools.", {
                 "type": "object", "properties": {"application": {"type": "string"}}, "required": ["application"]
             }, self.windows_launch_app),
+            Tool("windows_app_diagnose", "Diagnose one installed application's process, HTTPS, and declared disposable renderer-cache state through a bounded profile. The symptom must reflect the operator's report or verified screen evidence. It reads no cache contents, credentials, cookies, tokens, window text, or pixels and changes nothing.", {
+                "type": "object", "additionalProperties": False,
+                "properties": {
+                    "application": {"type": "string", "minLength": 1, "maxLength": 200},
+                    "symptom": {"type": "string", "enum": ["auto", "blank_or_unrendered", "authentication_failed", "connectivity_failed", "process_not_running", "update_required"]}
+                },
+                "required": ["application"]
+            }, self.windows_app_diagnose),
+            Tool("windows_app_repair", "Apply one exact plan returned by windows_app_diagnose. Only a profile-declared renderer-cache repair is executable: graceful close, reversible backup moves, exact app restart, then pending visual/health verification. It cannot delete data, force-kill, install updates, access credentials, or change firewall, proxy, hosts, registry, DNS, router, or security settings. Requires one-shot approval.", {
+                "type": "object", "additionalProperties": False,
+                "properties": {
+                    "application": {"type": "string", "minLength": 1, "maxLength": 200},
+                    "plan_id": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+                    "symptom": {"type": "string", "enum": ["blank_or_unrendered"]}
+                },
+                "required": ["application", "plan_id"]
+            }, self.windows_app_repair_apply),
             Tool("windows_open_url", "Open one exact public HTTP(S) URL in the user's default browser. Private networks, credential-bearing URLs, unsafe redirects, and non-web schemes are blocked. Requires one-shot approval.", {
                 "type": "object", "properties": {"url": {"type": "string"}}, "required": ["url"]
             }, self.windows_open_url),
@@ -5661,6 +5730,59 @@ class ToolBox:
         if not approved:
             raise PermissionError("An exact approved application target is required")
         return self.windows_apps.launch_app(application, approved=approved)
+
+    def windows_app_diagnose(
+        self,
+        application: str,
+        symptom: str = "auto",
+    ) -> dict[str, Any]:
+        self._computer_root()
+        try:
+            result = self.windows_app_repair.diagnose(application, symptom)
+        except PermissionError:
+            raise
+        except FileNotFoundError as exc:
+            raise FileNotFoundError(
+                "The profiled application or repair target is unavailable"
+            ) from exc
+        except OSError as exc:
+            raise RuntimeError(
+                "The profiled application changed or became unavailable during diagnosis"
+            ) from exc
+        return {
+            key: value for key, value in result.items()
+            if not str(key).startswith("_")
+        }
+
+    def windows_app_repair_apply(
+        self,
+        application: str,
+        plan_id: str,
+        symptom: str = "blank_or_unrendered",
+    ) -> dict[str, Any]:
+        if self.config.execution_mode != "trusted-host":
+            raise PermissionError("Host application execution is disabled")
+        approved = self._approved_arguments_for("windows_app_repair")
+        repair_plan = approved.get("repair_plan") if approved else None
+        if not isinstance(repair_plan, dict):
+            raise PermissionError("An exact approved application repair plan is required")
+        try:
+            return self.windows_app_repair.apply(
+                application,
+                plan_id,
+                symptom=symptom,
+                approved=repair_plan,
+            )
+        except PermissionError:
+            raise
+        except FileNotFoundError as exc:
+            raise FileNotFoundError(
+                "The approved application repair target is no longer available"
+            ) from exc
+        except OSError as exc:
+            raise RuntimeError(
+                "The approved application repair could not complete safely"
+            ) from exc
 
     def windows_open_url(self, url: str) -> dict[str, Any]:
         if self.config.execution_mode != "trusted-host":

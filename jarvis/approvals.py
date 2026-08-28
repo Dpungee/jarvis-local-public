@@ -14,6 +14,7 @@ SENSITIVE_ACTIONS: dict[str, tuple[str, str]] = {
     "computer_storage_report": ("access_private_files", "This inspects file and folder sizes outside the designated workspace."),
     "computer_write_file": ("change_outside_workspace", "This changes a file outside the designated workspace."),
     "windows_launch_app": ("control_desktop_application", "This launches the exact installed desktop application shown."),
+    "windows_app_repair": ("change_outside_workspace", "This gracefully closes the exact application, moves only its declared disposable renderer caches to the shown reversible backup, and restarts it."),
     "windows_open_url": ("control_desktop_application", "This opens the exact public URL shown in the default browser."),
     "desktop_active_window": ("access_private_screen", "This reads the title, application, and bounds of the current foreground window."),
     "desktop_interact": ("control_desktop_application", "This sends the exact bounded keyboard or mouse action batch shown to the verified foreground window."),
@@ -78,6 +79,43 @@ def _safe_argument_value(value: Any) -> Any:
     }
 
 
+def _application_repair_arguments(arguments: dict[str, Any]) -> dict[str, Any]:
+    """Keep the complete bounded repair plan human-readable or fail closed."""
+    safe: dict[str, Any] = {}
+    scalar_keys = {
+        "application",
+        "plan_id",
+        "symptom",
+        "repair_target",
+        "repair_operation",
+        "repair_directories",
+        "repair_bytes",
+        "repair_reversible",
+        "repair_plan_sha256",
+    }
+    move_keys = sorted(
+        key for key in arguments
+        if key.startswith("repair_move_") and key[12:].isdigit()
+    )
+    for key in sorted(scalar_keys):
+        if key in arguments:
+            safe[key] = _safe_argument_value(arguments[key])
+    for key in move_keys:
+        value = arguments[key]
+        if (
+            not isinstance(value, str)
+            or not value
+            or len(value) > 500
+            or any(character in value for character in "\x00\r\n")
+            or contains_secret(value)
+        ):
+            raise ValueError("Application repair approval target is not display-safe")
+        safe[key] = value
+    if "repair_plan" in arguments:
+        safe["repair_plan"] = _digest_descriptor(arguments["repair_plan"])
+    return safe
+
+
 def approval_resource(tool_name: str, arguments: dict[str, Any]) -> str:
     """Describe a sensitive action without persisting file contents or secrets."""
     canonical_arguments = json.dumps(
@@ -88,13 +126,16 @@ def approval_resource(tool_name: str, arguments: dict[str, Any]) -> str:
         default=str,
     ).encode("utf-8", errors="replace")
     safe: dict[str, Any] = {}
-    for key, value in sorted(arguments.items()):
-        if is_sensitive_key(key):
-            safe[key] = _digest_descriptor(value)
-        elif key.casefold() in {"content", "old_text", "new_text"}:
-            safe[key] = _digest_descriptor(str(value))
-        else:
-            safe[key] = _safe_argument_value(value)
+    if tool_name == "windows_app_repair":
+        safe = _application_repair_arguments(arguments)
+    else:
+        for key, value in sorted(arguments.items()):
+            if is_sensitive_key(key):
+                safe[key] = _digest_descriptor(value)
+            elif key.casefold() in {"content", "old_text", "new_text"}:
+                safe[key] = _digest_descriptor(str(value))
+            else:
+                safe[key] = _safe_argument_value(value)
     payload = {
         "tool": tool_name,
         "arguments_sha256": hashlib.sha256(canonical_arguments).hexdigest(),
@@ -102,6 +143,8 @@ def approval_resource(tool_name: str, arguments: dict[str, Any]) -> str:
     }
     serialized = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
     if len(serialized) > 1_900:
+        if tool_name == "windows_app_repair":
+            raise ValueError("Application repair approval summary is too large")
         payload["arguments"] = {
             key: value if isinstance(value, (bool, int, float)) or value is None
             else _digest_descriptor(value)

@@ -5,7 +5,35 @@ semantic versioning for tagged releases.
 
 ## [Unreleased]
 
-No changes yet.
+### Installed-application recovery
+
+- Added a profile-driven Windows application diagnosis contract that classifies
+  connectivity, rendering/cache, authentication, process, update, and unknown
+  failures from bounded evidence instead of model assertions.
+- Added the first reversible repair adapter for Epic Games Launcher renderer
+  caches: exact one-shot approval, graceful close only, metadata drift checks,
+  backup moves with rollback, and an exact no-shell restart.
+- The approval dialog shows every bounded source-to-backup move using relative
+  paths, the total directory and byte counts, reversibility, and the exact plan
+  digest before anything changes.
+- Repair plans bind the trusted machine-wide install target to its full
+  executable digest and recheck processes, cache metadata, and destination
+  ancestry at execution time.
+- Kept firewall, proxy, hosts, DNS, registry, credential, account, installer,
+  update, force-kill, and deletion actions outside the repair authority.
+- Repair application and repair verification are intentionally separate. A
+  restart or window title cannot prove that the UI rendered, and an unverified
+  repair cannot satisfy completion or become a reusable lesson.
+
+### Current limits
+
+- Executable repairs require a reviewed declarative application profile; the
+  first profile covers only Epic Games Launcher's disposable renderer caches.
+- Transient Screen Companion evidence is not yet bound to the repair receipt,
+  so applied repairs remain incomplete until real visual and health evidence is
+  available. Automatic repair-lesson persistence and recall therefore remain
+  disabled; an applied-but-unverified repair may leave an audit reflection but
+  cannot enter the reusable lesson store.
 
 ## [0.6.2] - 2026-08-28
 

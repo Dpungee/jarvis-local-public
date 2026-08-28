@@ -371,6 +371,55 @@ class WindowsAppController:
             "pid": process.pid,
         }
 
+    def launch_approved_snapshot(self, *, approved: dict[str, Any]) -> dict[str, Any]:
+        """Launch one already-profiled executable after an exact identity recheck."""
+        executable_value = str(approved.get("resolved_executable") or "")
+        application = str(approved.get("application") or "").strip()
+        source = str(approved.get("source") or "").strip()
+        if not executable_value or not application or not source:
+            raise PermissionError("Approved application snapshot is incomplete")
+        executable = _regular_file(Path(executable_value))
+        if (
+            executable.suffix.casefold() != ".exe"
+            or executable.name.casefold() in _BLOCKED_EXECUTABLES
+            or _BLOCKED_NAME_WORDS.search(application)
+        ):
+            raise PermissionError("Approved application target is not launchable")
+        details = executable.stat()
+        confirmed = {
+            "application": application,
+            "resolved_executable": str(executable),
+            "executable_bytes": details.st_size,
+            "executable_mtime_ns": details.st_mtime_ns,
+            "source": source,
+        }
+        expected_sha256 = str(approved.get("executable_sha256") or "")
+        if not re.fullmatch(r"[a-f0-9]{64}", expected_sha256):
+            raise PermissionError("Approved application content identity is missing")
+        confirmed["executable_sha256"] = _sha256_file(executable)
+        if confirmed != approved:
+            raise PermissionError("Approved application changed before launch")
+        flags = 0
+        if os.name == "nt":
+            flags = subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.DETACHED_PROCESS
+        process = self._launcher(
+            [str(executable)],
+            cwd=str(executable.parent),
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            env=self._safe_environment(),
+            creationflags=flags,
+            close_fds=True,
+        )
+        return {
+            "application": application,
+            "executable": str(executable),
+            "activation_id": None,
+            "launched": True,
+            "pid": process.pid,
+        }
+
     @staticmethod
     def url_snapshot(url: str) -> dict[str, Any]:
         text = str(url or "").strip()

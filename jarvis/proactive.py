@@ -475,7 +475,13 @@ def record_result_reflection(
     text = " ".join(str(result).strip().split())
     summary = text[:1000] or f"Task ended with status {status}."
     mistakes = prior_error or reason
-    if status == "complete":
+    lesson_eligible = getattr(result, "lesson_eligible", True) is True
+    if not lesson_eligible:
+        # Some incomplete effects (notably applied app repairs awaiting real
+        # screen/health evidence) remain useful audit reflections but must not
+        # become generic reusable lessons.
+        improvement = ""
+    elif status == "complete":
         if attempts > 1 or prior_error:
             improvement = (
                 "On similar work, inspect the previous failure before retrying, change the approach, "

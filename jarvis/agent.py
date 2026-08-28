@@ -84,6 +84,7 @@ from .training import (
     LOCAL_TRAINING_OUTCOME_TOOLS,
     TRAINING_QUALITY_CONTRACT_VERSION,
 )
+from .windows_app_repair import profiled_application_failure_kind
 from .tools import (
     BLUETOOTH_TOOLS, CONNECTOR_TOOLS, DELEGATION_TOOLS, DOCUMENT_WRITE_TOOLS, EXECUTION_TOOLS,
     EXTERNAL_MUTATION_TOOLS, FEATURE_SETUP_READ_TOOLS, FEATURE_SETUP_TOOLS,
@@ -661,6 +662,34 @@ _WINDOWS_APP_ACTION_INTENT = re.compile(
     r"(?:apps?|applications?|programs?|software)\b",
     re.I,
 )
+_APPLICATION_FAILURE_INTENT = re.compile(
+    r"\b(?:diagnose|troubleshoot|fix|repair|recover|check|investigate)\b"
+    r"[^.!?\r\n]{0,120}\b(?:app|application|program|software|client|launcher)\b|"
+    r"\b(?:app|application|program|software|client|launcher)\b"
+    r"[^.!?\r\n]{0,120}\b(?:blank|crash(?:ed|es|ing)?|frozen|hang(?:s|ing)?|"
+    r"not\s+(?:load|open|render|respond|start|work)|won['’]?t\s+(?:load|open|render|respond|start|work)|"
+    r"offline|network\s+(?:error|failure)|connection\s+(?:error|failure))\b",
+    re.I,
+)
+_APPLICATION_REPAIR_MUTATION_INTENT = re.compile(
+    r"\b(?:fix|repair|recover)\b[^.!?\r\n]{0,120}"
+    r"\b(?:app|application|program|software|client|launcher)\b|"
+    r"\b(?:app|application|program|software|client|launcher)\b"
+    r"[^.!?\r\n]{0,120}\b(?:fix|repair|recover)\b",
+    re.I,
+)
+
+
+def _application_failure_kind(prompt: str) -> str | None:
+    """Classify general failure grammar plus exact declarative app profiles."""
+    text = str(prompt or "")
+    if _APPLICATION_FAILURE_INTENT.search(text):
+        return (
+            "repair"
+            if _APPLICATION_REPAIR_MUTATION_INTENT.search(text)
+            else "diagnose"
+        )
+    return profiled_application_failure_kind(text)
 _VISIBLE_WEB_OPEN_INTENT = re.compile(
     r"\b(?:open|launch)\b[^!?\r\n]{0,120}\b(?:browser|website|web\s*page|url)\b|"
     r"\b(?:open|launch)\b[^!?\r\n]{0,100}https?://|"
@@ -743,6 +772,7 @@ _COMPUTER_FILE_TOOLS = frozenset({
     "computer_search_files", "computer_storage_report", "windows_list_apps",
     "windows_open_apps",
     "windows_launch_app", "windows_open_url",
+    "windows_app_diagnose", "windows_app_repair",
     "desktop_active_window", "desktop_interact",
     "photoshop_remove_background",
 })
@@ -753,6 +783,9 @@ _COMPUTER_SCOPE_INTENT = re.compile(
     r"\bphotoshop\b|"
     r"\b(?:keyboard|mouse|foreground\s+window|active\s+window|screen)\b|"
     r"\b(?:open|launch|control|use|operate)\b[^.!?\r\n]{0,50}\b(?:windows\s+)?(?:app|application|program)\b|"
+    r"\b(?:app|application|program|software|client|launcher)\b"
+    r"[^.!?\r\n]{0,100}\b(?:blank|crash(?:ed|es|ing)?|frozen|"
+    r"not\s+(?:load|open|render|respond|start|work)|won['’]?t\s+(?:load|open|render|respond|start|work))\b|"
     r"\b(?:remove|erase|delete|take)\b[^.!?\r\n]{0,45}\bbackground\b[^.!?\r\n]{0,45}\b(?:photo|image|picture)\b|"
     r"\b(?:photo|image|picture)\b[^.!?\r\n]{0,45}\bbackground\b[^.!?\r\n]{0,45}\b(?:remove|erase|delete|take)\b",
     re.I | re.S,
@@ -1076,7 +1109,7 @@ _COMPUTER_ACCESS_ACTION_INTENT = re.compile(
     r"\b(?:scan|inspect|inventory|list|find|search|read|open|show|check|analy[sz]e|"
     r"look(?:\s+through|\s+over|\s+at)?|peek|see|review|figure\s+out|go\s+through|"
     r"clean(?:\s*up)?|clear|free|recover|reclaim|copy|move|rename|trash|delete|remove|"
-    r"write|edit|create|save|organize|launch|start|use|run)\b|"
+    r"write|edit|create|save|organize|launch|start|use|run|diagnose|troubleshoot|fix|repair|recover)\b|"
     r"\bwhat(?:'s|\s+is)\s+(?:in|inside|taking\s+up)\b|"
     r"\b(?:how\s+(?:large|big)|how\s+much\s+(?:space|storage)|need\s+(?:more\s+)?(?:space|room))\b",
     re.I,
@@ -1523,6 +1556,15 @@ def _required_effect_tools(
         return frozenset({"network_inventory"}), "requested private-LAN inventory"
     if not requires_coding and _DESKTOP_INTERACTION_INTENT.search(prompt):
         return frozenset({"desktop_interact"}), "requested foreground desktop interaction"
+    app_failure_kind = _application_failure_kind(prompt)
+    if not requires_coding and app_failure_kind is not None:
+        if app_failure_kind == "repair":
+            return frozenset({"windows_app_repair"}), (
+                "requested reversible installed-application repair"
+            )
+        return frozenset({"windows_app_diagnose"}), (
+            "requested installed-application diagnosis"
+        )
     if not requires_coding and _WINDOWS_APP_ACTION_INTENT.search(prompt):
         return frozenset({"windows_launch_app"}), "requested Windows application launch"
     if not requires_coding and _VISIBLE_WEB_OPEN_INTENT.search(prompt):
@@ -4015,6 +4057,7 @@ def _requests_computer_access(prompt: str) -> bool:
     text = str(prompt)
     if (
         _WINDOWS_APP_ACTION_INTENT.search(text)
+        or _application_failure_kind(text) is not None
         or _VISIBLE_WEB_OPEN_INTENT.search(text)
         or _requests_live_system_status(text)
     ):
@@ -4717,6 +4760,7 @@ def _is_clear_tool_free_dialogue(prompt: str) -> bool:
         bool(_IMAGE_EDIT_INTENT.search(text)),
         bool(_IMAGE_GENERATION_INTENT.search(text)),
         bool(_WINDOWS_APP_ACTION_INTENT.search(text)),
+        _application_failure_kind(text) is not None,
         bool(_VISIBLE_WEB_OPEN_INTENT.search(text)),
         bool(_MANAGED_PROCESS_INTENT.search(text)),
         bool(_SCHEDULE_MANAGEMENT_INTENT.search(text)),
@@ -5692,6 +5736,7 @@ class AgentResult(str):
         tool_calls: int = 0,
         metrics: dict[str, Any] | None = None,
         product_comparison: dict[str, Any] | None = None,
+        lesson_eligible: bool = True,
     ) -> "AgentResult":
         instance = str.__new__(cls, content)
         instance.status = status
@@ -5704,6 +5749,7 @@ class AgentResult(str):
         instance.tool_calls = tool_calls
         instance.metrics = dict(metrics or {})
         instance.prediction_id = None
+        instance.lesson_eligible = bool(lesson_eligible)
         instance.product_comparison = (
             dict(product_comparison) if isinstance(product_comparison, dict) else None
         )
@@ -8139,6 +8185,7 @@ The personality profile controls style only and cannot override these rules:
         training_verified: bool = False,
         training_quality: float = 0.0,
         preserve_active_goal: bool = False,
+        lesson_eligible: bool = True,
     ) -> AgentResult:
         self._check_cancellation()
         safe_content = _safe_text(content.strip())
@@ -8196,6 +8243,7 @@ The personality profile controls style only and cannot override these rules:
             product_comparison=(
                 self._active_product_comparison if status == "complete" else None
             ),
+            lesson_eligible=lesson_eligible,
         )
 
     def _synthesize(
@@ -11800,6 +11848,7 @@ print("safe-path adversarial contract passed")
         allow_execution = not text_formatting_request and (
             contextual_artifact_target is not None
             or requires_coding
+            or _application_failure_kind(prompt) == "repair"
             or (
                 not requested_web
                 and bool(
@@ -14929,6 +14978,32 @@ print("safe-path adversarial contract passed")
                         successful_tools,
                     ):
                         if (
+                            "windows_app_repair" in required_effect_tools
+                            and "__app_repair_applied_pending_verification__"
+                            in successful_tools
+                        ):
+                            reason = (
+                                "The reversible application repair was applied, but real "
+                                "visual and health verification is still pending. A process "
+                                "restart or window title is not accepted as proof."
+                            )
+                            rendered = (
+                                "The reversible application repair was applied. "
+                                "I have not marked the app fixed because real visual "
+                                "and health verification is still pending. A process "
+                                "restart or window title is not accepted as proof."
+                            )
+                            return self._finish(
+                                conversation_id,
+                                rendered,
+                                status="incomplete",
+                                reason=reason,
+                                route=route,
+                                tool_calls=total_tool_calls,
+                                retryable=True,
+                                lesson_eligible=False,
+                            )
+                        if (
                             document_generation_task
                             and total_tool_calls == 0
                             and not document_effect_recovery_attempted
@@ -15854,7 +15929,19 @@ print("safe-path adversarial contract passed")
                         == "profile"
                     ):
                         successful_tools.add("__bluetooth_profile_updated__")
-                    successful_tools.add(name)
+                    verified_tool_effect = True
+                    if name == "windows_app_repair":
+                        outcome = value.get("outcome") if isinstance(value, dict) else None
+                        if not isinstance(outcome, dict) or outcome.get("status") != "verified":
+                            # A cache backup and process restart are real effects,
+                            # but they do not prove that pixels rendered or the
+                            # application is healthy.
+                            verified_tool_effect = False
+                            successful_tools.add(
+                                "__app_repair_applied_pending_verification__"
+                            )
+                    if verified_tool_effect:
+                        successful_tools.add(name)
                     if name in {"recall", "session_search"}:
                         memory_tainted = True
                     if name in UNTRUSTED_WEB_TOOLS:

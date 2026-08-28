@@ -27,6 +27,7 @@ EXPECTED_SENSITIVE_TOOLS = frozenset({
     "computer_storage_report",
     "computer_write_file",
     "windows_launch_app",
+    "windows_app_repair",
     "windows_open_url",
     "desktop_active_window",
     "desktop_interact",

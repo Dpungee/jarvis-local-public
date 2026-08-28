@@ -185,6 +185,12 @@ class CapabilityGatewayTests(unittest.TestCase):
                 with self.assertRaises(ConnectorError):
                     self.gateway.validate_manifest_document(json.dumps(manifest))
 
+    def test_malformed_workspace_manifest_is_rejected_at_file_boundary(self):
+        self.manifest_path.write_text("{not valid json", encoding="utf-8")
+
+        with self.assertRaises(ConnectorError):
+            self.gateway.validate_workspace_manifest("connector.json")
+
     def test_toolbox_uses_exact_one_shot_approval_for_connector_calls(self):
         self.install()
         config = replace(

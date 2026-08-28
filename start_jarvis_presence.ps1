@@ -1,81 +1,188 @@
+param(
+    [ValidateSet("start", "status", "restart", "stop")]
+    [string]$Action = "start",
+    [switch]$NoBrowser
+)
+
 Set-StrictMode -Version 2.0
 $ErrorActionPreference = "Stop"
 $project = [IO.Path]::GetFullPath($PSScriptRoot)
+. (Join-Path $project "presence_lifecycle.ps1")
 
-$setupPython = Get-Command -Name "python" -CommandType Application -ErrorAction Stop | Select-Object -First 1
-& $setupPython.Source -X utf8 -m jarvis.provider_setup --interactive
-$setupExit = $LASTEXITCODE
-if ($null -eq $setupExit -or $setupExit -ne 0) {
-    exit $(if ($null -eq $setupExit) { 1 } else { $setupExit })
+$pythonCommand = Get-Command -Name "python" -CommandType Application -ErrorAction Stop |
+    Select-Object -First 1
+
+if ($Action -in @("start", "restart")) {
+    & $pythonCommand.Source -X utf8 -m jarvis.provider_setup --interactive
+    $setupExit = $LASTEXITCODE
+    if ($null -eq $setupExit -or $setupExit -ne 0) {
+        exit $(if ($null -eq $setupExit) { 1 } else { $setupExit })
+    }
 }
 
-function Get-PresenceRuntimeConfig {
-    $pythonCommand = Get-Command -Name "python" -CommandType Application -ErrorAction Stop | Select-Object -First 1
-    $configCode = @"
-import json
-import sys
-from pathlib import Path
-from jarvis.config import Config
-config = Config.load()
-pythonw = Path(sys.executable).with_name('pythonw.exe')
-print('JARVIS_PRESENCE_CONFIG=' + json.dumps({'port': config.presence_port, 'pythonw': str(pythonw.resolve())}, ensure_ascii=True))
-"@
-    $output = @(& $pythonCommand.Source -X utf8 -c $configCode 2>&1)
-    if ($LASTEXITCODE -ne 0) {
-        throw "Could not load the Jarvis Presence configuration."
-    }
-    $prefix = "JARVIS_PRESENCE_CONFIG="
-    $line = $output |
-        ForEach-Object { "$_".Trim() } |
-        Where-Object { $_.StartsWith($prefix, [StringComparison]::Ordinal) } |
-        Select-Object -Last 1
-    if (-not $line) {
-        throw "Jarvis did not return its Presence runtime configuration."
-    }
+$runtime = Get-PresenceRuntimeConfig -PythonPath $pythonCommand.Source
+$taskIdentity = Resolve-PresenceTaskIdentity -Project $project
+
+function Get-OwnedPresenceTask {
     try {
-        $decoded = $line.Substring($prefix.Length) | ConvertFrom-Json -ErrorAction Stop
-        $port = [int]$decoded.port
-        if ($port -lt 1024 -or $port -gt 65535) {
-            throw "Presence port was outside 1024..65535"
-        }
-        $pythonw = [IO.Path]::GetFullPath("$($decoded.pythonw)")
-        if (-not (Test-Path -LiteralPath $pythonw -PathType Leaf)) {
-            throw "pythonw executable does not exist"
-        }
-        return [pscustomobject]@{ Port = $port; Pythonw = $pythonw }
+        $tasks = @(Get-ScheduledTask `
+            -TaskName $taskIdentity.TaskName `
+            -TaskPath $taskIdentity.TaskPath `
+            -ErrorAction Stop)
     } catch {
-        throw "Jarvis returned malformed Presence runtime configuration: $($_.Exception.Message)"
+        if (
+            $_.CategoryInfo.Category -eq [System.Management.Automation.ErrorCategory]::ObjectNotFound -or
+            $_.Exception -is [System.Management.Automation.ItemNotFoundException] -or
+            "$($_.FullyQualifiedErrorId)" -match '(?i)(not.?found|no.?matching)' -or
+            "$($_.Exception.Message)" -match '(?i)no\s+MSFT_ScheduledTask\s+objects?\s+found'
+        ) {
+            return $null
+        }
+        throw
     }
+    if ($tasks.Count -gt 1) {
+        throw "More than one root Task Scheduler entry matched '$($taskIdentity.TaskName)'."
+    }
+    if ($tasks.Count -eq 0) {
+        return $null
+    }
+    Assert-PresenceTaskOwnership `
+        -Task $tasks[0] `
+        -TaskIdentity $taskIdentity `
+        -Runtime $runtime `
+        -Project $project
+    return $tasks[0]
 }
 
-$runtime = Get-PresenceRuntimeConfig
-$url = "http://127.0.0.1:$($runtime.Port)/"
-$health = "${url}api/health"
+function Stop-CurrentPresence {
+    $health = Get-PresenceHealth -HealthUrl $runtime.HealthUrl
+    if ($null -ne $health) {
+        Assert-PresenceHealthIdentity -Health $health -Runtime $runtime
+    }
+    $task = Get-OwnedPresenceTask
+    if ($null -ne $task -and "$($task.State)" -ieq "Running") {
+        $previousEpoch = if ($null -eq $health) { $null } else { "$($health.runtime_epoch)" }
+        Stop-ScheduledTask `
+            -TaskName $taskIdentity.TaskName `
+            -TaskPath $taskIdentity.TaskPath `
+            -ErrorAction Stop
+        Wait-PresenceOffline -HealthUrl $runtime.HealthUrl
+        Remove-PresenceManualState -Runtime $runtime
+        return $previousEpoch
+    }
+    if ($null -ne $health) {
+        return Stop-ExactPresence -Runtime $runtime -Health $health
+    }
+    return Stop-ExactPresenceFromState -Runtime $runtime
+}
 
-function Test-PresenceHealth {
+function Start-CurrentPresence {
+    param([AllowNull()][string]$PreviousRuntimeEpoch = $null)
+
+    $health = Get-PresenceHealth -HealthUrl $runtime.HealthUrl
+    if ($null -ne $health) {
+        Assert-PresenceHealthIdentity -Health $health -Runtime $runtime
+        return $health
+    }
+
+    $task = Get-OwnedPresenceTask
+    if ($null -ne $task) {
+        Start-ScheduledTask `
+            -TaskName $taskIdentity.TaskName `
+            -TaskPath $taskIdentity.TaskPath `
+            -ErrorAction Stop
+        return Wait-PresenceHealth `
+            -Runtime $runtime `
+            -PreviousRuntimeEpoch $PreviousRuntimeEpoch
+    }
+
+    $oldLaunchMode = $env:JARVIS_PRESENCE_LAUNCH_MODE
+    $process = $null
     try {
-        $response = Invoke-RestMethod -Uri $health -Method Get -TimeoutSec 2 -ErrorAction Stop
-        return $response.service -eq "jarvis-presence" -and $response.ready -eq $true
+        $env:JARVIS_PRESENCE_LAUNCH_MODE = "manual"
+        $process = Start-Process `
+            -FilePath $runtime.Pythonw `
+            -ArgumentList @("-X", "utf8", "-m", "jarvis", "presence", "--no-browser") `
+            -WorkingDirectory $project `
+            -WindowStyle Hidden `
+            -PassThru
+    } finally {
+        if ($null -eq $oldLaunchMode) {
+            Remove-Item Env:JARVIS_PRESENCE_LAUNCH_MODE -ErrorAction SilentlyContinue
+        } else {
+            $env:JARVIS_PRESENCE_LAUNCH_MODE = $oldLaunchMode
+        }
+    }
+
+    try {
+        $health = Wait-PresenceHealth `
+            -Runtime $runtime `
+            -PreviousRuntimeEpoch $PreviousRuntimeEpoch
+        if ("$($health.launch_mode)" -cne "manual") {
+            throw "The new Presence process did not identify itself as a manual launch."
+        }
+        Write-PresenceManualState -Runtime $runtime -Health $health -Process $process
+        return $health
     } catch {
-        return $false
+        if ($null -ne $process -and -not $process.HasExited) {
+            Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue
+        }
+        Remove-PresenceManualState -Runtime $runtime
+        throw
     }
 }
 
-if (-not (Test-PresenceHealth)) {
-    Start-Process `
-        -FilePath $runtime.Pythonw `
-        -ArgumentList @("-X", "utf8", "-m", "jarvis", "presence", "--no-browser") `
-        -WorkingDirectory $project `
-        -WindowStyle Hidden
+$lifecycleMutex = New-Object System.Threading.Mutex($false, $taskIdentity.MutexName)
+$mutexAcquired = $false
+try {
+    try {
+        $mutexAcquired = $lifecycleMutex.WaitOne([TimeSpan]::Zero)
+    } catch [System.Threading.AbandonedMutexException] {
+        $mutexAcquired = $true
+    }
+    if (-not $mutexAcquired) {
+        throw "Another Jarvis Presence lifecycle action is already in progress for this user."
+    }
 
-    $deadline = [DateTime]::UtcNow.AddSeconds(30)
-    while ([DateTime]::UtcNow -lt $deadline -and -not (Test-PresenceHealth)) {
-        Start-Sleep -Milliseconds 250
+    switch ($Action) {
+        "status" {
+            $health = Get-PresenceHealth -HealthUrl $runtime.HealthUrl
+            if ($null -eq $health) {
+                throw "JARVIS Presence is offline for this installation."
+            }
+            Assert-PresenceHealthIdentity -Health $health -Runtime $runtime
+            Write-Host (
+                "JARVIS Presence is online at {0} (version {1}, PID {2}, mode {3}, epoch {4})." -f
+                $runtime.Url, $health.version, $health.process_id, $health.launch_mode, $health.runtime_epoch
+            )
+            return
+        }
+        "stop" {
+            $previousEpoch = Stop-CurrentPresence
+            if ($null -eq $previousEpoch) {
+                Write-Host "JARVIS Presence was already offline for this installation."
+            } else {
+                Write-Host "JARVIS Presence stopped."
+            }
+            return
+        }
+        "restart" {
+            $previousEpoch = Stop-CurrentPresence
+            $health = Start-CurrentPresence -PreviousRuntimeEpoch $previousEpoch
+            Write-Host "JARVIS Presence restarted with epoch $($health.runtime_epoch)."
+        }
+        default {
+            $health = Start-CurrentPresence
+        }
     }
-    if (-not (Test-PresenceHealth)) {
-        throw "Jarvis Presence did not become healthy within 30 seconds."
+
+    if (-not $NoBrowser) {
+        Start-Process $runtime.Url
     }
+    Write-Host "JARVIS Presence is online at $($runtime.Url)"
+} finally {
+    if ($mutexAcquired) {
+        [void]$lifecycleMutex.ReleaseMutex()
+    }
+    $lifecycleMutex.Dispose()
 }
-
-Start-Process $url
-Write-Host "JARVIS Presence is online at $url"

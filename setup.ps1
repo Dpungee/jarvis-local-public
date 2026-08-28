@@ -235,6 +235,10 @@ if ($missingModels.Count -gt 0) {
 }
 
 Write-Host "[4/4] Verifying the installation..."
+Write-Host "Checking that every configured model route can answer a first turn..."
+Invoke-NativeCommand -FilePath $python -ArgumentList @(
+    "-X", "utf8", "-m", "jarvis.provider_setup", "--canary"
+)
 Invoke-NativeCommand -FilePath $python -ArgumentList @("-X", "utf8", "-m", "jarvis", "doctor")
 Write-Host ""
 Write-Host "Ready. Double-click start_jarvis_presence.bat to open the recommended browser interface."

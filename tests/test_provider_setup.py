@@ -8,6 +8,7 @@ import tempfile
 import unittest
 from contextlib import closing
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 import jarvis.config as config_module
@@ -67,31 +68,55 @@ class ProviderSetupTests(unittest.TestCase):
             connection.commit()
         self.assertFalse(provider_setup.is_setup_complete(self.root, environ={}))
 
-    def test_explicit_process_configuration_counts_as_migrated(self) -> None:
-        self.assertTrue(
+    def test_ambient_process_configuration_does_not_suppress_local_setup(self) -> None:
+        self.assertFalse(
             provider_setup.is_setup_complete(
                 self.root,
                 environ={"JARVIS_FAST_MODEL": "claude-cli:haiku"},
             )
         )
-        self.assertTrue(
+        self.assertFalse(
             provider_setup.is_setup_complete(
                 self.root,
                 environ={"OPENAI_API_KEY": "presence-only-not-read"},
             )
         )
 
-    def test_api_key_only_install_is_ready_without_cli_or_prompt(self) -> None:
-        input_fn = Mock(side_effect=AssertionError("API-key setup must not prompt"))
-        result = provider_setup.ensure_ready(
-            False,
-            self.root,
-            environ={"OPENAI_API_KEY": "presence-only-not-read"},
-            input_fn=input_fn,
-            stdin_isatty=False,
-        )
-        self.assertEqual(result.state, "existing")
+    def test_api_key_only_headless_install_requires_local_setup_without_prompting(self) -> None:
+        input_fn = Mock(side_effect=AssertionError("headless setup must not prompt"))
+        with self.assertRaisesRegex(provider_setup.ProviderSetupRequired, "provider setup"):
+            provider_setup.ensure_ready(
+                False,
+                self.root,
+                environ={"OPENAI_API_KEY": "presence-only-not-read"},
+                input_fn=input_fn,
+                stdin_isatty=False,
+            )
         input_fn.assert_not_called()
+
+    def test_copied_template_provider_values_do_not_suppress_provider_review(self) -> None:
+        copied = """\
+JARVIS_WORKSPACE=C:\\custom-workspace
+JARVIS_MODEL=auto
+JARVIS_FAST_MODEL=qwen3.5:9b
+JARVIS_REASONING_MODEL=gpt-oss:20b
+JARVIS_CODING_MODEL=qwen3-coder:30b
+JARVIS_DEEP_MODEL=qwen3-coder:30b
+JARVIS_BACKGROUND_MODEL=fast
+JARVIS_OLLAMA_ENABLED=true
+JARVIS_OPENAI_API_ENABLED=false
+JARVIS_ANTHROPIC_API_ENABLED=false
+JARVIS_CODEX_CLI_ENABLED=false
+JARVIS_CLAUDE_CLI_ENABLED=false
+"""
+        (self.root / ".env").write_text(copied, encoding="utf-8")
+        self.assertFalse(provider_setup.is_setup_complete(self.root, environ={}))
+
+    def test_wizard_marker_distinguishes_saved_choice_from_template_defaults(self) -> None:
+        provider_setup.persist_provider_choice("codex", self.root)
+        saved = (self.root / ".env").read_text(encoding="utf-8")
+        self.assertIn(provider_setup._SETUP_MARKER, saved)
+        self.assertTrue(provider_setup.is_setup_complete(self.root, environ={}))
 
     def test_empty_api_key_environment_does_not_skip_first_run_setup(self) -> None:
         for value in ("", "   ", "\t"):
@@ -256,6 +281,71 @@ class ProviderSetupTests(unittest.TestCase):
             )
         login.assert_called_once()
         self.assertTrue((self.root / ".env").is_file())
+
+    @staticmethod
+    def _canary_config() -> SimpleNamespace:
+        return SimpleNamespace(
+            model="auto",
+            fast_model="codex-cli:fast-one",
+            reasoning_model="codex-cli:reason-one",
+            coding_model="codex-cli:code-one",
+            deep_model="codex-cli:code-one",
+            background_model="fast",
+            learning_model="codex-cli:fast-one",
+        )
+
+    def test_first_turn_canary_checks_each_unique_route_without_tools_or_secrets(self) -> None:
+        client = Mock()
+        client.chat.return_value = {"content": provider_setup._CANARY_SENTINEL}
+        result = provider_setup.run_provider_canary(
+            config=self._canary_config(),
+            client_factory=Mock(return_value=client),
+        )
+
+        self.assertEqual(len(result.checks), 3)
+        self.assertEqual(client.chat.call_count, 3)
+        tested_models = {call.args[2] for call in client.chat.call_args_list}
+        self.assertEqual(
+            tested_models,
+            {"codex-cli:fast-one", "codex-cli:reason-one", "codex-cli:code-one"},
+        )
+        for call in client.chat.call_args_list:
+            messages, tools, _model = call.args
+            self.assertEqual(tools, [])
+            self.assertTrue(call.kwargs["think"] is False)
+            self.assertEqual(call.kwargs["keep_alive"], "0")
+            rendered = repr(messages)
+            self.assertIn(provider_setup._CANARY_SENTINEL, rendered)
+            self.assertNotIn("API_KEY", rendered)
+        client.close.assert_called_once_with()
+
+    def test_first_turn_canary_fails_closed_with_retry_guidance_and_no_output_echo(self) -> None:
+        client = Mock()
+        client.chat.return_value = {"content": "private provider output"}
+        with self.assertRaises(provider_setup.ProviderSetupRequired) as raised:
+            provider_setup.run_provider_canary(
+                config=self._canary_config(),
+                client_factory=Mock(return_value=client),
+            )
+        message = str(raised.exception)
+        self.assertIn("--canary", message)
+        self.assertNotIn("private provider output", message)
+        client.close.assert_called_once_with()
+
+    def test_first_turn_canary_sanitizes_configured_model_in_failure_message(self) -> None:
+        config = self._canary_config()
+        config.fast_model = "codex-cli:model\nINJECTED"
+        client = Mock()
+        client.chat.side_effect = RuntimeError("secret upstream diagnostic")
+        with self.assertRaises(provider_setup.ProviderSetupRequired) as raised:
+            provider_setup.run_provider_canary(
+                config=config,
+                client_factory=Mock(return_value=client),
+            )
+        message = str(raised.exception)
+        self.assertNotIn("\nINJECTED", message)
+        self.assertNotIn("secret upstream diagnostic", message)
+        self.assertIn("--canary", message)
 
     def test_auth_probe_discards_cli_output_and_never_reads_session_files(self) -> None:
         executable = self.root / ("codex.exe" if os.name == "nt" else "codex")

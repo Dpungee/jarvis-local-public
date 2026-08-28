@@ -162,96 +162,10 @@ function Wait-TaskStopped {
     throw "Task '$Name' did not stop within 15 seconds."
 }
 
-function Test-PresenceHealth {
-    [CmdletBinding()]
-    param([Parameter(Mandatory = $true)][string]$HealthUrl, [switch]$RequireFresh)
-
-    try {
-        $response = Invoke-RestMethod -Uri $HealthUrl -Method Get -TimeoutSec 2 -ErrorAction Stop
-        if ($response.service -ne "jarvis-presence" -or $response.ready -ne $true) {
-            return $false
-        }
-        if ($RequireFresh) {
-            $uptime = 0.0
-            if (-not [double]::TryParse(
-                "$($response.uptime_seconds)",
-                [Globalization.NumberStyles]::Float,
-                [Globalization.CultureInfo]::InvariantCulture,
-                [ref]$uptime
-            )) {
-                return $false
-            }
-            return $uptime -ge 0 -and $uptime -le 45
-        }
-        return $true
-    } catch {
-        return $false
-    }
-}
-
-function Wait-PresenceOffline {
-    [CmdletBinding()]
-    param([Parameter(Mandatory = $true)][string]$HealthUrl, [int]$Attempts = 60)
-
-    for ($attempt = 0; $attempt -lt $Attempts; $attempt++) {
-        if (-not (Test-PresenceHealth -HealthUrl $HealthUrl)) {
-            return
-        }
-        Start-Sleep -Milliseconds 250
-    }
-    throw "The previous Presence endpoint remained healthy after its scheduled task stopped; a fresh launch cannot be verified."
-}
-
-function Wait-PresenceHealth {
-    [CmdletBinding()]
-    param([Parameter(Mandatory = $true)][string]$HealthUrl, [int]$Attempts = 120)
-
-    for ($attempt = 0; $attempt -lt $Attempts; $attempt++) {
-        if (Test-PresenceHealth -HealthUrl $HealthUrl -RequireFresh) {
-            return
-        }
-        Start-Sleep -Milliseconds 250
-    }
-    throw "Presence task did not produce a fresh healthy endpoint within 30 seconds."
-}
-
-function Get-PresenceRuntimeConfig {
-    [CmdletBinding()]
-    param([Parameter(Mandatory = $true)][string]$PythonPath)
-
-    $configCode = @"
-import json
-import sys
-from pathlib import Path
-from jarvis.config import Config
-config = Config.load()
-pythonw = Path(sys.executable).with_name('pythonw.exe')
-print('JARVIS_PRESENCE_CONFIG=' + json.dumps({'port': config.presence_port, 'pythonw': str(pythonw.resolve())}, ensure_ascii=True))
-"@
-    $output = @(Invoke-NativeCommand -FilePath $PythonPath -ArgumentList @("-X", "utf8", "-c", $configCode))
-    $prefix = "JARVIS_PRESENCE_CONFIG="
-    $line = $output |
-        ForEach-Object { "$_".Trim() } |
-        Where-Object { $_.StartsWith($prefix, [StringComparison]::Ordinal) } |
-        Select-Object -Last 1
-    if (-not $line) {
-        throw "Jarvis did not return its Presence runtime configuration."
-    }
-    try {
-        $decoded = $line.Substring($prefix.Length) | ConvertFrom-Json -ErrorAction Stop
-        $port = [int]$decoded.port
-        if ($port -lt 1024 -or $port -gt 65535) {
-            throw "Presence port was outside 1024..65535"
-        }
-        $pythonw = [IO.Path]::GetFullPath("$($decoded.pythonw)")
-        if (-not (Test-Path -LiteralPath $pythonw -PathType Leaf)) {
-            throw "pythonw executable does not exist"
-        }
-        return [pscustomobject]@{ Port = $port; Pythonw = $pythonw }
-    } catch {
-        throw "Jarvis returned malformed Presence runtime configuration: $($_.Exception.Message)"
-    }
-}
+# The shared lifecycle layer adds exact runtime identity checks and exact-PID
+# manual-process ownership while this installer retains its transactional task
+# rollback.
+. (Join-Path $PSScriptRoot "presence_lifecycle.ps1")
 
 $pythonCommand = Get-Command -Name "python" -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
 if (-not $pythonCommand) {
@@ -321,13 +235,35 @@ try {
 
     $mutationStarted = $false
     try {
+        $previousHealth = Get-PresenceHealth -HealthUrl $runtime.HealthUrl
+        if ($null -ne $previousHealth -and -not (
+            Test-PresenceHealthIdentity -Health $previousHealth -Runtime $runtime
+        )) {
+            throw "The configured Presence port belongs to a different or stale Jarvis installation."
+        }
+        $previousRuntimeEpoch = if ($null -eq $previousHealth) {
+            $null
+        } else {
+            "$($previousHealth.runtime_epoch)"
+        }
+
         if ($null -ne $existing -and $previousWasRunning) {
             $mutationStarted = $true
             Stop-ScheduledTask -TaskName $taskName -TaskPath $taskPath -ErrorAction Stop
             Wait-TaskStopped -Name $taskName
-            Wait-PresenceOffline -HealthUrl $health
-        } elseif (Test-PresenceHealth -HealthUrl $health) {
-            throw "The configured Presence port is already serving Jarvis outside the owned running task; a fresh launch cannot be verified."
+            Wait-PresenceOffline -HealthUrl $runtime.HealthUrl
+        } elseif ($null -ne $previousHealth) {
+            if ("$($previousHealth.launch_mode)" -cne "manual") {
+                throw "The configured Presence port is already serving this Jarvis installation outside the owned task, but it is not a verified manual launch."
+            }
+            $mutationStarted = $true
+            Stop-ExactPresence -Runtime $runtime -Health $previousHealth | Out-Null
+        } else {
+            $savedEpoch = Stop-ExactPresenceFromState -Runtime $runtime
+            if ($null -ne $savedEpoch) {
+                $mutationStarted = $true
+                $previousRuntimeEpoch = $savedEpoch
+            }
         }
 
         $mutationStarted = $true
@@ -349,7 +285,9 @@ try {
         Assert-TaskOwnership -Task $registered -ExpectedDescription $marker -ExpectedSid $sid -ExpectedProject $project -ExpectedPython $pythonw -ExpectedArguments $arguments
 
         Start-ScheduledTask -TaskName $taskName -TaskPath $taskPath -ErrorAction Stop
-        Wait-PresenceHealth -HealthUrl $health
+        Wait-PresenceHealth `
+            -Runtime $runtime `
+            -PreviousRuntimeEpoch $previousRuntimeEpoch | Out-Null
     } catch {
         $primaryError = $_
         $rollbackErrors = New-Object 'System.Collections.Generic.List[string]'

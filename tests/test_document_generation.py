@@ -70,6 +70,7 @@ class DocumentGenerationTests(unittest.TestCase):
         self.assertLessEqual(len(skill["content"].encode("utf-8")), 32 * 1024)
         self.assertIn("build_document", skill["content"])
         self.assertIn("exact workspace path", skill["content"])
+        self.assertIn("sheet_name", skill["content"])
 
     def test_fresh_setup_installs_only_the_declared_document_extra(self) -> None:
         setup = ROOT.joinpath("setup.ps1").read_text(encoding="utf-8")
@@ -233,6 +234,112 @@ class DocumentGenerationTests(unittest.TestCase):
                 )
             finally:
                 memory.close()
+
+    @unittest.skipUnless(
+        importlib.util.find_spec("openpyxl"),
+        "document-generation extra is not installed in this test environment",
+    )
+    def test_xlsx_structured_spec_preserves_exact_sheet_and_table(self) -> None:
+        from openpyxl import load_workbook
+
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            (workspace / "metrics.json").write_text(
+                json.dumps({
+                    "title": "Acceptance metrics",
+                    "sheet_name": "Metrics",
+                    "rows": [
+                        ["Check", "Result"],
+                        ["Document generation", "Passed"],
+                    ],
+                }),
+                encoding="utf-8",
+            )
+            result = build_offline_document(
+                workspace, "metrics.json", "metrics.xlsx", "xlsx"
+            )
+            workbook = load_workbook(workspace / "metrics.xlsx", data_only=False)
+            self.assertEqual(workbook.sheetnames, ["Metrics"])
+            sheet = workbook["Metrics"]
+            self.assertEqual(sheet.max_row, 2)
+            self.assertEqual(sheet.max_column, 2)
+            self.assertEqual(
+                list(sheet.values),
+                [("Check", "Result"), ("Document generation", "Passed")],
+            )
+            self.assertEqual(result["sheet_names"], ["Metrics"])
+            self.assertEqual(result["rows"], 2)
+            self.assertEqual(result["columns"], 2)
+
+    @unittest.skipUnless(
+        importlib.util.find_spec("openpyxl"),
+        "document-generation extra is not installed in this test environment",
+    )
+    def test_toolbox_xlsx_auto_detects_json_and_cleans_temporary_spec(self) -> None:
+        from openpyxl import load_workbook
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            workspace = root / "workspace"
+            data = root / "data"
+            workspace.mkdir()
+            data.mkdir()
+            config = replace(
+                Config.load(),
+                workspace=workspace,
+                data_dir=data,
+                vault_dir=None,
+                autonomy="autonomous",
+                execution_mode="disabled",
+                computer_access="disabled",
+                external_access="disabled",
+            )
+            memory = Memory(data / "jarvis.db")
+            try:
+                toolbox = ToolBox(config, memory)
+                result = json.loads(toolbox.execute("build_document", {
+                    "path": "metrics.xlsx",
+                    "document_type": "xlsx",
+                    "content": json.dumps({
+                        "title": "Acceptance metrics",
+                        "sheet_name": "Metrics",
+                        "rows": [["Check", "Result"], ["Build", "Passed"]],
+                    }),
+                }))
+                self.assertTrue(result["ok"])
+                self.assertTrue(result["result"]["verified"])
+                self.assertEqual(result["result"]["sheet_names"], ["Metrics"])
+                workbook = load_workbook(workspace / "metrics.xlsx", data_only=False)
+                self.assertEqual(list(workbook["Metrics"].values), [
+                    ("Check", "Result"), ("Build", "Passed"),
+                ])
+                self.assertEqual(
+                    list(workspace.glob(".jarvis-document-source-*")),
+                    [],
+                )
+            finally:
+                memory.close()
+
+    @unittest.skipUnless(
+        importlib.util.find_spec("openpyxl"),
+        "document-generation extra is not installed in this test environment",
+    )
+    def test_markdown_spreadsheet_table_is_not_flattened_into_prose(self) -> None:
+        from openpyxl import load_workbook
+
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            (workspace / "metrics.md").write_text(
+                "# Acceptance metrics\nSheet: Metrics\n\n"
+                "| Check | Result |\n| --- | --- |\n| Build | Passed |\n",
+                encoding="utf-8",
+            )
+            build_offline_document(workspace, "metrics.md", "metrics.xlsx", "xlsx")
+            workbook = load_workbook(workspace / "metrics.xlsx", data_only=False)
+            self.assertEqual(workbook.sheetnames, ["Metrics"])
+            self.assertEqual(list(workbook["Metrics"].values), [
+                ("Check", "Result"), ("Build", "Passed"),
+            ])
 
     def test_offline_builder_reports_missing_document_extra_clearly(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

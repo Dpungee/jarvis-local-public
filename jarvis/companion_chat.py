@@ -120,6 +120,16 @@ _CONTROL_SPEECH_ACT = re.compile(
     r"[?!. ]*$",
     re.I,
 )
+_CONTROL_CONFIRMATION_SUFFIX = re.compile(
+    r"(?:,?\s+(?:and|then)\s+)(?:please\s+)?(?:"
+    r"confirm(?:\s+(?:the\s+)?(?:change|state|status|result))?|"
+    r"report(?:\s+(?:the\s+)?(?:new\s+)?(?:state|status|result))?|"
+    r"tell\s+me(?:\s+(?:the\s+)?(?:new\s+)?(?:state|status|result))?|"
+    r"let\s+me\s+know(?:\s+(?:that\s+)?(?:it|the\s+mode|screen\s+companion)"
+    r"\s+(?:is|was)\s+(?:on|off|paused|resumed|enabled|disabled))?"
+    r")\s*$",
+    re.I,
+)
 _NEGATED_CONTROL = re.compile(
     r"\b(?:do\s+not|don['’]?t|dont|never|not)\b[^.!?\r\n]{0,55}"
     r"\b(?:turn|switch|set|change|put|pause|resume|unpause|stop|start|enable|disable)\b",
@@ -203,7 +213,7 @@ def screen_companion_chat_intent(
 
     speech_act = _CONTROL_SPEECH_ACT.fullmatch(text)
     if speech_act is not None:
-        body = str(speech_act.group("body"))
+        body = _CONTROL_CONFIRMATION_SUFFIX.sub("", str(speech_act.group("body"))).strip()
         mode_words = {
             match.casefold()
             for match in re.findall(r"\b(?:observe|suggest|collaborate)\b", body, re.I)

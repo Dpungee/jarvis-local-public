@@ -10,11 +10,11 @@ Create finished office documents with the deterministic `build_document` tool. D
 ## Workflow
 
 1. Infer sensible defaults from the request. Ask a question only when a truly necessary topic or target filename is missing.
-2. Prepare the real content as bounded Markdown. Use headings, paragraphs, bullets, and Markdown tables. Never use placeholder prose in a requested deliverable.
+2. Prepare the real content as bounded Markdown for Word, PDF, or PowerPoint. For an Excel workbook, use bounded JSON with `title`, the exact `sheet_name`, and `rows` so the requested table is structural rather than prose. Never use placeholder prose in a requested deliverable.
 3. Call `build_document` exactly once with:
    - `path`: the exact requested workspace output path, including `.docx`, `.pdf`, `.xlsx`, or `.pptx`;
    - `document_type`: `docx`, `pdf`, `xlsx`, or `pptx`;
-   - `content`: the complete Markdown source.
+   - `content`: the complete Markdown source, or the complete JSON object for Excel.
 4. Treat the returned artifact as created only when `verified` is true and the returned byte count is nonzero.
 5. Report the exact workspace path. If the tool reports an error, state the error and do not claim success.
 
@@ -30,7 +30,7 @@ Start with one `#` title, then use `##` section headings and short readable para
 
 ### Excel (.xlsx)
 
-Use Markdown tables for structured data; keep headers explicit and cells free of executable formulas.
+Use JSON such as `{"title":"Metrics","sheet_name":"Metrics","rows":[["Check","Result"],["Build","Passed"]]}`. Keep headers explicit and cells free of executable formulas. The builder returns verified sheet names and table dimensions; compare those fields to the request before reporting success.
 
 - Reports: lead with the answer or recommendation, include evidence and caveats, and finish with clear next steps.
 - Never include credentials or secrets. The builder also redacts recognized secret forms and neutralizes spreadsheet formulas.

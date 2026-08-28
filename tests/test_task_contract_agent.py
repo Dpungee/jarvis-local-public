@@ -232,10 +232,27 @@ class TaskContractAgentIntegrationTests(unittest.TestCase):
                 )
                 self.assertIsNone(result)
                 self.assertEqual(len(client.requests), 1)
-                self.assertIn(
-                    "task contract unavailable - deterministic routing retained",
-                    events,
+                self.assertEqual(agent._active_task_contract_status, "fallback")
+                self.assertFalse(
+                    any("task contract unavailable" in event for event in events),
                 )
+
+    def test_resolver_fallback_is_internal_prompt_free_telemetry(self):
+        prompt = "Interpret the unfamiliar cobalt lattice note."
+        events: list[str] = []
+        agent, client = self.make_agent([
+            FakeResponse("{not-json"),
+            FakeResponse("The note describes a bounded lattice interpretation."),
+        ], events=events)
+
+        result = agent.run(prompt)
+
+        self.assertEqual(result.status, "complete")
+        self.assertEqual(len(client.requests), 2)
+        self.assertEqual(result.metrics["task_contract_status"], "fallback")
+        self.assertFalse(
+            any("task contract unavailable" in event for event in events),
+        )
 
     def test_unavailable_contract_keeps_the_existing_agent_path(self):
         prompt = "Interpret the unfamiliar cobalt lattice note."

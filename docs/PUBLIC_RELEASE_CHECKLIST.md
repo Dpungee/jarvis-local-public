@@ -1,6 +1,6 @@
 # Public-release checklist
 
-This checklist records verified evidence for the `v0.6.1` public-preview candidate and
+This checklist records verified evidence for the `v0.6.2` public-preview candidate and
 the operator or repository actions that remain pending. Do not infer completion of an
 unchecked item from a clean source scan.
 
@@ -19,7 +19,7 @@ unchecked item from a clean source scan.
       contain no detected credential.
 - [x] Ensure every reachable release commit and tag uses a GitHub no-reply address when
       the maintainer email should remain private. Public `main`, `v0.6.0`, and the
-      reviewed `v0.6.1` candidate resolve only through sanitized no-reply history.
+      reviewed `v0.6.2` candidate resolve only through sanitized no-reply history.
 
 ## Product trust
 
@@ -54,7 +54,7 @@ unchecked item from a clean source scan.
 
 **Package:** `jarvis-local`
 
-**Version:** 0.6.1 Public Preview (alpha)
+**Version:** 0.6.2 Public Preview (alpha)
 
 **Description:** Windows-first, local-first personal AI agent with automatic model
 routing, provenance-aware memory, bounded tools, and approval-gated automation.

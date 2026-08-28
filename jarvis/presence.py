@@ -57,6 +57,7 @@ from .network_security_tools import (
 )
 from .ollama_client import OllamaError
 from .proactive import RuntimeGuard
+from .presence_identity import presence_process_identity
 from .public_presence_store import (
     PublicPresenceStopped,
     PublicPresenceStore,
@@ -3818,11 +3819,12 @@ class PresenceRequestHandler(BaseHTTPRequestHandler):
         try:
             if path == "/api/health":
                 status = self.server.runtime.status()
+                identity = presence_process_identity(status["runtime_epoch"])
                 self._json({
                     "service": "jarvis-presence",
-                    "runtime_epoch": status["runtime_epoch"],
                     "ready": status["ready"],
                     "uptime_seconds": status["uptime_seconds"],
+                    **identity,
                 })
                 return
             self._require_api_session()

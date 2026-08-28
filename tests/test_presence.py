@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import json
+import os
 import sqlite3
 import tempfile
 import threading
@@ -32,6 +33,7 @@ from jarvis.presence import (
     safe_presence_text,
     safe_companion_suggestion,
 )
+from jarvis.presence_identity import presence_process_identity
 
 
 class _FakeRuntime:
@@ -2244,9 +2246,18 @@ class PresenceHTTPTests(unittest.TestCase):
     def test_health_assets_and_security_headers(self):
         with self.request("/api/health") as response:
             payload = json.load(response)
+            expected_identity = presence_process_identity(self.runtime.runtime_epoch)
             self.assertTrue(payload["ready"])
             self.assertEqual(payload["service"], "jarvis-presence")
             self.assertEqual(payload["runtime_epoch"], self.runtime.runtime_epoch)
+            self.assertEqual(payload["installation_id"], expected_identity["installation_id"])
+            self.assertEqual(payload["version"], expected_identity["version"])
+            self.assertEqual(payload["source_root"], expected_identity["source_root"])
+            self.assertEqual(
+                payload["python_executable"], expected_identity["python_executable"]
+            )
+            self.assertEqual(payload["process_id"], os.getpid())
+            self.assertIn(payload["launch_mode"], {"direct", "managed", "manual"})
             self.assertEqual(response.headers["X-Frame-Options"], "DENY")
             self.assertIn("default-src 'self'", response.headers["Content-Security-Policy"])
         with self.request("/") as response:

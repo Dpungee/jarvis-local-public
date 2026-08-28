@@ -547,7 +547,11 @@ class AgentCapabilityRoutingTests(unittest.TestCase):
         second_tools = {
             item["function"]["name"] for item in client.requests[1]["tools"]
         }
-        self.assertIn("read_file", second_tools)
+        self.assertEqual(second_tools, set())
+        self.assertEqual(
+            [name for name, _arguments in toolbox.calls],
+            ["read_file"],
+        )
         self.assertNotIn("tool_catalog", second_tools)
         self.assertIn("bounded correction", str(result))
 

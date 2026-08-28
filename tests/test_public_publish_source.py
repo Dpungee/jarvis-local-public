@@ -128,7 +128,7 @@ class PublicPublishSourceTests(unittest.TestCase):
             expected_commit="a" * 40,
             expected_root="b" * 40,
             mode="promotion",
-            version_tag="v0.6.1",
+            version_tag="v0.6.2",
             remote_url=self.PUBLIC_URL,
         )
         parser = mock.Mock()
@@ -264,9 +264,9 @@ class PublicPublishSourceTests(unittest.TestCase):
         publishing = (ROOT / "docs" / "PUBLISHING.md").read_text(encoding="utf-8")
         for forbidden in PUBLISH.FORBIDDEN_PUSH_OPTIONS:
             self.assertNotIn(forbidden, publishing)
-        self.assertIn("HEAD:refs/heads/release/v0.6.1", publishing)
+        self.assertIn("HEAD:refs/heads/release/v0.6.2", publishing)
         self.assertIn("HEAD:refs/heads/main", publishing)
-        self.assertIn("refs/tags/v0.6.1:refs/tags/v0.6.1", publishing)
+        self.assertIn("refs/tags/v0.6.2:refs/tags/v0.6.2", publishing)
         self.assertIn("Do not merge the pull request through", publishing)
         self.assertNotIn("Merge only after", publishing)
 

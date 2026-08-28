@@ -33,6 +33,8 @@ class DocumentSpec:
     title: str
     subtitle: str = ""
     sections: tuple[DocumentSection, ...] = ()
+    sheet_name: str = "Document"
+    sheet_rows: tuple[tuple[str, ...], ...] = ()
 
 
 def _safe_text(value: Any, limit: int = 10_000) -> str:
@@ -195,6 +197,7 @@ def _parse_json(raw: str, fallback_title: str) -> DocumentSpec:
         raise ValueError("Document JSON must contain one top-level object")
     title = _safe_text(value.get("title") or fallback_title, 500) or fallback_title
     subtitle = _safe_text(value.get("subtitle") or "", 1_000)
+    sheet_name = _safe_text(value.get("sheet_name") or "Document", 200) or "Document"
     raw_sections = value.get("sections", [])
     if raw_sections is None:
         raw_sections = []
@@ -219,13 +222,29 @@ def _parse_json(raw: str, fallback_title: str) -> DocumentSpec:
     top_rows = _rows(value.get("rows", value.get("data", [])))
     if top_rows:
         sections.append(DocumentSection("Data", rows=top_rows))
-    return DocumentSpec(title, subtitle, tuple(sections[:MAX_DOCUMENT_SECTIONS]))
+    sheet_rows = top_rows
+    if not sheet_rows:
+        row_sections = [
+            section for section in sections
+            if section.rows and not section.paragraphs and not section.bullets
+        ]
+        if len(row_sections) == 1:
+            sheet_rows = row_sections[0].rows
+    return DocumentSpec(
+        title,
+        subtitle,
+        tuple(sections[:MAX_DOCUMENT_SECTIONS]),
+        sheet_name,
+        sheet_rows,
+    )
 
 
 def _parse_markdown(raw: str, fallback_title: str) -> DocumentSpec:
     title = fallback_title
     subtitle = ""
     found_title = False
+    sheet_name = "Document"
+    sheet_rows: list[tuple[str, ...]] = []
     sections: list[dict[str, Any]] = []
     current: dict[str, Any] | None = None
     for original in raw.splitlines():
@@ -235,6 +254,9 @@ def _parse_markdown(raw: str, fallback_title: str) -> DocumentSpec:
         if line.startswith("# ") and not found_title:
             title = _safe_text(line[2:], 500) or fallback_title
             found_title = True
+            continue
+        if line.casefold().startswith("sheet:"):
+            sheet_name = _safe_text(line.split(":", 1)[1], 200) or "Document"
             continue
         if line.startswith("## "):
             if len(sections) >= MAX_DOCUMENT_SECTIONS:
@@ -247,11 +269,34 @@ def _parse_markdown(raw: str, fallback_title: str) -> DocumentSpec:
             sections.append(current)
             continue
         if current is None:
+            if line.startswith("|") and line.endswith("|"):
+                values = tuple(
+                    _safe_text(value, 2_000)
+                    for value in line.strip("|").split("|")[:100]
+                )
+                if values and not all(
+                    value and set(value.replace(":", "")) <= {"-"}
+                    for value in values
+                ):
+                    sheet_rows.append(values)
+                continue
             if not subtitle:
                 subtitle = line
             else:
                 current = {"title": "Overview", "paragraphs": [line], "bullets": []}
                 sections.append(current)
+            continue
+        if line.startswith("|") and line.endswith("|"):
+            values = tuple(
+                _safe_text(value, 2_000)
+                for value in line.strip("|").split("|")[:100]
+            )
+            if values and not all(
+                value and set(value.replace(":", "")) <= {"-"}
+                for value in values
+            ):
+                current.setdefault("rows", []).append(values)
+                sheet_rows.append(values)
             continue
         target = "bullets" if line.startswith(("- ", "* ", "+ ")) else "paragraphs"
         text = line[2:] if target == "bullets" else line
@@ -259,11 +304,18 @@ def _parse_markdown(raw: str, fallback_title: str) -> DocumentSpec:
             current[target].append(text)
     parsed = tuple(
         DocumentSection(
-            item["title"], tuple(item["paragraphs"]), tuple(item["bullets"])
+            item["title"], tuple(item["paragraphs"]), tuple(item["bullets"]),
+            tuple(item.get("rows", ())),
         )
         for item in sections
     )
-    return DocumentSpec(_safe_text(title, 500), _safe_text(subtitle, 1_000), parsed)
+    return DocumentSpec(
+        _safe_text(title, 500),
+        _safe_text(subtitle, 1_000),
+        parsed,
+        sheet_name,
+        tuple(sheet_rows[:MAX_SECTION_ITEMS]),
+    )
 
 
 def load_document_spec(path: Path) -> DocumentSpec:
@@ -336,6 +388,12 @@ def _safe_cell(value: str) -> str:
     return "'" + value if value.startswith(("=", "+", "-", "@")) else value
 
 
+def _safe_sheet_name(value: str) -> str:
+    cleaned = "".join("_" if character in "[]:*?/\\" else character for character in value)
+    cleaned = cleaned.strip().strip("'")[:31]
+    return cleaned or "Document"
+
+
 def _build_xlsx(spec: DocumentSpec, output: Path) -> None:
     try:
         from openpyxl import Workbook
@@ -344,7 +402,21 @@ def _build_xlsx(spec: DocumentSpec, output: Path) -> None:
         raise RuntimeError("Document libraries are unavailable; install .[documents]") from exc
     workbook = Workbook()
     sheet = workbook.active
-    sheet.title = "Document"
+    sheet.title = _safe_sheet_name(spec.sheet_name)
+    if spec.sheet_rows:
+        for row in spec.sheet_rows:
+            sheet.append([_safe_cell(value) for value in row])
+        if sheet.max_row:
+            for cell in sheet[1]:
+                cell.font = Font(bold=True)
+                cell.fill = PatternFill("solid", fgColor="D9EAF7")
+        sheet.freeze_panes = "A2" if sheet.max_row > 1 else None
+        for column in sheet.columns:
+            letter = column[0].column_letter
+            width = max((len(str(cell.value or "")) for cell in column), default=8)
+            sheet.column_dimensions[letter].width = min(60, max(10, width + 2))
+        workbook.save(output)
+        return
     sheet.append([_safe_cell(spec.title)])
     sheet["A1"].font = Font(bold=True, size=16)
     if spec.subtitle:
@@ -452,13 +524,23 @@ def build_offline_document(
             raise FileExistsError("Document output appeared during generation")
         os.replace(temporary, output_path)
         _ordinary_file(output_path, "Generated document")
-        return {
+        result = {
             "type": kind,
             "path": str(output_path),
             "relative_path": output_path.relative_to(Path(workspace).resolve()).as_posix(),
             "bytes": size,
             "title": spec.title,
         }
+        if kind == "xlsx":
+            result.update({
+                "sheet_names": [_safe_sheet_name(spec.sheet_name)],
+                "rows": len(spec.sheet_rows) if spec.sheet_rows else None,
+                "columns": (
+                    max((len(row) for row in spec.sheet_rows), default=0)
+                    if spec.sheet_rows else None
+                ),
+            })
+        return result
     finally:
         temporary.unlink(missing_ok=True)
 

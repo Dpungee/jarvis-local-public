@@ -21,6 +21,7 @@ from jarvis.agent import (
     _bound_launch_health_arguments,
     _connector_readiness_targets,
     _deep_research_traceable_urls,
+    _explicit_read_file_target,
     _explicit_test_run_arguments,
     _expertise_curriculum_topic,
     _has_verified_citation,
@@ -2095,6 +2096,46 @@ class AgentHardeningTests(unittest.TestCase):
         self.assertIn("untrusted_isolated_research_brief", artifact_context)
         self.assertIn("https://example.com/conference-room-displays", artifact_context)
 
+    def test_zero_tool_document_promise_gets_one_bounded_creation_retry(self):
+        prompt = "Create `brief.pdf` with a one-paragraph project summary."
+
+        class DocumentToolBox(FakeToolBox):
+            NAMES = FakeToolBox.NAMES + ("build_document",)
+
+        events: list[str] = []
+        toolbox = DocumentToolBox()
+        agent, client = self.make_agent([
+            FakeResponse(content="I created and verified brief.pdf."),
+            FakeResponse(tool_calls=[tool_call("build_document", {
+                "path": "brief.pdf",
+                "document_type": "pdf",
+                "title": "Project Brief",
+                "sections": [{
+                    "heading": "Summary",
+                    "body": "A concise project summary.",
+                }],
+            })]),
+            FakeResponse(content="Created and verified `brief.pdf`."),
+        ], toolbox)
+        agent.on_event = events.append
+
+        result = agent.run(prompt)
+
+        self.assertEqual(result.status, "complete", result.reason)
+        self.assertEqual(
+            [name for name, _arguments in toolbox.calls],
+            ["build_document"],
+        )
+        self.assertEqual(len(client.requests), 3)
+        correction_context = json.dumps(
+            client.requests[1]["messages"], ensure_ascii=False
+        )
+        self.assertIn("no requested document target effect", correction_context)
+        self.assertEqual(
+            sum("document effect missing" in event for event in events),
+            1,
+        )
+
     def test_staged_document_rejects_off_topic_search_results_before_writing(self):
         prompt = (
             "Research conference-room display equipment and put the findings into a Word doc."
@@ -4099,6 +4140,154 @@ class AgentHardeningTests(unittest.TestCase):
         self.assertEqual(len(approvals), 1)
         self.assertEqual(approvals[0]["action"], "change_outside_workspace")
         self.assertEqual(approvals[0]["status"], "consumed")
+
+    def test_exact_private_file_read_preserves_target_and_pauses_before_model(self):
+        computer_root = self.test_dir / "computer"
+        requested = computer_root / "source" / "requested-note.txt"
+        requested.parent.mkdir(parents=True)
+        requested.write_text("requested payload", encoding="utf-8")
+        decoy = self.config.workspace / "requested-note.txt"
+        decoy.write_text("workspace decoy", encoding="utf-8")
+        self.config = replace(
+            self.config,
+            computer_access="trusted-desktop",
+            computer_root=computer_root,
+            max_steps=3,
+        )
+        prompt = f"Read the exact file {requested} and tell me what it says."
+        self.assertEqual(_explicit_read_file_target(prompt), str(requested))
+        self.assertIsNone(
+            _explicit_read_file_target("Inspect, update, and test a.py using README.md")
+        )
+        conversation_id = self.memory.new_conversation("contaminated exact read")
+        self.memory.add_message(
+            conversation_id,
+            "user",
+            "Earlier we discussed workspace/requested-note.txt.",
+        )
+        self.memory.add_message(
+            conversation_id,
+            "assistant",
+            "The workspace file is workspace/requested-note.txt.",
+        )
+        events: list[str] = []
+        client = ScriptedClient([
+            FakeResponse(tool_calls=[
+                tool_call("computer_list_files", {"path": str(computer_root / "source")})
+            ]),
+        ])
+        agent = Agent(
+            self.config,
+            self.memory,
+            events.append,
+            client=client,
+            coding_review=False,
+            coding_planning=False,
+        )
+
+        blocked = agent.run(prompt, conversation_id=conversation_id)
+
+        self.assertEqual(blocked.status, "incomplete")
+        self.assertTrue(blocked.waiting_for_approval)
+        self.assertEqual(client.requests, [])
+        self.assertNotIn("acceptance correction", "\n".join(events))
+        approvals = self.memory.list_approvals()
+        self.assertEqual(len(approvals), 1)
+        resource = json.loads(approvals[0]["resource"])
+        self.assertEqual(resource["tool"], "computer_read_file")
+        expected_path = str(requested.resolve())
+        expected_digest = hashlib.sha256(expected_path.encode()).hexdigest()
+        self.assertEqual(resource["arguments"]["path"]["sha256"], expected_digest)
+        self.assertEqual(
+            resource["arguments"]["resolved_path"]["sha256"],
+            expected_digest,
+        )
+        self.assertNotEqual(
+            resource["arguments"]["path"]["sha256"],
+            hashlib.sha256(str(decoy.resolve()).encode()).hexdigest(),
+        )
+        self.assertIn(str(requested), str(blocked))
+
+        self.assertTrue(self.memory.decide_approval(blocked.approval_id, True))
+        resumed_client = ScriptedClient([
+            FakeResponse(content="The exact requested file says requested payload."),
+        ])
+        resumed_agent = Agent(
+            self.config,
+            self.memory,
+            events.append,
+            client=resumed_client,
+            coding_review=False,
+            coding_planning=False,
+        )
+        completed = resumed_agent.run(prompt, conversation_id=conversation_id)
+
+        self.assertEqual(completed.status, "complete")
+        self.assertIn("requested payload", str(completed))
+        self.assertEqual(len(resumed_client.requests), 1)
+        self.assertEqual(resumed_client.requests[0]["tools"], [])
+        model_context = "\n".join(
+            str(message.get("content") or "")
+            for message in resumed_client.requests[0]["messages"]
+        )
+        self.assertIn("requested payload", model_context)
+        self.assertIn(str(requested.resolve()), model_context)
+        self.assertNotIn("workspace decoy", model_context)
+        self.assertEqual(len(self.memory.list_approvals()), 1)
+        self.assertEqual(self.memory.list_approvals()[0]["status"], "consumed")
+
+    def test_denied_private_read_closes_pending_goal_before_unrelated_turn(self):
+        computer_root = self.test_dir / "computer-denial"
+        requested = computer_root / "private" / "denied-note.txt"
+        requested.parent.mkdir(parents=True)
+        requested.write_text("do not read", encoding="utf-8")
+        self.config = replace(
+            self.config,
+            computer_access="trusted-desktop",
+            computer_root=computer_root,
+            max_steps=3,
+        )
+        conversation_id = self.memory.new_conversation("denied exact read")
+        prompt = f"Read the exact file {requested} and tell me what it says."
+        first_client = ScriptedClient([])
+        first_events: list[str] = []
+        first_agent = Agent(
+            self.config,
+            self.memory,
+            first_events.append,
+            client=first_client,
+            coding_review=False,
+            coding_planning=False,
+        )
+        blocked = first_agent.run(prompt, conversation_id=conversation_id)
+        self.assertTrue(blocked.waiting_for_approval)
+        self.assertIsNotNone(self.memory.pending_conversation_goal(conversation_id))
+        self.assertTrue(self.memory.decide_approval(blocked.approval_id, False))
+
+        next_events: list[str] = []
+        next_client = ScriptedClient([])
+        next_agent = Agent(
+            self.config,
+            self.memory,
+            next_events.append,
+            client=next_client,
+            coding_review=False,
+            coding_planning=False,
+        )
+        result = next_agent.run(
+            "Screen Companion off.",
+            conversation_id=conversation_id,
+            allow_companion_control=True,
+        )
+
+        self.assertEqual(result.status, "complete")
+        self.assertIn("off", str(result).casefold())
+        self.assertIsNone(self.memory.pending_conversation_goal(conversation_id))
+        self.assertEqual(next_client.requests, [])
+        event_text = "\n".join(next_events)
+        self.assertIn("pending goal closed - operator denied approval", event_text)
+        self.assertNotIn("pending contract is invalid", event_text)
+        self.assertNotIn("task contract failed closed", event_text)
 
     def test_research_secret_is_refused_before_any_model_or_web_call(self):
         secret = "sk-proj-" + "A" * 32

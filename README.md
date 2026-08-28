@@ -106,11 +106,11 @@ and staged activation plan.
 ## Install the public preview
 
 For the easiest supported path, use a Codex CLI or Claude CLI subscription login. The
-v0.6.1 first-run wizard configures those subscription providers; Ollama is supported,
+v0.6.2 first-run wizard configures those subscription providers; Ollama is supported,
 but its local-model selection is still a manual setup path.
 
 1. Download and extract the **Exact release source archive** from the
-   [v0.6.1 release](https://github.com/Dpungee/jarvis-local-public/releases/tag/v0.6.1),
+   [v0.6.2 release](https://github.com/Dpungee/jarvis-local-public/releases/tag/v0.6.2),
    or clone the repository with Git. The Python wheel is for Python installation, not
    the double-click Windows setup described here.
 2. Install a supported Python version if necessary, then open the extracted project
@@ -148,7 +148,7 @@ professional review in high-stakes domains. See [Security](SECURITY.md),
 Before changing repository visibility, complete the
 [public-release checklist](docs/PUBLIC_RELEASE_CHECKLIST.md).
 
-This repository is **JARVIS Local 0.6.1 Public Preview (alpha)**. Its published release
+This repository is **JARVIS Local 0.6.2 Public Preview (alpha)**. Its published release
 artifacts were cut from the sanitized, protected release commit after the public-release
 checks and isolated package smoke tests passed. Separate first-launch validation under a
 clean Windows user remains a stabilization gate.
@@ -454,6 +454,11 @@ python -m jarvis.provider_setup --configure codex   # codex, claude, or both
 The interactive setup uses only the official CLI status/login commands; it never reads
 or copies an authentication file. A background worker or headless Presence launch never
 prompts: it exits with a setup instruction until a foreground operator completes setup.
+An unrelated `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, or inherited model variable does not
+count as completed setup, and an unchanged copy of `.env.example` does not silently skip
+the provider review. Before the installer prints **Ready**, it sends a fixed, tool-free,
+non-secret first-turn canary through every unique configured model route. A failed route
+stops setup with retry guidance instead of leaving a broken provider for the first chat.
 No model picker is required during setup or normal use; explicit model overrides remain
 available only for advanced troubleshooting. Subscription choices also disable direct
 OpenAI and Anthropic API adapters, so an ambient API key cannot become a separately billed

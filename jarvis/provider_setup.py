@@ -12,12 +12,13 @@ import tempfile
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TextIO
+from typing import Any, TextIO
 
-from .config import MAX_DOTENV_BYTES, ROOT
+from .config import Config, MAX_DOTENV_BYTES, ROOT
 from .model_client import (
     CODEX_CLI_AUTH_OVERRIDES,
     ModelProviderError,
+    build_model_client,
     isolated_codex_cli_home,
     resolve_claude_cli_executable,
     resolve_codex_cli_executable,
@@ -45,7 +46,26 @@ _MANAGED_KEYS = (
     "JARVIS_BACKGROUND_MODEL",
     "JARVIS_LEARNING_MODEL",
 )
-_MODEL_ENVIRONMENT_KEYS = frozenset({
+_KEY_PATTERN = re.compile(r"^\s*([A-Z][A-Z0-9_]*)\s*=")
+_WINDOWS_REPARSE_POINT = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+_CHOICES = frozenset({"codex", "claude", "both"})
+_AUTH_STATUS_MAX_BYTES = 4096
+_SETUP_MARKER = "# JARVIS_PROVIDER_SETUP=complete:v1"
+_CANARY_SENTINEL = "JARVIS_CANARY_OK"
+_TEMPLATE_PROVIDER_VALUES = {
+    "JARVIS_MODEL": "auto",
+    "JARVIS_FAST_MODEL": "qwen3.5:9b",
+    "JARVIS_REASONING_MODEL": "gpt-oss:20b",
+    "JARVIS_CODING_MODEL": "qwen3-coder:30b",
+    "JARVIS_DEEP_MODEL": "qwen3-coder:30b",
+    "JARVIS_BACKGROUND_MODEL": "fast",
+    "JARVIS_OLLAMA_ENABLED": "true",
+    "JARVIS_OPENAI_API_ENABLED": "false",
+    "JARVIS_ANTHROPIC_API_ENABLED": "false",
+    "JARVIS_CODEX_CLI_ENABLED": "false",
+    "JARVIS_CLAUDE_CLI_ENABLED": "false",
+}
+_LOCAL_PROVIDER_KEYS = frozenset({
     "JARVIS_MODEL",
     "JARVIS_FAST_MODEL",
     "JARVIS_REASONING_MODEL",
@@ -53,14 +73,12 @@ _MODEL_ENVIRONMENT_KEYS = frozenset({
     "JARVIS_DEEP_MODEL",
     "JARVIS_BACKGROUND_MODEL",
     "JARVIS_LEARNING_MODEL",
+    "JARVIS_OLLAMA_ENABLED",
+    "JARVIS_OPENAI_API_ENABLED",
+    "JARVIS_ANTHROPIC_API_ENABLED",
     "JARVIS_CODEX_CLI_ENABLED",
     "JARVIS_CLAUDE_CLI_ENABLED",
-    "JARVIS_OLLAMA_ENABLED",
 })
-_KEY_PATTERN = re.compile(r"^\s*([A-Z][A-Z0-9_]*)\s*=")
-_WINDOWS_REPARSE_POINT = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
-_CHOICES = frozenset({"codex", "claude", "both"})
-_AUTH_STATUS_MAX_BYTES = 4096
 _LEGACY_DATABASE_EVIDENCE_TABLES = (
     "conversations",
     "messages",
@@ -105,6 +123,17 @@ class ProviderSetupResult:
     state: str
     choice: str | None = None
     env_path: Path | None = field(default=None, repr=False, compare=False)
+
+
+@dataclass(frozen=True)
+class ProviderCanaryCheck:
+    routes: tuple[str, ...]
+    model: str
+
+
+@dataclass(frozen=True)
+class ProviderCanaryResult:
+    checks: tuple[ProviderCanaryCheck, ...]
 
 
 @dataclass(frozen=True)
@@ -187,6 +216,66 @@ def _ordinary_file(path: Path) -> bool:
     return True
 
 
+def _read_local_env(path: Path) -> str:
+    try:
+        return path.read_text(encoding="utf-8")
+    except (OSError, UnicodeError) as exc:
+        raise ProviderSetupError("Jarvis could not read its provider configuration.") from exc
+
+
+def _env_assignments(text: str) -> dict[str, str]:
+    """Read first-occurrence dotenv values without expanding or exporting them."""
+    values: dict[str, str] = {}
+    for raw_line in text.splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, raw_value = line.split("=", 1)
+        normalized_key = key.strip().upper()
+        if normalized_key in _LOCAL_PROVIDER_KEYS and normalized_key not in values:
+            values[normalized_key] = raw_value.strip().strip("'\"")
+    return values
+
+
+def _is_template_provider_configuration(values: Mapping[str, str]) -> bool:
+    """Recognize the provider portion of an unchanged copied .env.example."""
+    return all(
+        values.get(key, "").casefold() == expected.casefold()
+        for key, expected in _TEMPLATE_PROVIDER_VALUES.items()
+    )
+
+
+def _has_completed_local_configuration(text: str) -> bool:
+    if any(line.strip() == _SETUP_MARKER for line in text.splitlines()):
+        return True
+    values = _env_assignments(text)
+    if not values or _is_template_provider_configuration(values):
+        return False
+    if any(
+        values.get(key, "").strip().casefold() == "true"
+        for key in (
+            "JARVIS_OLLAMA_ENABLED",
+            "JARVIS_OPENAI_API_ENABLED",
+            "JARVIS_ANTHROPIC_API_ENABLED",
+            "JARVIS_CODEX_CLI_ENABLED",
+            "JARVIS_CLAUDE_CLI_ENABLED",
+        )
+    ):
+        return True
+    return any(
+        str(values.get(key, "")).strip()
+        for key in (
+            "JARVIS_MODEL",
+            "JARVIS_FAST_MODEL",
+            "JARVIS_REASONING_MODEL",
+            "JARVIS_CODING_MODEL",
+            "JARVIS_DEEP_MODEL",
+            "JARVIS_BACKGROUND_MODEL",
+            "JARVIS_LEARNING_MODEL",
+        )
+    )
+
+
 def _legacy_database_has_user_state(path: Path) -> bool:
     """Recognize a used pre-wizard installation without trusting DB existence alone."""
     try:
@@ -234,26 +323,20 @@ def is_setup_complete(
 ) -> bool:
     """Return whether first-run setup is complete, preserving historical installs.
 
-    Existing .env files and explicit process-level model settings are migration
-    evidence. A database counts only when it contains durable user-created state;
-    harmless status commands can create an otherwise empty database before the
-    provider wizard runs.
+    A saved wizard marker or an intentionally customized local provider file is
+    evidence. Ambient process variables are deliberately not evidence: unrelated
+    API keys and inherited model settings must not suppress first-run review. A
+    database counts only when it contains durable user-created state; harmless
+    status commands can create an otherwise empty database before the wizard runs.
     """
     base = _root_path(root)
     env_path = base / ".env"
     if os.path.lexists(env_path):
         _ordinary_file(env_path)
-        return True
+        if _has_completed_local_configuration(_read_local_env(env_path)):
+            return True
 
     values = os.environ if environ is None else environ
-    if any(str(values.get(key, "")).strip() for key in _MODEL_ENVIRONMENT_KEYS):
-        return True
-    if any(
-        str(values.get(key, "")).strip()
-        for key in ("OPENAI_API_KEY", "ANTHROPIC_API_KEY")
-    ):
-        return True
-
     configured_data = str(values.get("JARVIS_DATA", "")).strip()
     data_dir = Path(configured_data).expanduser() if configured_data else base / "data"
     return _legacy_database_has_user_state(data_dir / "jarvis.db")
@@ -331,6 +414,19 @@ def _render_env(existing: str, updates: Mapping[str, str]) -> str:
     return output
 
 
+def _with_setup_marker(text: str) -> str:
+    newline = "\r\n" if "\r\n" in text else "\n"
+    lines = [
+        line
+        for line in text.splitlines()
+        if not line.strip().startswith("# JARVIS_PROVIDER_SETUP=")
+    ]
+    if lines and lines[-1].strip():
+        lines.append("")
+    lines.append(_SETUP_MARKER)
+    return newline.join(lines) + newline
+
+
 def persist_provider_choice(choice: str, root: Path | None = None) -> Path:
     """Atomically update only Jarvis provider-routing keys in .env."""
     base = _root_path(root)
@@ -345,7 +441,7 @@ def persist_provider_choice(choice: str, root: Path | None = None) -> Path:
             existing_mode = stat.S_IMODE(env_path.stat().st_mode)
         except (OSError, UnicodeError) as exc:
             raise ProviderSetupError("Jarvis could not read its existing .env safely.") from exc
-    rendered = _render_env(existing, _provider_values(choice))
+    rendered = _with_setup_marker(_render_env(existing, _provider_values(choice)))
     encoded = rendered.encode("utf-8")
     if len(encoded) > MAX_DOTENV_BYTES:
         raise ProviderSetupError(f"Updated Jarvis .env would exceed {MAX_DOTENV_BYTES} bytes.")
@@ -616,6 +712,132 @@ def _selected_providers(choice: str) -> tuple[str, ...]:
     return (choice,)
 
 
+def _configured_canary_checks(config: Any) -> tuple[ProviderCanaryCheck, ...]:
+    aliases = {
+        "fast": str(getattr(config, "fast_model", "")).strip(),
+        "reasoning": str(getattr(config, "reasoning_model", "")).strip(),
+        "coding": str(getattr(config, "coding_model", "")).strip(),
+        "deep": str(getattr(config, "deep_model", "")).strip(),
+    }
+
+    def concrete(value: Any) -> str | None:
+        candidate = str(value or "").strip()
+        seen: set[str] = set()
+        while candidate.casefold() in aliases:
+            alias = candidate.casefold()
+            if alias in seen:
+                return None
+            seen.add(alias)
+            candidate = aliases[alias]
+        if not candidate or candidate.casefold() == "auto":
+            return None
+        return candidate
+
+    requested = (
+        ("fast", getattr(config, "fast_model", "")),
+        ("reasoning", getattr(config, "reasoning_model", "")),
+        ("coding", getattr(config, "coding_model", "")),
+        ("deep", getattr(config, "deep_model", "")),
+        ("background", getattr(config, "background_model", "")),
+        ("learning", getattr(config, "learning_model", "")),
+        ("selected", getattr(config, "model", "")),
+    )
+    routes_by_model: dict[str, list[str]] = {}
+    canonical_models: dict[str, str] = {}
+    for route, configured in requested:
+        model = concrete(configured)
+        if model is None:
+            continue
+        identity = model.casefold()
+        canonical_models.setdefault(identity, model)
+        routes_by_model.setdefault(identity, []).append(route)
+    return tuple(
+        ProviderCanaryCheck(tuple(routes_by_model[identity]), canonical_models[identity])
+        for identity in routes_by_model
+    )
+
+
+def _safe_model_label(value: str) -> str:
+    rendered = re.sub(r"[^A-Za-z0-9._:/+@-]", "?", str(value))[:160]
+    return rendered or "configured model"
+
+
+def run_provider_canary(
+    *,
+    config: Any | None = None,
+    client_factory: Callable[[Any], Any] = build_model_client,
+) -> ProviderCanaryResult:
+    """Make one bounded, tool-free first-turn request to every unique route model."""
+    try:
+        selected_config = Config.load() if config is None else config
+    except Exception as exc:
+        raise ProviderSetupError(
+            "Jarvis could not load the saved model routes. Review .env, then rerun setup.bat."
+        ) from exc
+    checks = _configured_canary_checks(selected_config)
+    if not checks:
+        raise ProviderSetupRequired(
+            "No concrete model route is configured. Review .env, then rerun setup.bat."
+        )
+    try:
+        client = client_factory(selected_config)
+    except Exception as exc:
+        raise ProviderSetupRequired(
+            "Jarvis could not initialize the configured model provider. Confirm the "
+            "selected provider is signed in, then rerun setup.bat or "
+            "`python -m jarvis.provider_setup --canary`."
+        ) from exc
+    messages = [
+        {
+            "role": "system",
+            "content": (
+                "This is a setup connectivity check. Do not use tools. "
+                f"Reply with exactly {_CANARY_SENTINEL}."
+            ),
+        },
+        {"role": "user", "content": f"Reply with exactly {_CANARY_SENTINEL}."},
+    ]
+    try:
+        for check in checks:
+            try:
+                response = client.chat(
+                    messages,
+                    [],
+                    check.model,
+                    think=False,
+                    # ModelClient removes this before cloud/CLI dispatch and uses
+                    # it only to unload a local canary model after the response.
+                    keep_alive="0",
+                )
+            except Exception as exc:
+                model = _safe_model_label(check.model)
+                routes = ", ".join(check.routes)
+                raise ProviderSetupRequired(
+                    f"The first-turn check failed for {routes} ({model}). "
+                    "Confirm the selected provider is signed in and the model is available, "
+                    "then rerun setup.bat or `python -m jarvis.provider_setup --canary`."
+                ) from exc
+            content = response.get("content") if isinstance(response, Mapping) else None
+            if not isinstance(content, str) or content.strip() != _CANARY_SENTINEL:
+                model = _safe_model_label(check.model)
+                routes = ", ".join(check.routes)
+                raise ProviderSetupRequired(
+                    f"The first-turn check returned an invalid answer for {routes} ({model}). "
+                    "Confirm the selected model can answer normal chat requests, then rerun "
+                    "setup.bat or `python -m jarvis.provider_setup --canary`."
+                )
+    finally:
+        closer = getattr(client, "close", None)
+        if callable(closer):
+            try:
+                closer()
+            except Exception:
+                # The bounded request result is authoritative; a provider transport
+                # cleanup diagnostic must not hide either its success or failure.
+                pass
+    return ProviderCanaryResult(checks)
+
+
 def _prepare_provider(
     provider: str,
     *,
@@ -756,6 +978,11 @@ def _parser() -> argparse.ArgumentParser:
     mode.add_argument("--ensure", action="store_true", help="check readiness without prompting")
     mode.add_argument("--configure", choices=sorted(_CHOICES), help="persist an already-ready provider choice")
     mode.add_argument(
+        "--canary",
+        action="store_true",
+        help="verify every configured model route with a bounded first response",
+    )
+    mode.add_argument(
         "--login",
         choices=sorted(_CHOICES),
         help="install/sign in and select a provider even on an existing installation",
@@ -766,7 +993,14 @@ def _parser() -> argparse.ArgumentParser:
 def main(argv: Sequence[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     try:
-        if args.login:
+        if args.canary:
+            result = run_provider_canary()
+            for check in result.checks:
+                print(
+                    "Jarvis first-turn check passed: "
+                    f"{', '.join(check.routes)} ({_safe_model_label(check.model)})."
+                )
+        elif args.login:
             if not sys.stdin.isatty():
                 raise ProviderSetupRequired(SETUP_NEEDED_MESSAGE)
             for provider in _selected_providers(args.login):

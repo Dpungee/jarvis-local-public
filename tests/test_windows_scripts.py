@@ -269,8 +269,13 @@ $script:Scenario = $env:JARVIS_TEST_SCENARIO
 $script:TracePath = $env:JARVIS_TEST_TRACE
 $script:Project = [IO.Path]::GetFullPath($env:JARVIS_TEST_PROJECT)
 $script:TaskScript = $env:JARVIS_TEST_SCRIPT
+$script:LifecycleAction = $env:JARVIS_TEST_ACTION
 $script:ResultPath = $env:JARVIS_TEST_RESULT
 $script:Pythonw = [IO.Path]::GetFullPath($env:JARVIS_TEST_PYTHONW)
+$script:Version = $env:JARVIS_TEST_VERSION
+$script:InstallationId = $env:JARVIS_TEST_INSTALLATION_ID
+$script:SourceRoot = [IO.Path]::GetFullPath($env:JARVIS_TEST_SOURCE_ROOT)
+$script:StateFile = [IO.Path]::GetFullPath($env:JARVIS_TEST_STATE_FILE)
 $identity = [System.Security.Principal.WindowsIdentity]::GetCurrent()
 $script:CurrentUser = $identity.Name
 $script:CurrentSid = $identity.User.Value
@@ -283,6 +288,10 @@ $script:BackupTask = $null
 $script:StartCount = 0
 $script:HealthOnline = $false
 $script:HealthUptime = 0.0
+$script:RuntimeEpoch = "b" * 32
+$script:LaunchMode = "direct"
+$script:StopProcessCount = 0
+$script:StartProcessCount = 0
 
 function Add-TestTrace {
     param([string]$Message)
@@ -325,6 +334,19 @@ if ($script:Scenario -in @("owned_running", "owned_no_health", "stale_endpoint",
     $script:BackupTask = New-MockPresenceTask -Description $description -State "Ready"
     $script:HealthOnline = $true
     $script:HealthUptime = 3600.0
+    $script:RuntimeEpoch = "a" * 32
+}
+if ($script:Scenario -eq "manual") {
+    $script:HealthOnline = $true
+    $script:HealthUptime = 30.0
+    $script:RuntimeEpoch = "a" * 32
+    $script:LaunchMode = "manual"
+}
+if ($script:Scenario -eq "stale_install") {
+    $script:HealthOnline = $true
+    $script:HealthUptime = 30.0
+    $script:RuntimeEpoch = "a" * 32
+    $script:LaunchMode = "manual"
 }
 
 function Get-ScheduledTask {
@@ -431,6 +453,58 @@ function Start-ScheduledTask {
     } else {
         $script:HealthOnline = $true
         $script:HealthUptime = 0.1
+        $script:RuntimeEpoch = "b" * 32
+        $script:LaunchMode = "direct"
+    }
+}
+
+function Get-Process {
+    [CmdletBinding()]
+    param([int]$Id)
+    if ($Id -ne 4242) { throw "mock process not found" }
+    return [pscustomobject]@{
+        Id = 4242
+        Path = $script:Pythonw
+        StartTime = [DateTime]::Parse("2026-08-28T12:00:00Z")
+        HasExited = $false
+    }
+}
+
+function Stop-Process {
+    [CmdletBinding()]
+    param([int]$Id, [switch]$Force)
+    if ($Id -ne 4242) { throw "wrong process" }
+    $script:StopProcessCount++
+    $script:HealthOnline = $false
+    Add-TestTrace "STOP_PROCESS $Id"
+}
+
+function Start-Process {
+    [CmdletBinding()]
+    param(
+        [string]$FilePath,
+        [string[]]$ArgumentList,
+        [string]$WorkingDirectory,
+        [string]$WindowStyle,
+        [switch]$PassThru
+    )
+    if (-not [StringComparer]::OrdinalIgnoreCase.Equals(
+        [IO.Path]::GetFullPath($FilePath), $script:Pythonw
+    )) {
+        Add-TestTrace "OPEN $FilePath"
+        return
+    }
+    $script:StartProcessCount++
+    $script:HealthOnline = $true
+    $script:HealthUptime = 0.1
+    $script:RuntimeEpoch = "b" * 32
+    $script:LaunchMode = "manual"
+    Add-TestTrace "START_PROCESS 4242"
+    return [pscustomobject]@{
+        Id = 4242
+        Path = $script:Pythonw
+        StartTime = [DateTime]::Parse("2026-08-28T12:00:00Z")
+        HasExited = $false
     }
 }
 
@@ -452,6 +526,13 @@ function Invoke-RestMethod {
         service = "jarvis-presence"
         ready = $true
         uptime_seconds = $script:HealthUptime
+        version = $script:Version
+        installation_id = if ($script:Scenario -eq "stale_install") { "e" * 64 } else { $script:InstallationId }
+        source_root = $script:SourceRoot
+        python_executable = $script:Pythonw
+        process_id = 4242
+        runtime_epoch = $script:RuntimeEpoch
+        launch_mode = $script:LaunchMode
     }
 }
 
@@ -462,7 +543,11 @@ function Start-Sleep {
 
 $exitCode = 0
 try {
-    . $script:TaskScript
+    if ($script:LifecycleAction) {
+        . $script:TaskScript -Action $script:LifecycleAction -NoBrowser
+    } else {
+        . $script:TaskScript
+    }
 } catch {
     Add-TestTrace ("ERROR " + $_.Exception.Message)
     [Console]::Error.WriteLine($_.Exception.Message)
@@ -470,17 +555,25 @@ try {
 }
 
 if ($null -eq $script:MockTask) {
-    $result = [ordered]@{ Exists = $false }
+    $result = [ordered]@{
+        Exists = $false
+        HealthOnline = $script:HealthOnline
+        StopProcessCount = $script:StopProcessCount
+        StartProcessCount = $script:StartProcessCount
+    }
 } else {
-    $action = @($script:MockTask.Actions)[0]
+    $taskAction = @($script:MockTask.Actions)[0]
     $result = [ordered]@{
         Exists = $true
         State = $script:MockTask.State
         Description = $script:MockTask.Description
-        ActionExecute = $action.Execute
-        ActionArguments = $action.Arguments
-        WorkingDirectory = $action.WorkingDirectory
+        ActionExecute = $taskAction.Execute
+        ActionArguments = $taskAction.Arguments
+        WorkingDirectory = $taskAction.WorkingDirectory
         MultipleInstances = $script:MockTask.Settings.MultipleInstances
+        HealthOnline = $script:HealthOnline
+        StopProcessCount = $script:StopProcessCount
+        StartProcessCount = $script:StartProcessCount
     }
 }
 $result | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $script:ResultPath -Encoding UTF8
@@ -536,6 +629,7 @@ class WindowsScriptTests(unittest.TestCase):
         python_version: str = "3.13.0",
         inventory_exit: int = 0,
         pull_exit: int = 0,
+        canary_exit: int = 0,
         doctor_exit: int = 0,
         before_text: str | None = None,
         ollama_enabled: bool | None = None,
@@ -588,6 +682,10 @@ class WindowsScriptTests(unittest.TestCase):
                 '    type "%JARVIS_TEST_INVENTORY_BEFORE%"',
                 "  )",
                 f"  exit /b {inventory_exit}",
+                ")",
+                'if "%~4"=="jarvis.provider_setup" if "%~5"=="--canary" (',
+                '  >>"%JARVIS_TEST_TRACE%" echo PROVIDER_CANARY',
+                f"  exit /b {canary_exit}",
                 ")",
                 '>>"%JARVIS_TEST_TRACE%" echo python %*',
                 f"exit /b {doctor_exit}",
@@ -664,6 +762,11 @@ class WindowsScriptTests(unittest.TestCase):
             timeout=45,
             check=False,
         )
+        if not result_path.exists():
+            self.fail(
+                "Scheduler harness did not write a result. "
+                f"stdout={completed.stdout!r} stderr={completed.stderr!r}"
+            )
         result = json.loads(result_path.read_text(encoding="utf-8-sig"))
         return completed, result
 
@@ -672,9 +775,11 @@ class WindowsScriptTests(unittest.TestCase):
         scenario: str,
         *,
         port: int = 9988,
+        script_name: str = "install_presence.ps1",
     ) -> tuple[subprocess.CompletedProcess[str], dict]:
-        target_script = self.project / "install_presence.ps1"
-        shutil.copy2(ROOT / "install_presence.ps1", target_script)
+        target_script = self.project / script_name
+        shutil.copy2(ROOT / script_name, target_script)
+        shutil.copy2(ROOT / "presence_lifecycle.ps1", self.project / "presence_lifecycle.ps1")
         harness = self.temp_path / "presence-harness.ps1"
         harness.write_text(PRESENCE_HARNESS, encoding="utf-8-sig")
         result_path = self.temp_path / "presence-result.json"
@@ -683,10 +788,36 @@ class WindowsScriptTests(unittest.TestCase):
         config_path = self.temp_path / "presence-config.txt"
         config_path.write_text(
             "JARVIS_PRESENCE_CONFIG="
-            + json.dumps({"port": port, "pythonw": str(pythonw)}, ensure_ascii=True)
+            + json.dumps(
+                {
+                    "port": port,
+                    "pythonw": str(pythonw),
+                    "source_root": str(self.project),
+                    "version": "0.6.2",
+                    "installation_id": "d" * 64,
+                    "state_file": str(self.temp_path / "presence-manual.json"),
+                },
+                ensure_ascii=True,
+            )
             + "\n",
             encoding="ascii",
         )
+        if scenario == "manual_unhealthy":
+            (self.temp_path / "presence-manual.json").write_text(
+                json.dumps(
+                    {
+                        "installation_id": "d" * 64,
+                        "version": "0.6.2",
+                        "source_root": str(self.project),
+                        "python_executable": str(pythonw),
+                        "process_id": 4242,
+                        "process_started_at": "2026-08-28T12:00:00.0000000Z",
+                        "runtime_epoch": "a" * 32,
+                        "port": port,
+                    }
+                ),
+                encoding="utf-8",
+            )
         self._write_cmd(
             self.fake_bin / "python.cmd",
             [
@@ -712,6 +843,10 @@ class WindowsScriptTests(unittest.TestCase):
                 "JARVIS_TEST_RESULT": str(result_path),
                 "JARVIS_TEST_PYTHONW": str(pythonw),
                 "JARVIS_TEST_PRESENCE_CONFIG": str(config_path),
+                "JARVIS_TEST_VERSION": "0.6.2",
+                "JARVIS_TEST_INSTALLATION_ID": "d" * 64,
+                "JARVIS_TEST_SOURCE_ROOT": str(self.project),
+                "JARVIS_TEST_STATE_FILE": str(self.temp_path / "presence-manual.json"),
             }
         )
         completed = subprocess.run(
@@ -734,6 +869,106 @@ class WindowsScriptTests(unittest.TestCase):
             timeout=15,
             check=False,
         )
+        if not result_path.exists():
+            self.fail(
+                "Presence install harness did not write a result. "
+                f"stdout={completed.stdout!r} stderr={completed.stderr!r}"
+            )
+        result = json.loads(result_path.read_text(encoding="utf-8-sig"))
+        return completed, result
+
+    def _run_presence_launcher(
+        self,
+        scenario: str,
+        action: str,
+        *,
+        port: int = 9988,
+    ) -> tuple[subprocess.CompletedProcess[str], dict]:
+        target_script = self.project / "start_jarvis_presence.ps1"
+        shutil.copy2(ROOT / "start_jarvis_presence.ps1", target_script)
+        shutil.copy2(ROOT / "presence_lifecycle.ps1", self.project / "presence_lifecycle.ps1")
+        harness = self.temp_path / "presence-harness.ps1"
+        harness.write_text(PRESENCE_HARNESS, encoding="utf-8-sig")
+        result_path = self.temp_path / "presence-result.json"
+        pythonw = self.fake_bin / "pythonw.exe"
+        pythonw.write_bytes(b"MZ")
+        config_path = self.temp_path / "presence-config.txt"
+        config_path.write_text(
+            "JARVIS_PRESENCE_CONFIG="
+            + json.dumps(
+                {
+                    "port": port,
+                    "pythonw": str(pythonw),
+                    "source_root": str(self.project),
+                    "version": "0.6.2",
+                    "installation_id": "d" * 64,
+                    "state_file": str(self.temp_path / "presence-manual.json"),
+                },
+                ensure_ascii=True,
+            )
+            + "\n",
+            encoding="ascii",
+        )
+        if scenario == "manual_unhealthy":
+            (self.temp_path / "presence-manual.json").write_text(
+                json.dumps(
+                    {
+                        "installation_id": "d" * 64,
+                        "version": "0.6.2",
+                        "source_root": str(self.project),
+                        "python_executable": str(pythonw),
+                        "process_id": 4242,
+                        "process_started_at": "2026-08-28T12:00:00.0000000Z",
+                        "runtime_epoch": "a" * 32,
+                        "port": port,
+                    }
+                ),
+                encoding="utf-8",
+            )
+        self._write_cmd(
+            self.fake_bin / "python.cmd",
+            [
+                "@echo off",
+                'if "%~4"=="jarvis.provider_setup" ( exit /b 0 )',
+                'if "%~3"=="-c" ( type "%JARVIS_TEST_PRESENCE_CONFIG%" & exit /b 0 )',
+                "exit /b 64",
+            ],
+        )
+        env = self._base_env()
+        env.update(
+            {
+                "JARVIS_TEST_SCENARIO": scenario,
+                "JARVIS_TEST_ACTION": action,
+                "JARVIS_TEST_PROJECT": str(self.project),
+                "JARVIS_TEST_SCRIPT": str(target_script),
+                "JARVIS_TEST_RESULT": str(result_path),
+                "JARVIS_TEST_PYTHONW": str(pythonw),
+                "JARVIS_TEST_PRESENCE_CONFIG": str(config_path),
+                "JARVIS_TEST_VERSION": "0.6.2",
+                "JARVIS_TEST_INSTALLATION_ID": "d" * 64,
+                "JARVIS_TEST_SOURCE_ROOT": str(self.project),
+                "JARVIS_TEST_STATE_FILE": str(self.temp_path / "presence-manual.json"),
+            }
+        )
+        completed = subprocess.run(
+            [
+                str(POWERSHELL), "-NoLogo", "-NoProfile", "-NonInteractive",
+                "-ExecutionPolicy", "Bypass", "-File", str(harness),
+            ],
+            cwd=self.project,
+            env=env,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=15,
+            check=False,
+        )
+        if not result_path.exists():
+            self.fail(
+                "Presence launcher harness did not write a result. "
+                f"stdout={completed.stdout!r} stderr={completed.stderr!r}"
+            )
         result = json.loads(result_path.read_text(encoding="utf-8-sig"))
         return completed, result
 
@@ -752,6 +987,7 @@ class WindowsScriptTests(unittest.TestCase):
             ["ollama pull reason-custom:2", "ollama pull code-custom:3"],
         )
         self.assertEqual(self._trace_lines().count("python inventory"), 2)
+        self.assertEqual(self._trace_lines().count("PROVIDER_CANARY"), 1)
         self.assertNotIn("FORBIDDEN", "\n".join(self._trace_lines()))
         self.assertIn("Ready.", completed.stdout)
         self.assertIn("start_jarvis_presence.bat", completed.stdout)
@@ -819,6 +1055,16 @@ class WindowsScriptTests(unittest.TestCase):
         completed = self._run_setup(env)
         self.assertNotEqual(completed.returncode, 0)
         self.assertIn("exit code 9", completed.stderr)
+        self.assertNotIn("Ready.", completed.stdout)
+
+    def test_setup_stops_when_first_turn_canary_fails_before_doctor(self):
+        required = ("a:1", "b:2", "c:3")
+        env = self._setup_fakes(required, required, canary_exit=10)
+        completed = self._run_setup(env)
+        self.assertNotEqual(completed.returncode, 0)
+        self.assertIn("exit code 10", completed.stderr)
+        self.assertIn("PROVIDER_CANARY", self._trace_lines())
+        self.assertNotIn("python -X utf8 -m jarvis doctor", self._trace_lines())
         self.assertNotIn("Ready.", completed.stdout)
 
     def test_install_registers_direct_per_user_reliable_task(self):
@@ -961,6 +1207,116 @@ class WindowsScriptTests(unittest.TestCase):
         self.assertEqual(lifecycle, ["EXPORT", "STOP", "REGISTER_XML", "START"])
         self.assertIn("remained healthy", "\n".join(self._trace_lines()))
 
+    def test_presence_install_exactly_stops_verified_manual_instance(self):
+        completed, result = self._run_presence_install("manual")
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertTrue(result["Exists"])
+        self.assertEqual(result["StopProcessCount"], 1)
+        trace = self._trace_lines()
+        self.assertLess(trace.index("STOP_PROCESS 4242"), trace.index("REGISTER_NEW"))
+        self.assertLess(trace.index("REGISTER_NEW"), trace.index("START"))
+
+    def test_presence_install_rejects_stale_install_without_stopping_it(self):
+        completed, result = self._run_presence_install("stale_install")
+        self.assertNotEqual(completed.returncode, 0)
+        self.assertFalse(result["Exists"])
+        self.assertEqual(result["StopProcessCount"], 0)
+        self.assertNotIn("REGISTER_NEW", self._trace_lines())
+        self.assertIn("different or stale", completed.stderr)
+
+    def test_presence_uninstall_exactly_stops_verified_manual_instance(self):
+        completed, result = self._run_presence_install(
+            "manual", script_name="uninstall_presence.ps1"
+        )
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertFalse(result["Exists"])
+        self.assertFalse(result["HealthOnline"])
+        self.assertEqual(result["StopProcessCount"], 1)
+
+    def test_presence_uninstall_rejects_stale_install_without_stopping_it(self):
+        completed, result = self._run_presence_install(
+            "stale_install", script_name="uninstall_presence.ps1"
+        )
+        self.assertNotEqual(completed.returncode, 0)
+        self.assertTrue(result["HealthOnline"])
+        self.assertEqual(result["StopProcessCount"], 0)
+
+    def test_presence_install_takes_over_unhealthy_manual_instance_from_exact_state(self):
+        completed, result = self._run_presence_install("manual_unhealthy")
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertTrue(result["Exists"])
+        self.assertEqual(result["StopProcessCount"], 1)
+        trace = self._trace_lines()
+        self.assertLess(trace.index("STOP_PROCESS 4242"), trace.index("REGISTER_NEW"))
+
+    def test_presence_uninstall_stops_unhealthy_manual_instance_from_exact_state(self):
+        completed, result = self._run_presence_install(
+            "manual_unhealthy", script_name="uninstall_presence.ps1"
+        )
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertFalse(result["Exists"])
+        self.assertEqual(result["StopProcessCount"], 1)
+
+    def test_presence_launcher_default_start_records_exact_manual_process(self):
+        completed, result = self._run_presence_launcher("none", "start")
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertTrue(result["HealthOnline"])
+        self.assertEqual(result["StartProcessCount"], 1)
+        self.assertEqual(result["StopProcessCount"], 0)
+        self.assertIn("JARVIS Presence is online", completed.stdout)
+
+    def test_presence_launcher_status_reports_exact_runtime_identity(self):
+        completed, result = self._run_presence_launcher("manual", "status")
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertEqual(result["StartProcessCount"], 0)
+        self.assertIn("version 0.6.2", completed.stdout)
+        self.assertIn("PID 4242", completed.stdout)
+        self.assertIn("mode manual", completed.stdout)
+        self.assertIn("a" * 32, completed.stdout)
+
+    def test_presence_launcher_stop_targets_only_verified_process(self):
+        completed, result = self._run_presence_launcher("manual", "stop")
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertFalse(result["HealthOnline"])
+        self.assertEqual(result["StopProcessCount"], 1)
+        self.assertEqual(result["StartProcessCount"], 0)
+        self.assertIn("JARVIS Presence stopped", completed.stdout)
+
+    def test_presence_launcher_restart_requires_new_runtime_epoch(self):
+        completed, result = self._run_presence_launcher("manual", "restart")
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertTrue(result["HealthOnline"])
+        self.assertEqual(result["StopProcessCount"], 1)
+        self.assertEqual(result["StartProcessCount"], 1)
+        self.assertIn("b" * 32, completed.stdout)
+        trace = self._trace_lines()
+        self.assertLess(trace.index("STOP_PROCESS 4242"), trace.index("START_PROCESS 4242"))
+
+    def test_presence_launcher_rejects_stale_install_without_process_action(self):
+        completed, result = self._run_presence_launcher("stale_install", "restart")
+        self.assertNotEqual(completed.returncode, 0)
+        self.assertTrue(result["HealthOnline"])
+        self.assertEqual(result["StopProcessCount"], 0)
+        self.assertEqual(result["StartProcessCount"], 0)
+        self.assertIn("different or stale", completed.stderr)
+
+    def test_presence_launcher_stops_unhealthy_manual_instance_from_exact_state(self):
+        completed, result = self._run_presence_launcher("manual_unhealthy", "stop")
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertEqual(result["StopProcessCount"], 1)
+        self.assertEqual(result["StartProcessCount"], 0)
+        self.assertIn("JARVIS Presence stopped", completed.stdout)
+
+    def test_presence_launcher_restarts_owned_scheduled_task_without_pid_kill(self):
+        completed, result = self._run_presence_launcher("owned_running", "restart")
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertTrue(result["Exists"])
+        self.assertTrue(result["HealthOnline"])
+        self.assertEqual(result["StopProcessCount"], 0)
+        self.assertEqual(result["StartProcessCount"], 0)
+        lifecycle = [line for line in self._trace_lines() if line in {"STOP", "START"}]
+        self.assertEqual(lifecycle, ["STOP", "START"])
+
     def test_uninstall_is_owned_fail_closed_and_verifies_absence(self):
         completed, result = self._run_lifecycle("uninstall_worker.ps1", "owned_running_uninstall")
         self.assertEqual(completed.returncode, 0, completed.stderr)
@@ -996,6 +1352,7 @@ class WindowsScriptTests(unittest.TestCase):
             "start_jarvis_presence.ps1",
             "install_presence.ps1",
             "uninstall_presence.ps1",
+            "presence_lifecycle.ps1",
         ):
             script = str(ROOT / script_name).replace("'", "''")
             command = (
@@ -1094,7 +1451,14 @@ class WindowsScriptTests(unittest.TestCase):
 
         start_presence = (ROOT / "start_jarvis_presence.ps1").read_text(encoding="utf-8")
         self.assertIn("Get-PresenceRuntimeConfig", start_presence)
+        self.assertIn('ValidateSet("start", "status", "restart", "stop")', start_presence)
+        self.assertIn("Stop-ExactPresence", start_presence)
         self.assertNotIn("127.0.0.1:8787", start_presence)
+
+        start_presence_batch = (ROOT / "start_jarvis_presence.bat").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn('start_jarvis_presence.ps1" %*', start_presence_batch)
 
         uninstall_presence = (ROOT / "uninstall_presence.ps1").read_text(encoding="utf-8")
         self.assertIn("Refusing to remove scheduled task", uninstall_presence)
@@ -1111,7 +1475,8 @@ class WindowsScriptTests(unittest.TestCase):
         self.assertIn("does not create a", readme)
         self.assertIn("virtual environment", readme)
         self.assertIn("Manual local-only Ollama path", guide)
-        self.assertIn("Any existing `.env`", guide)
+        self.assertIn("An unchanged copy of `.env.example` does not count", guide)
+        self.assertIn("tool-free first-turn", guide)
 
     @unittest.skipUnless(COMSPEC, "cmd.exe is required")
     def test_start_batch_preserves_python_exit_code(self):

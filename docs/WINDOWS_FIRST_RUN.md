@@ -1,6 +1,6 @@
 # Windows first-run guide
 
-This guide describes the current JARVIS Local 0.6.1 Public Preview installer. Jarvis is
+This guide describes the current JARVIS Local 0.6.2 Public Preview installer. Jarvis is
 alpha software for one supervised Windows operator. Setup does not grant administrator,
 desktop, account, network-scanning, or publishing authority.
 
@@ -10,7 +10,7 @@ desktop, account, network-scanning, or publishing authority.
 2. Install [Python 3.11, 3.12, or 3.13](https://www.python.org/downloads/windows/).
    Select **Add python.exe to PATH** in the Python installer.
 3. Download the **Exact release source archive** from the
-   [v0.6.1 release](https://github.com/Dpungee/jarvis-local-public/releases/tag/v0.6.1)
+   [v0.6.2 release](https://github.com/Dpungee/jarvis-local-public/releases/tag/v0.6.2)
    and extract it. The wheel and source distribution are intended for Python package
    workflows; they are not the double-click installer.
 4. Choose a model-provider path before running setup:
@@ -20,7 +20,7 @@ desktop, account, network-scanning, or publishing authority.
    - **Claude CLI:** uses an eligible Claude subscription through the official Claude
      sign-in.
    - **Both:** uses Claude for fast/reasoning work and Codex for coding/deep work.
-   - **Ollama:** local-only operation is supported, but v0.6.1 does not yet expose an
+   - **Ollama:** local-only operation is supported, but v0.6.2 does not yet expose an
      Ollama preset in the first-run chooser. Follow the manual local path below.
 
 Account eligibility and usage limits come from the selected provider. Jarvis verifies
@@ -32,7 +32,7 @@ file.
 1. Double-click `setup.bat` in the extracted project folder.
 2. Confirm the Python version and path shown at the beginning. Setup installs Jarvis and
    its document-generation libraries into that Python environment. It does not create a
-   virtual environment in v0.6.1.
+   virtual environment in v0.6.2.
 3. Choose Codex CLI, Claude CLI, or both. If the selected CLI is missing, setup can offer
    to install its exact Windows Package Manager package. If it is not signed in, setup
    can start the provider's official sign-in flow.
@@ -40,8 +40,9 @@ file.
    this review only saves local settings; the installer performs no scan, pairing,
    download, or containment action. When a feature requires another feature, the prompt
    names the prerequisite before saving the choice.
-5. Setup runs `jarvis doctor`. Do not treat the installation as complete unless the
-   window ends with **Ready**.
+5. Setup sends a fixed, tool-free first-turn check through every unique configured model
+   route, then runs `jarvis doctor`. The check contains no files, credentials, or personal
+   prompt. Do not treat the installation as complete unless the window ends with **Ready**.
 6. Double-click `start_jarvis_presence.bat` to open the recommended interface.
 
 Rerunning `setup.bat` is safe after a stopped installation. Already reviewed provider
@@ -72,13 +73,14 @@ on the computer.
    JARVIS_CLAUDE_CLI_ENABLED=false
    ```
 
-5. Run `setup.bat`. Because `.env` is an explicit existing configuration, the
-   subscription chooser will preserve it. Setup will ask Ollama to download any selected
-   model that is not installed, then verify the runtime.
+5. Run `setup.bat`. Because the model profiles differ from the untouched template, setup
+   recognizes this as an intentional local configuration and preserves it. Setup will ask
+   Ollama to download any selected model that is not installed, then verify a real first
+   response from each unique model.
 
-Do not copy `.env.example` merely to browse it. Any existing `.env` is treated as an
-operator configuration and is deliberately not overwritten by the automatic provider
-wizard.
+An unchanged copy of `.env.example` does not count as completed provider setup. This keeps
+an accidental copy—or unrelated API keys inherited from Windows—from skipping the review.
+Customize the local profiles as shown above when Ollama is the deliberate choice.
 
 ## What setup changes
 
@@ -90,7 +92,8 @@ Setup may:
 - start the selected provider's official sign-in flow after you answer yes;
 - save non-secret provider routing and optional-feature switches in `.env`;
 - create local onboarding state under `data/`;
-- download configured Ollama models when local inference is selected; and
+- download configured Ollama models when local inference is selected;
+- send a fixed, tool-free first-turn canary to each unique configured model; and
 - run Jarvis's local doctor check.
 
 Setup does not place provider passwords, session files, or API keys in the repository.
@@ -120,6 +123,13 @@ choice later, open a terminal in the project folder and run one of:
 python -m jarvis.provider_setup --login codex
 python -m jarvis.provider_setup --login claude
 python -m jarvis.provider_setup --login both
+```
+
+If sign-in succeeds but the first-turn check fails, confirm the selected model is
+available and rerun `setup.bat`, or retry only the bounded check with:
+
+```powershell
+python -m jarvis.provider_setup --canary
 ```
 
 ### Ollama is selected but unavailable

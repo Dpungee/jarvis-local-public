@@ -2146,7 +2146,7 @@ class ToolBox:
             Tool("write_file", "Atomically create a file or replace a previously read file using its required SHA-256 hash.", {
                 "type": "object", "properties": {"path": {"type": "string"}, "content": {"type": "string"}, "expected_sha256": {"type": "string"}}, "required": ["path", "content"]
             }, self.write_file),
-            Tool("build_document", "Create and verify one polished local Word, PDF, Excel, or PowerPoint document directly from bounded Markdown content. Existing files are never overwritten.", {
+            Tool("build_document", "Create and verify one polished local Word, PDF, Excel, or PowerPoint document directly from bounded Markdown or JSON content. For an exact spreadsheet, provide JSON with sheet_name and rows. Existing files are never overwritten.", {
                 "type": "object",
                 "properties": {
                     "path": {"type": "string"},
@@ -3954,17 +3954,25 @@ class ToolBox:
         # builder repeats this check and atomically installs a new file only.
         _safe_target(self.config.workspace, path)
         source_path: Path | None = None
+        content_text = str(content)
+        source_suffix = ".md"
+        try:
+            structured_content = json.loads(content_text)
+        except (json.JSONDecodeError, TypeError, ValueError):
+            structured_content = None
+        if isinstance(structured_content, dict):
+            source_suffix = ".json"
         try:
             with tempfile.NamedTemporaryFile(
                 mode="w",
                 encoding="utf-8",
                 newline="\n",
-                suffix=".md",
+                suffix=source_suffix,
                 prefix=".jarvis-document-source-",
                 dir=self.config.workspace,
                 delete=False,
             ) as stream:
-                stream.write(str(content))
+                stream.write(content_text)
                 source_path = Path(stream.name)
             source = source_path.relative_to(self.config.workspace).as_posix()
             result = build_offline_document(

@@ -96,22 +96,40 @@ and staged activation plan.
 ## Requirements
 
 - Windows 10 or Windows 11
-- Python 3.11, 3.12, or 3.13 on `PATH`
-- Optional: [Ollama](https://ollama.com/) for local models, or an authenticated provider
-  supported by the first-run chooser
+- [Python 3.11, 3.12, or 3.13](https://www.python.org/downloads/windows/) on
+  `PATH` (select **Add python.exe to PATH** in the Python installer)
+- One model path:
+  - an authenticated Codex CLI login for an eligible ChatGPT plan;
+  - an authenticated Claude CLI login for an eligible Claude plan; or
+  - [Ollama](https://ollama.com/) and manually selected local models
 
-## Start in two clicks
+## Install the public preview
 
-First, download the repository as a ZIP and extract it, or clone it with Git. Open the
-extracted or cloned `jarvis-local-public` project folder before continuing.
+For the easiest supported path, use a Codex CLI or Claude CLI subscription login. The
+v0.6.1 first-run wizard configures those subscription providers; Ollama is supported,
+but its local-model selection is still a manual setup path.
 
-1. Double-click `setup.bat` once. A new installation offers **Codex CLI**, **Claude
+1. Download and extract the **Exact release source archive** from the
+   [v0.6.1 release](https://github.com/Dpungee/jarvis-local-public/releases/tag/v0.6.1),
+   or clone the repository with Git. The Python wheel is for Python installation, not
+   the double-click Windows setup described here.
+2. Install a supported Python version if necessary, then open the extracted project
+   folder.
+3. Double-click `setup.bat`. The public-preview installer adds Jarvis and its document
+   libraries to the Python environment currently on `PATH`; it does not create a
+   separate virtual environment. Installation and any provider download can take a few
+   minutes.
+4. A new installation offers **Codex CLI**, **Claude
    CLI**, or both and stores provider routing—not credentials. It then reviews each
    optional network, Bluetooth, defensive-monitoring, and security-popup capability;
    choose **Set up**, **Not now**, or **Keep disabled** for every item.
-2. Double-click `start_jarvis_presence.bat` for the browser interface,
+5. Double-click `start_jarvis_presence.bat` for the recommended browser interface,
    `start_jarvis_ui.bat` for the native desktop interface, or `start_jarvis.bat` for
    terminal chat.
+
+Read the [Windows first-run guide](docs/WINDOWS_FIRST_RUN.md) before installing if you
+want local-only Ollama operation, have more than one Python installation, or need help
+recovering from a stopped setup.
 
 Every optional-feature choice is reversible later in Presence **Settings** or through
 Jarvis's approval-gated feature-setup tools. Enabling network support never pairs or
@@ -130,9 +148,10 @@ professional review in high-stakes domains. See [Security](SECURITY.md),
 Before changing repository visibility, complete the
 [public-release checklist](docs/PUBLIC_RELEASE_CHECKLIST.md).
 
-The repository is prepared as **JARVIS Local 0.6.0 Public Preview (alpha)**. Public
-release artifacts should be cut only from a clean, sanitized root commit after the
-checklist and clean-machine validation pass.
+This repository is **JARVIS Local 0.6.1 Public Preview (alpha)**. Its published release
+artifacts were cut from the sanitized, protected release commit after the public-release
+checks and isolated package smoke tests passed. Separate first-launch validation under a
+clean Windows user remains a stabilization gate.
 
 <details>
 <summary><strong>Open the detailed operations and engineering reference</strong></summary>
@@ -440,13 +459,20 @@ available only for advanced troubleshooting. Subscription choices also disable d
 OpenAI and Anthropic API adapters, so an ambient API key cannot become a separately billed
 fallback after a CLI outage.
 
-Cloud keys are deliberately not accepted from this repository's `.env` file. Set them in your Windows user environment, then open a new terminal or restart JARVIS:
+Cloud keys are deliberately not accepted from this repository's `.env` file. To use a
+direct API, open **Edit environment variables for your account** from the Windows Start
+menu and create only the user variable you need: `OPENAI_API_KEY` or
+`ANTHROPIC_API_KEY`. Paste the value into the Windows variable editor, not a PowerShell
+or Command Prompt command where shell history may retain it, then open a new terminal or
+restart JARVIS. Environment variables remain readable by other processes running as
+your Windows user, so an official subscription CLI login or OS credential store is
+preferable when available.
 
-```powershell
-# Run only the provider line(s) you intend to use. Replace the placeholders locally.
-setx OPENAI_API_KEY "your-openai-api-key"
-setx ANTHROPIC_API_KEY "your-anthropic-api-key"
-```
+Never paste a credential into JARVIS chat, a prompt, issue, report, screenshot, tracked
+file, or recorded shell command. If a credential has appeared in any of those places,
+deleting or redacting the text is not sufficient: revoke and replace the credential at
+its provider before using it again. See the [security policy](SECURITY.md) for the
+rotation checklist.
 
 Select providers per profile in `.env` without placing the keys there:
 

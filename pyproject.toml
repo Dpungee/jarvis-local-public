@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "jarvis-local"
-version = "0.6.0"
+version = "0.6.1"
 description = "Windows-first, local-first personal AI agent with automatic model routing, provenance-aware memory, bounded tools, and approval-gated automation."
 readme = "README.md"
 requires-python = ">=3.11,<3.14"

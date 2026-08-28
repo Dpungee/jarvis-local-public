@@ -19,6 +19,30 @@ reproduction conditions, observed impact, and whether the behavior crossed an ap
 or containment boundary. Redact every token, credential, personal path, and private
 record.
 
+## Credential exposure and rotation
+
+Treat a credential as exposed if it was pasted into a chat, prompt, recorded terminal
+command, report, issue, screenshot, log, tracked file, or Git history. Removing the text,
+rewriting Git history, or deleting a local file does not revoke a copied credential.
+
+1. Revoke the exposed API key, token, OAuth grant, bot token, or session at the service
+   that issued it. Do not ask JARVIS to retrieve or display the old value.
+2. Review the provider's recent activity and authorized applications for unexpected use.
+3. Create a replacement with the narrowest practical scope. For OAuth services such as
+   Google Drive, remove the local token and complete a fresh authorization using the
+   intended access mode. For GitHub CLI, revoke the affected authorization and sign in
+   again through the official `gh` flow.
+4. Store the replacement only in the documented Windows user environment, official CLI
+   credential store, or dedicated local credential directory. An ignored `.env` file is
+   still plaintext and must never be committed, synced publicly, or attached to a report.
+5. Restart affected JARVIS processes, verify the old credential no longer works, and
+   record only the rotation date and provider—not the secret—in the incident record.
+
+OpenAI, Anthropic, Ollama, Telegram, Home Assistant, GitHub, and Google credentials are
+independent; rotate every service whose value or authorization may have been exposed.
+Credential rotation is an operator action and cannot be inferred from a clean source
+scan.
+
 ## Supported versions
 
 JARVIS Local is currently an alpha public preview. Security fixes target the latest

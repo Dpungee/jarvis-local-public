@@ -746,8 +746,9 @@ class ToolTests(unittest.TestCase):
                 'office chair "mesh" "adjustable lumbar support" armrests price'
             )
 
-        self.assertTrue(any(url.startswith("https://search.brave.com") for url in fetched))
-        self.assertTrue(any(url.startswith("https://lite.duckduckgo.com") for url in fetched))
+        fetched_hosts = {urlsplit(url).hostname for url in fetched}
+        self.assertIn("search.brave.com", fetched_hosts)
+        self.assertIn("lite.duckduckgo.com", fetched_hosts)
         self.assertEqual(
             [page["url"] for page in payload["verified_pages"]],
             ["https://shop.example/product/ergo-work"],

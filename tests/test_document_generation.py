@@ -152,7 +152,8 @@ class DocumentGenerationTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             workspace = Path(directory)
             secret = "sk-proj-" + "A" * 32
-            (workspace / "report.json").write_text(
+            # Deliberate fake canary proves the generated document redacts secrets.
+            (workspace / "report.json").write_text(  # lgtm[py/clear-text-storage-sensitive-data]
                 json.dumps({
                     "title": "Safe report",
                     "sections": [{

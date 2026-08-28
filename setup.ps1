@@ -2,6 +2,15 @@ Set-StrictMode -Version 2.0
 $ErrorActionPreference = "Stop"
 Set-Location -LiteralPath $PSScriptRoot
 
+trap {
+    [Console]::Error.WriteLine("")
+    [Console]::Error.WriteLine("JARVIS setup stopped safely.")
+    [Console]::Error.WriteLine("$($_.Exception.Message)")
+    [Console]::Error.WriteLine("")
+    [Console]::Error.WriteLine("Fix the item above, then double-click setup.bat again.")
+    exit 1
+}
+
 function Invoke-NativeCommand {
     [CmdletBinding()]
     param(
@@ -161,10 +170,12 @@ function Test-JarvisModelInstalled {
     return $false
 }
 
-Write-Host "Checking Python and provider setup..."
+Write-Host "JARVIS Local setup"
+Write-Host ""
+Write-Host "[1/4] Checking Python..."
 $pythonCommand = Get-Command -Name "python" -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
 if (-not $pythonCommand) {
-    throw "Python was not found. Install Python 3.11, 3.12, or 3.13 and make sure 'python' is on PATH."
+    throw "Python was not found. Install Python 3.11, 3.12, or 3.13 from https://www.python.org/downloads/windows/ and select 'Add python.exe to PATH', then rerun setup."
 }
 $python = $pythonCommand.Source
 
@@ -180,12 +191,15 @@ if ($pythonVersion -lt [version]"3.11" -or $pythonVersion -ge [version]"3.14") {
     throw "Python 3.11, 3.12, or 3.13 is required; found $pythonVersion."
 }
 
-Write-Host "Installing JARVIS and its declared document-generation libraries..."
+Write-Host "Using Python $pythonVersion at $python"
+Write-Host "[2/4] Installing JARVIS and its document-generation libraries..."
+Write-Host "This public-preview installer uses the Python environment shown above; it does not create a virtual environment."
 Invoke-NativeCommand -FilePath $python -ArgumentList @(
     "-X", "utf8", "-m", "pip", "install", "--disable-pip-version-check",
     "--no-input", "--editable", ".[documents]"
 )
 
+Write-Host "[3/4] Reviewing model-provider and optional-feature choices..."
 Invoke-NativeCommand -FilePath $python -ArgumentList @(
     "-X", "utf8", "-m", "jarvis.provider_setup", "--interactive"
 )
@@ -220,6 +234,8 @@ if ($missingModels.Count -gt 0) {
     }
 }
 
+Write-Host "[4/4] Verifying the installation..."
 Invoke-NativeCommand -FilePath $python -ArgumentList @("-X", "utf8", "-m", "jarvis", "doctor")
 Write-Host ""
-Write-Host "Ready. Double-click start_jarvis.bat or run: python -m jarvis"
+Write-Host "Ready. Double-click start_jarvis_presence.bat to open the recommended browser interface."
+Write-Host "Terminal alternative: double-click start_jarvis.bat or run python -m jarvis"

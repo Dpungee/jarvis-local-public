@@ -157,6 +157,19 @@ def indicator_presentation(state: dict[str, Any] | None) -> IndicatorPresentatio
     return IndicatorPresentation(label, detail, color, mode, False, True)
 
 
+def indicator_should_be_visible(state: dict[str, Any] | None) -> bool:
+    """Show controls after Presence returns a real Companion status.
+
+    A missing status remains hidden so startup and connection failures do not flash
+    an unactionable window.  Off, paused, and unavailable states remain visible:
+    those labels tell the operator that observation is not happening and preserve
+    the On/Resume controls needed to change that state.
+    """
+
+    view = indicator_presentation(state)
+    return isinstance(state, dict) and view.online
+
+
 class CompanionIndicatorClient:
     """Minimal loopback client that never requests titles, rules, or screen data."""
 
@@ -351,6 +364,9 @@ class CompanionIndicatorApp:
         self.client = client
         self.parent_pid = parent_pid
         self.root = tk.Tk(className="JarvisCompanionIndicator")
+        # Do not flash a connecting indicator before the first bounded status poll.
+        # The window becomes visible after Presence returns a real Companion state.
+        self.root.withdraw()
         self.root.title(INDICATOR_WINDOW_TITLE)
         self.root.configure(bg="#171717")
         self.root.resizable(False, False)
@@ -615,9 +631,14 @@ class CompanionIndicatorApp:
             state="normal" if active else "disabled",
         )
         self._off.configure(state="normal" if usable and view.mode != "disabled" else "disabled")
-        self._render_suggestion(
-            state.get("suggestion") if isinstance(state, dict) else None
-        )
+        if indicator_should_be_visible(state):
+            self.root.deiconify()
+            self._render_suggestion(
+                state.get("suggestion") if isinstance(state, dict) else None
+            )
+        else:
+            self.root.withdraw()
+            self._hide_suggestion()
 
     def _poll(self) -> None:
         if not _parent_is_alive(self.parent_pid):

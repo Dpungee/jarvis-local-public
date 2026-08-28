@@ -1026,26 +1026,65 @@ def run_interactive(
         return status
     print("\nOptional Jarvis features", file=output)
     print("Choose Set up, Not now, or Keep disabled for each item.", file=output)
-    print("Every choice can be changed later in Jarvis Settings or by asking Jarvis.\n", file=output)
+    print("Every choice can be changed later in Jarvis Settings or by asking Jarvis.", file=output)
+    print(
+        "This review only saves local settings. It does not download, scan, pair, "
+        "or contain anything.\n",
+        file=output,
+    )
     current_sha = str(status["configuration_sha256"])
     for row in pending:
         print(str(row["title"]), file=output)
         print(f"  {row['description']}", file=output)
         print(f"  Safety: {row['safety_boundary']}", file=output)
-        try:
-            answer = input_fn("  [s]et up / [n]ot now / keep [d]isabled (default n): ")
-        except (EOFError, KeyboardInterrupt):
-            answer = "n"
-        selected = {"s": "setup", "setup": "setup", "d": "disable", "disable": "disable"}.get(
-            str(answer).strip().casefold(), "skip"
-        )
+        dependencies = FeatureOnboardingStore._dependency_ids(str(row["capability_id"]))
+        if dependencies:
+            dependency_titles = ", ".join(
+                _FEATURE_BY_ID[item].title for item in dependencies
+            )
+            print(f"  Set up also enables: {dependency_titles}", file=output)
+        selected = "skip"
+        for _attempt in range(3):
+            try:
+                answer = input_fn("  [s]et up / [n]ot now / keep [d]isabled (default n): ")
+            except (EOFError, KeyboardInterrupt):
+                answer = "n"
+            normalized = str(answer).strip().casefold()
+            choices = {
+                "": "skip",
+                "s": "setup",
+                "setup": "setup",
+                "n": "skip",
+                "no": "skip",
+                "skip": "skip",
+                "not now": "skip",
+                "d": "disable",
+                "disable": "disable",
+            }
+            if normalized in choices:
+                selected = choices[normalized]
+                break
+            print("  Enter s, n, or d.", file=output)
+        else:
+            print("  Choice was not recognized; leaving this feature for later.", file=output)
         result = store.decide(
             str(row["capability_id"]),
             selected,
             expected_configuration_sha256=current_sha,
         )
         current_sha = str(result["configuration_sha256"])
-        print(f"  Saved: {selected.replace('_', ' ')}\n", file=output)
+        label = {
+            "setup": "Set up",
+            "skip": "Not now",
+            "disable": "Keep disabled",
+        }[selected]
+        print(f"  Saved: {label}", file=output)
+        also_changed = [str(item) for item in result.get("also_changed", [])]
+        if also_changed:
+            related = ", ".join(_FEATURE_BY_ID[item].title for item in also_changed)
+            action = "Enabled prerequisite" if selected == "setup" else "Also disabled"
+            print(f"  {action}: {related}", file=output)
+        print("", file=output)
     print("Optional-feature review complete. Configuration changes apply after Jarvis restarts.", file=output)
     return store.list_status()
 

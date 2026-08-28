@@ -121,6 +121,8 @@ class FeatureOnboardingTests(unittest.TestCase):
         for spec in FEATURE_SPECS:
             self.assertIn(spec.title, rendered)
         self.assertIn("can be changed later", rendered)
+        self.assertIn("does not download, scan, pair, or contain anything", rendered)
+        self.assertIn("Set up also enables: Home-network inventory", rendered)
 
         no_prompt = Mock(side_effect=AssertionError("completed review must not reprompt"))
         rerun = run_interactive(
@@ -130,6 +132,41 @@ class FeatureOnboardingTests(unittest.TestCase):
         )
         self.assertTrue(rerun["complete"])
         no_prompt.assert_not_called()
+
+    def test_interactive_invalid_choice_reprompts_instead_of_silently_skipping(self) -> None:
+        answers = Mock(
+            side_effect=[
+                "maybe",
+                "s",
+                *("n" for _ in range(len(EXPECTED_FEATURE_IDS) - 1)),
+            ]
+        )
+        output = io.StringIO()
+
+        completed = run_interactive(self.store, input_fn=answers, output=output)
+
+        self.assertTrue(completed["complete"])
+        self.assertEqual(answers.call_count, len(EXPECTED_FEATURE_IDS) + 1)
+        self.assertIn("Enter s, n, or d.", output.getvalue())
+        first = _by_id(_features(completed))["private-lan-inventory"]
+        self.assertEqual(first["decision"], "setup")
+
+    def test_interactive_discloses_and_reports_automatic_prerequisites(self) -> None:
+        answers = Mock(
+            side_effect=[
+                "n",
+                "s",
+                *("n" for _ in range(len(EXPECTED_FEATURE_IDS) - 2)),
+            ]
+        )
+        output = io.StringIO()
+
+        completed = run_interactive(self.store, input_fn=answers, output=output)
+
+        self.assertTrue(completed["complete"])
+        rendered = output.getvalue()
+        self.assertIn("Set up also enables: Home-network inventory", rendered)
+        self.assertIn("Enabled prerequisite: Home-network inventory", rendered)
 
     def test_windows_installer_runs_optional_review_after_provider_setup(self) -> None:
         setup = (Path(__file__).resolve().parents[1] / "setup.ps1").read_text(
@@ -289,7 +326,9 @@ class FeatureOnboardingTests(unittest.TestCase):
     def test_only_managed_env_keys_change_and_chat_safe_results_hide_secrets(self) -> None:
         env_path = self.root / ".env"
         secret = "sk-test-this-must-never-be-returned"
-        env_path.write_text(
+        # Deliberate fake canary verifies unmanaged secrets survive locally but never
+        # cross the chat-safe result boundary.
+        env_path.write_text(  # lgtm[py/clear-text-storage-sensitive-data]
             "# operator-owned line\n"
             f"OPENAI_API_KEY={secret}\n"
             "JARVIS_COMMAND_TIMEOUT=77\n"
@@ -406,7 +445,8 @@ class FeatureOnboardingTests(unittest.TestCase):
             f"OPENAI_API_KEY={secret}\n"
             "OPERATOR_SETTING=preserve-this\n"
         ).encode("utf-8")
-        env_path.write_bytes(original)
+        # Deliberate fake canary verifies rollback restores exact operator-owned bytes.
+        env_path.write_bytes(original)  # lgtm[py/clear-text-storage-sensitive-data]
 
         with patch.object(
             self.store,

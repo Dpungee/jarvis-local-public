@@ -9,6 +9,7 @@ from jarvis.companion_indicator import (
     _show_windows_no_activate,
     _tk_geometry,
     indicator_presentation,
+    indicator_should_be_visible,
 )
 
 
@@ -63,6 +64,26 @@ class CompanionIndicatorTests(unittest.TestCase):
         for state, expected in cases:
             with self.subTest(state=state):
                 self.assertEqual(indicator_presentation(state).label, expected)
+
+    def test_indicator_stays_visible_for_operator_controllable_states(self):
+        self.assertFalse(indicator_should_be_visible(None))
+
+        visible_states = [
+            {"mode": "disabled", "paused": True, "available": True},
+            {"mode": "observe", "paused": True, "available": True},
+            {"mode": "observe", "paused": False, "available": False},
+        ]
+        for state in visible_states:
+            with self.subTest(state=state):
+                self.assertTrue(indicator_should_be_visible(state))
+
+        for mode in ("observe", "suggest", "collaborate"):
+            with self.subTest(mode=mode):
+                self.assertTrue(indicator_should_be_visible({
+                    "mode": mode,
+                    "paused": False,
+                    "available": True,
+                }))
 
     def test_client_accepts_only_loopback_and_bounded_modes(self):
         with self.assertRaises(ValueError):

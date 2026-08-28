@@ -1357,6 +1357,27 @@ class ValidationAndDoctorTests(unittest.TestCase):
         self.assertNotIn("never-print-this-value", rendered)
         self.assertIn("[redacted]", rendered)
 
+    def test_event_redacts_structured_sensitive_fields_before_printing(self):
+        output = io.StringIO()
+        secret = "sk-proj-" + "A" * 32
+        bearer = "Bearer abcdefghijklmnopqrstuvwxyz"
+        content_secret = "password=private-response-secret"
+        message = json.dumps(
+            {
+                "status": "provider failed",
+                "api_key": secret,
+                "nested": {"authorization": bearer},
+                "content": content_secret,
+            }
+        )
+        with patch.object(cli.sys, "stdout", output):
+            cli.event(message)
+        rendered = output.getvalue()
+        self.assertNotIn(secret, rendered)
+        self.assertNotIn(bearer, rendered)
+        self.assertNotIn("private-response-secret", rendered)
+        self.assertGreaterEqual(rendered.count("[redacted]"), 3)
+
     def test_approval_list_shows_scope_and_exact_sanitized_resource(self):
         with tempfile.TemporaryDirectory() as temporary:
             data_dir = Path(temporary)

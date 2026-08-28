@@ -4,6 +4,7 @@ import argparse
 import os
 import re
 import shutil
+import sqlite3
 import stat
 import subprocess
 import sys
@@ -60,6 +61,26 @@ _KEY_PATTERN = re.compile(r"^\s*([A-Z][A-Z0-9_]*)\s*=")
 _WINDOWS_REPARSE_POINT = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
 _CHOICES = frozenset({"codex", "claude", "both"})
 _AUTH_STATUS_MAX_BYTES = 4096
+_LEGACY_DATABASE_EVIDENCE_TABLES = (
+    "conversations",
+    "messages",
+    "memories",
+    "tasks",
+    "learning_topics",
+    "training_examples",
+    "goals",
+    "journal_entries",
+    "preferences",
+    "reflections",
+    "approved_subjects",
+    "proactive_backlog",
+    "approvals",
+    "task_predictions",
+    "model_call_metrics",
+    "scheduled_jobs",
+    "conversation_goals",
+    "screen_companion_rules",
+)
 
 
 class ProviderSetupError(RuntimeError):
@@ -166,6 +187,46 @@ def _ordinary_file(path: Path) -> bool:
     return True
 
 
+def _legacy_database_has_user_state(path: Path) -> bool:
+    """Recognize a used pre-wizard installation without trusting DB existence alone."""
+    try:
+        details = os.lstat(path)
+    except (FileNotFoundError, OSError):
+        return False
+    attributes = getattr(details, "st_file_attributes", 0)
+    if (
+        stat.S_ISLNK(details.st_mode)
+        or attributes & _WINDOWS_REPARSE_POINT
+        or not stat.S_ISREG(details.st_mode)
+    ):
+        return False
+
+    connection: sqlite3.Connection | None = None
+    try:
+        connection = sqlite3.connect(
+            f"{path.resolve().as_uri()}?mode=ro",
+            uri=True,
+            timeout=1.0,
+        )
+        tables = {
+            str(row[0])
+            for row in connection.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table'"
+            ).fetchall()
+        }
+        for table in _LEGACY_DATABASE_EVIDENCE_TABLES:
+            if table not in tables:
+                continue
+            if connection.execute(f'SELECT 1 FROM "{table}" LIMIT 1').fetchone():
+                return True
+    except sqlite3.Error:
+        return False
+    finally:
+        if connection is not None:
+            connection.close()
+    return False
+
+
 def is_setup_complete(
     root: Path | None = None,
     *,
@@ -173,9 +234,10 @@ def is_setup_complete(
 ) -> bool:
     """Return whether first-run setup is complete, preserving historical installs.
 
-    Existing .env files, explicit process-level model settings, and an existing
-    Jarvis database are migration evidence. Their contents are never rewritten by
-    the automatic first-run path.
+    Existing .env files and explicit process-level model settings are migration
+    evidence. A database counts only when it contains durable user-created state;
+    harmless status commands can create an otherwise empty database before the
+    provider wizard runs.
     """
     base = _root_path(root)
     env_path = base / ".env"
@@ -186,12 +248,15 @@ def is_setup_complete(
     values = os.environ if environ is None else environ
     if any(str(values.get(key, "")).strip() for key in _MODEL_ENVIRONMENT_KEYS):
         return True
-    if any(key in values for key in ("OPENAI_API_KEY", "ANTHROPIC_API_KEY")):
+    if any(
+        str(values.get(key, "")).strip()
+        for key in ("OPENAI_API_KEY", "ANTHROPIC_API_KEY")
+    ):
         return True
 
     configured_data = str(values.get("JARVIS_DATA", "")).strip()
     data_dir = Path(configured_data).expanduser() if configured_data else base / "data"
-    return (data_dir / "jarvis.db").is_file()
+    return _legacy_database_has_user_state(data_dir / "jarvis.db")
 
 
 def _provider_values(choice: str) -> dict[str, str]:

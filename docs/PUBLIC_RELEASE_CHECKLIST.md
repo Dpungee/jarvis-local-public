@@ -1,8 +1,8 @@
 # Public-release checklist
 
-Do not publish a tagged release until every required item below is complete. Items that
-depend on the new commit being present on GitHub remain intentionally pending until the
-operator authorizes the first push.
+This checklist records verified evidence for the published `v0.6.0` public preview and
+the operator or repository actions that remain pending. Do not infer completion of an
+unchecked item from a clean source scan.
 
 ## Privacy and credentials
 
@@ -15,26 +15,36 @@ operator authorizes the first push.
 - [x] Publish from a clean root commit because private material appeared in development
       and earlier public history.
 - [ ] Rotate every credential that was ever pasted into a prompt, terminal, report, or
-      tracked file. This is an operator attestation; the candidate contains no detected
-      credential.
-- [x] Use a GitHub no-reply address for commits if the maintainer email should remain
-      private.
+      tracked file. This is an operator attestation; the published source and artifacts
+      contain no detected credential.
+- [x] Ensure every reachable release commit and annotated tag uses a GitHub no-reply
+      address when the maintainer email should remain private. Public `main` and
+      `v0.6.0` now resolve to the sanitized no-reply release commit, with the released
+      source tree unchanged.
 
 ## Product trust
 
 - [x] Finish active changes and run the full deterministic suite on the release candidate.
-- [ ] Confirm the GitHub Actions matrix passes from a clean checkout.
+- [x] Confirm the GitHub Actions matrix and privacy scan pass from a clean checkout on
+      Python 3.11, 3.12, and 3.13 for Windows.
+- [ ] Resolve or justify every open CodeQL finding from the completed Python,
+      JavaScript/TypeScript, and GitHub Actions analysis. Nine findings are under
+      triage; do not describe the CodeQL result as clean until that review is complete.
 - [ ] Verify setup and first launch on a clean Windows user account.
 - [ ] Capture one sanitized Presence screenshot or short demo with synthetic content.
 - [x] Publish measured capabilities and current limitations without aspirational claims.
-- [x] Enable GitHub private vulnerability reporting.
+- [x] Enable GitHub private vulnerability reporting and verify the repository API reports
+      `private_vulnerability_reporting.enabled=true`.
 
 ## Repository presentation
 
 - [x] Include the owner-approved Apache-2.0 license and NOTICE file.
-- [x] Prepare a concise public description, summary, and topics.
-- [ ] Apply the prepared metadata and set the homepage/documentation link on GitHub.
-- [ ] Create a tagged release with release notes and a reproducible commit.
+- [x] Apply the prepared public description, summary, and topics.
+- [ ] Set the homepage/documentation link on GitHub.
+- [x] Create the `v0.6.0` tagged prerelease with release notes, source archives,
+      distributions, and published SHA-256 checksums.
+- [x] Retire older public preview refs and keep the development repository and archive
+      private; anonymous checks return no older public branch, tag, release, or commit.
 - [x] Keep raw internal queues and generated evidence excluded; publish only curated,
       anonymized summaries under `docs/`.
 - [x] Review every tracked entry and exclude generated binary artifacts.
@@ -60,14 +70,13 @@ professional security product, or conscious system.
 **Topics:** `ai-agent`, `local-ai`, `ollama`, `python`, `personal-assistant`,
 `multi-agent`, `memory`, `tool-use`, `windows`, `openai`, `anthropic`
 
-The candidate's local clean-root history scan and privacy cleanup are complete. Before
-publication, replace or retire every older public branch, tag, release asset, or other
-reachable ref that does not meet the current privacy standard.
+The published source tree, distributions, and clean-root content history passed the
+privacy and dedicated secret scans. Future releases must be pushed from a disposable
+public-only clone with exact branch and tag refspecs; never use `--all`, `--tags`, or
+`--mirror` from a clone that also contains private development refs.
 
-## Intentionally pending after push authorization
+## Remaining post-release gates
 
-The local candidate is ready for its final exact-commit checks. GitHub Actions, the
-clean-user installation smoke test, sanitized demo capture, GitHub homepage update,
-retirement of older preview refs that do not meet the current standard, and the
-`v0.6.0` tag remain release gates.
-Do not mark them complete or create a release until their evidence exists.
+Credential rotation attestation, CodeQL finding triage, clean-Windows-user first launch,
+sanitized demo capture, and a GitHub homepage/documentation link remain pending. Do not
+mark any of them complete until their direct evidence exists.

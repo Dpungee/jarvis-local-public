@@ -182,7 +182,11 @@ class CapabilityGatewayTests(unittest.TestCase):
         cases.append(wrong_enum)
         for index, manifest in enumerate(cases):
             with self.subTest(index=index):
-                self.manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+                # Synthetic invalid connector fixture; it contains an environment-variable
+                # name, never a credential value.
+                self.manifest_path.write_text(  # lgtm[py/clear-text-storage-sensitive-data]
+                    json.dumps(manifest), encoding="utf-8"
+                )
                 with self.assertRaises(ConnectorError):
                     self.gateway.validate_workspace_manifest("connector.json")
 

@@ -7,9 +7,35 @@ semantic versioning for tagged releases.
 
 No changes yet.
 
+## [0.6.1] - 2026-08-28
+
+Public-preview stabilization release.
+
+### First-run and companion fixes
+
+- Kept first-run provider setup required after a harmless status check creates an empty
+  runtime database, while preserving migrations for installations with real user state.
+- Ignored empty API-key environment variables when deciding whether setup is complete.
+- Made the optional-feature review disclose prerequisites, reject unrecognized choices,
+  and state clearly that the review itself performs no scans, pairing, or containment.
+- Prevented the Companion indicator from flashing before its first real status while
+  preserving its On/Resume controls when observation is off, paused, or unavailable.
+
+### Security and release maintenance
+
+- Expanded ignored credential, private-key, cloud-client, and SQLite sidecar paths.
+- Replaced shell-based API-key examples with no-echo Windows UI and credential-rotation
+  guidance.
+- Extended the public-release checker to inspect author, committer, tagger, commit-message,
+  and annotated-tag metadata without echoing detected personal values.
+- Added regression coverage for commit metadata and strengthened redaction at the CLI
+  event-output boundary. CodeQL findings remain under review and are not claimed clean.
+- Added a fail-closed, two-phase public-publishing guard for protected candidate branches
+  and release tags from disposable public-only clones.
+
 ## [0.6.0] - 2026-08-28
 
-Public preview candidate.
+Public preview release.
 
 ### Highlights
 
@@ -46,5 +72,6 @@ Public preview candidate.
 - Public Presence is a disconnected foundation only; it cannot publish or connect to
   a social account in this release.
 
-[Unreleased]: https://github.com/Dpungee/jarvis-local-public/compare/v0.6.0...HEAD
+[Unreleased]: https://github.com/Dpungee/jarvis-local-public/compare/v0.6.1...HEAD
+[0.6.1]: https://github.com/Dpungee/jarvis-local-public/compare/v0.6.0...v0.6.1
 [0.6.0]: https://github.com/Dpungee/jarvis-local-public/releases/tag/v0.6.0

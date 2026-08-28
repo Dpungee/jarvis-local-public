@@ -754,6 +754,8 @@ class WindowsScriptTests(unittest.TestCase):
         self.assertEqual(self._trace_lines().count("python inventory"), 2)
         self.assertNotIn("FORBIDDEN", "\n".join(self._trace_lines()))
         self.assertIn("Ready.", completed.stdout)
+        self.assertIn("start_jarvis_presence.bat", completed.stdout)
+        self.assertIn("does not create a virtual environment", completed.stdout)
 
     def test_setup_skips_case_insensitive_exact_installs(self):
         required = ("one:1", "two:2", "three:3")
@@ -1012,6 +1014,8 @@ class WindowsScriptTests(unittest.TestCase):
 
     def test_static_release_contracts_and_batch_exit_codes(self):
         setup_source = (ROOT / "setup.ps1").read_text(encoding="utf-8")
+        self.assertIn("JARVIS setup stopped safely.", setup_source)
+        self.assertIn("python.org/downloads/windows", setup_source)
         self.assertIn("Config.load()", setup_source)
         self.assertIn("OllamaClient", setup_source)
         self.assertIn("client.models(refresh=True)", setup_source)
@@ -1095,6 +1099,19 @@ class WindowsScriptTests(unittest.TestCase):
         uninstall_presence = (ROOT / "uninstall_presence.ps1").read_text(encoding="utf-8")
         self.assertIn("Refusing to remove scheduled task", uninstall_presence)
         self.assertIn("Unregister-ScheduledTask", uninstall_presence)
+
+    def test_public_readme_points_nontechnical_users_to_the_supported_first_run(self):
+        readme = (ROOT / "README.md").read_text(encoding="utf-8")
+        guide = (ROOT / "docs" / "WINDOWS_FIRST_RUN.md").read_text(encoding="utf-8")
+
+        self.assertNotIn("Start in two clicks", readme)
+        self.assertIn("Exact release source archive", readme)
+        self.assertIn("docs/WINDOWS_FIRST_RUN.md", readme)
+        self.assertIn("start_jarvis_presence.bat", readme)
+        self.assertIn("does not create a", readme)
+        self.assertIn("virtual environment", readme)
+        self.assertIn("Manual local-only Ollama path", guide)
+        self.assertIn("Any existing `.env`", guide)
 
     @unittest.skipUnless(COMSPEC, "cmd.exe is required")
     def test_start_batch_preserves_python_exit_code(self):

@@ -221,7 +221,10 @@ def _styled(text: str, code: str, stream: TextIO | None = None) -> str:
 
 
 def event(message: str) -> None:
-    print(_styled(f"[{_safe_summary(message, 300)}]", "2"), flush=True)
+    safe_message = _safe_summary(message, 300)
+    # _safe_summary applies the shared secret redactor, strips control/newline
+    # structure, normalizes whitespace, and bounds the result before this sink.
+    print(_styled(f"[{safe_message}]", "2"), flush=True)  # lgtm[py/clear-text-logging-sensitive-data]
 
 
 def _new_client(config: Config) -> ModelClient:

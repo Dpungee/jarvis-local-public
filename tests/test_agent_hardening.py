@@ -9,6 +9,7 @@ import unittest
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from urllib.parse import urlsplit
 from unittest.mock import patch
 
 from jarvis.agent import (
@@ -4249,8 +4250,16 @@ class AgentHardeningTests(unittest.TestCase):
         pages = {
             url: {
                 "url": url,
-                "title": "Python home" if "python.org" in url else "Government login",
-                "content": "Download Python releases." if "python.org" in url else "Sign in securely.",
+                "title": (
+                    "Python home"
+                    if urlsplit(url).hostname == "www.python.org"
+                    else "Government login"
+                ),
+                "content": (
+                    "Download Python releases."
+                    if urlsplit(url).hostname == "www.python.org"
+                    else "Sign in securely."
+                ),
             }
             for url in urls
         }

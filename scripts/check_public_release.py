@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
-"""Fail closed when a proposed public Git snapshot contains private artifacts.
+"""Fail closed when a proposed public Git release contains private artifacts.
 
-The check inspects the stage-0 Git index (the exact snapshot a commit would
-publish) and the corresponding tracked working-tree files. Ignored and
-untracked local files are deliberately out of scope until they are staged.
+The check inspects reachable commit/tag metadata, the stage-0 Git index (the
+exact snapshot a commit would publish), and corresponding tracked working-tree
+files. Ignored and untracked local files are deliberately out of scope until
+they are staged.
 """
 
 from __future__ import annotations
@@ -92,7 +93,7 @@ _ALLOWED_EMAIL_DOMAINS = {
     "example.org",
     "users.noreply.github.com",
 }
-_ALLOWED_EMAIL_ADDRESSES = {"git@github.com"}
+_ALLOWED_EMAIL_ADDRESSES = {"git@github.com", "noreply@github.com"}
 
 
 def _git(repo: Path, *args: str, input_bytes: bytes | None = None) -> bytes:
@@ -186,7 +187,7 @@ def _content_findings(text: str) -> list[str]:
         for match in pattern.finditer(text):
             username = match.group(1).casefold().rstrip(".,;:)")
             if username not in _ALLOWED_PLACEHOLDER_USERS:
-                findings.append(f"concrete {label} for user {username!r}")
+                findings.append(f"concrete {label}")
 
     for match in _EMAIL_RE.finditer(text):
         address = match.group(0).casefold()
@@ -197,13 +198,66 @@ def _content_findings(text: str) -> list[str]:
             and domain not in _ALLOWED_EMAIL_DOMAINS
             and not is_reserved_example
         ):
-            findings.append(f"non-example email address: {address}")
+            findings.append("non-example email address")
 
     return sorted(set(findings))
 
 
-def check_release(repo: Path) -> list[str]:
+def _history_identity_findings(repo: Path) -> list[str]:
     findings: list[str] = []
+    history = _git(
+        repo,
+        "log",
+        "HEAD",
+        "--format=%H%x1f%an%x1f%ae%x1f%cn%x1f%ce%x1e",
+    )
+    for raw_record in history.split(b"\x1e"):
+        record = raw_record.strip(b"\r\n")
+        if not record:
+            continue
+        fields = record.decode("utf-8", errors="replace").split("\x1f")
+        if len(fields) != 5:
+            raise RuntimeError("Git returned malformed commit identity metadata")
+        commit_id, author_name, author_email, committer_name, committer_email = fields
+        for role, name, email in (
+            ("author", author_name, author_email),
+            ("committer", committer_name, committer_email),
+        ):
+            for reason in _content_findings(f"{name} <{email}>"):
+                findings.append(
+                    f"commit {commit_id} {role} identity: {reason}"
+                )
+        message = _git(repo, "show", "-s", "--format=%B", commit_id).decode(
+            "utf-8", errors="replace"
+        )
+        for reason in _content_findings(message):
+            findings.append(f"commit {commit_id} message: {reason}")
+
+    tags = _git(
+        repo,
+        "tag",
+        "--merged",
+        "HEAD",
+        "--format=%(refname)%00%(taggername)%00%(taggeremail)",
+    )
+    for raw_record in tags.splitlines():
+        fields = raw_record.decode("utf-8", errors="replace").split("\0")
+        if len(fields) != 3:
+            raise RuntimeError("Git returned malformed tag identity metadata")
+        refname, tagger_name, tagger_email = fields
+        if tagger_email:
+            for reason in _content_findings(f"{tagger_name} {tagger_email}"):
+                findings.append(f"{refname} tagger identity: {reason}")
+        message = _git(repo, "for-each-ref", "--format=%(contents)", refname).decode(
+            "utf-8", errors="replace"
+        )
+        for reason in _content_findings(message):
+            findings.append(f"{refname} message: {reason}")
+    return sorted(set(findings))
+
+
+def check_release(repo: Path) -> list[str]:
+    findings: list[str] = _history_identity_findings(repo)
     for path, object_id, mode in _indexed_files(repo):
         for reason in _path_findings(path):
             findings.append(f"{path}: {reason}")
@@ -275,7 +329,10 @@ def main() -> int:
         return 1
 
     print("PUBLIC RELEASE CHECK PASSED")
-    print("No blocked paths, concrete user-home paths, or non-example emails were found.")
+    print(
+        "No blocked paths, concrete user-home paths, non-example emails, "
+        "or private Git identities were found."
+    )
     return 0
 
 

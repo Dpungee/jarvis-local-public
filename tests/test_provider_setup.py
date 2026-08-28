@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import io
 import os
+import sqlite3
 import subprocess
 import tempfile
 import unittest
+from contextlib import closing
 from pathlib import Path
 from unittest.mock import Mock, patch
 
@@ -34,15 +36,36 @@ class ProviderSetupTests(unittest.TestCase):
             executable=Path(f"C:/{provider}.exe"),
         )
 
-    def test_existing_env_or_database_preserves_historical_installation(self) -> None:
+    def test_existing_env_or_used_database_preserves_historical_installation(self) -> None:
         (self.root / ".env").write_text("JARVIS_OLLAMA_ENABLED=true\n", encoding="utf-8")
         self.assertTrue(provider_setup.is_setup_complete(self.root, environ={}))
 
         (self.root / ".env").unlink()
         data = self.root / "data"
         data.mkdir()
-        (data / "jarvis.db").write_bytes(b"existing")
+        with closing(sqlite3.connect(data / "jarvis.db")) as connection:
+            connection.execute("CREATE TABLE messages (id INTEGER PRIMARY KEY)")
+            connection.execute("INSERT INTO messages DEFAULT VALUES")
+            connection.commit()
         self.assertTrue(provider_setup.is_setup_complete(self.root, environ={}))
+
+    def test_fresh_runtime_database_does_not_suppress_provider_setup(self) -> None:
+        data = self.root / "data"
+        data.mkdir()
+        with closing(sqlite3.connect(data / "jarvis.db")) as connection:
+            connection.execute("CREATE TABLE agent_projects (id INTEGER PRIMARY KEY)")
+            connection.execute("INSERT INTO agent_projects DEFAULT VALUES")
+            connection.execute("CREATE TABLE runtime_control (id INTEGER PRIMARY KEY)")
+            connection.execute("INSERT INTO runtime_control DEFAULT VALUES")
+            connection.execute("CREATE TABLE self_snapshots (id INTEGER PRIMARY KEY)")
+            connection.execute("INSERT INTO self_snapshots DEFAULT VALUES")
+            connection.execute("CREATE TABLE specialist_agents (id INTEGER PRIMARY KEY)")
+            connection.execute("INSERT INTO specialist_agents DEFAULT VALUES")
+            connection.execute("CREATE TABLE conversations (id INTEGER PRIMARY KEY)")
+            connection.execute("CREATE TABLE messages (id INTEGER PRIMARY KEY)")
+            connection.execute("CREATE TABLE tasks (id INTEGER PRIMARY KEY)")
+            connection.commit()
+        self.assertFalse(provider_setup.is_setup_complete(self.root, environ={}))
 
     def test_explicit_process_configuration_counts_as_migrated(self) -> None:
         self.assertTrue(
@@ -69,6 +92,19 @@ class ProviderSetupTests(unittest.TestCase):
         )
         self.assertEqual(result.state, "existing")
         input_fn.assert_not_called()
+
+    def test_empty_api_key_environment_does_not_skip_first_run_setup(self) -> None:
+        for value in ("", "   ", "\t"):
+            with self.subTest(value=repr(value)):
+                self.assertFalse(
+                    provider_setup.is_setup_complete(
+                        self.root,
+                        environ={
+                            "OPENAI_API_KEY": value,
+                            "ANTHROPIC_API_KEY": value,
+                        },
+                    )
+                )
 
     def test_headless_first_run_fails_before_reading_input(self) -> None:
         input_fn = Mock(side_effect=AssertionError("headless setup must not prompt"))

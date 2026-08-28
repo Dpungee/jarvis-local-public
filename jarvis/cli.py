@@ -220,12 +220,58 @@ def _styled(text: str, code: str, stream: TextIO | None = None) -> str:
     return f"\033[{code}m{text}\033[0m" if _supports_color(target) else text
 
 
+_CLI_EVENT_LABELS: tuple[tuple[str, str], ...] = (
+    ("processing -", "processing"),
+    ("reasoning -", "reasoning"),
+    ("tool -", "tool activity"),
+    ("model -", "model activity"),
+    ("failover -", "provider failover"),
+    ("recovery -", "recovering request"),
+    ("memory -", "memory recall"),
+    ("specialist ", "specialist coordination"),
+    ("image ", "image work"),
+    ("learning ", "learning"),
+    ("skill ", "skill management"),
+    ("network ", "network analysis"),
+    ("storage ", "storage analysis"),
+    ("connector ", "connector activity"),
+    ("implementation ", "implementation review"),
+    ("repair ", "repairing"),
+    ("adversarial ", "adversarial verification"),
+    ("artifact ", "artifact launch"),
+    ("gateway ", "gateway activity"),
+    ("vault ", "vault activity"),
+    ("research", "researching"),
+    ("current ", "current-information lookup"),
+    ("product ", "product lookup"),
+    ("planning ", "planning"),
+    ("review", "reviewing"),
+    ("verif", "verifying"),
+    ("acceptance correction", "correcting result"),
+    ("task contract", "resolving task"),
+    ("clarification requested", "clarification needed"),
+    ("instant response", "instant response"),
+    ("screen companion", "screen companion"),
+    ("continuing ", "continuing request"),
+    ("building ", "building capability"),
+    ("synthesizing", "synthesizing"),
+)
+
+
+def _cli_event_label(message: str) -> str:
+    normalized = str(message).strip().casefold()
+    for prefix, label in _CLI_EVENT_LABELS:
+        if normalized.startswith(prefix):
+            return label
+    return "working"
+
+
 def event(message: str) -> None:
-    safe_message = _safe_summary(message, 300)
-    # _safe_summary applies the shared secret redactor, strips control/newline
-    # structure, normalizes whitespace, and bounds the result before this sink.
-    # lgtm[py/clear-text-logging-sensitive-data]
-    print(_styled(f"[{safe_message}]", "2"), flush=True)
+    # Terminal progress is deliberately selected from fixed labels. Presence has
+    # its own sanitized structured event channel; no caller-provided text reaches
+    # this CLI output sink.
+    label = _cli_event_label(message)
+    print(_styled(f"[{label}]", "2"), flush=True)
 
 
 def _new_client(config: Config) -> ModelClient:

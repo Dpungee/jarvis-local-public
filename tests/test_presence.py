@@ -1555,8 +1555,10 @@ class PresenceHelpersTests(unittest.TestCase):
                     self.client = SimpleNamespace(
                         provider_status={"openai_configured": True}
                     )
+                    self.on_event = _args[2] if len(_args) > 2 else (lambda _message: None)
 
                 def run(self, _prompt, *, stream_callback, **_kwargs):
+                    self.on_event("processing - step 7")
                     stream_callback("Hello ")
                     stream_callback(f"api_key={secret}")
                     return Result(f"Hello api_key={secret}")
@@ -1585,6 +1587,15 @@ class PresenceHelpersTests(unittest.TestCase):
                     rendered = json.dumps(relevant)
                     self.assertNotIn(secret, rendered)
                     self.assertIn("[redacted]", rendered.casefold())
+                    activities = [
+                        event for event in runtime.events_after(0, limit=500)
+                        if event["payload"].get("job_id") == job_id
+                        and event["kind"] == "activity"
+                    ]
+                    self.assertEqual(
+                        activities[-1]["payload"]["message"],
+                        "processing - step 7",
+                    )
                 finally:
                     runtime.shutdown()
 

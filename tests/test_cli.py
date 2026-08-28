@@ -1355,7 +1355,7 @@ class ValidationAndDoctorTests(unittest.TestCase):
             cli.event(f"provider failed: {secret}")
         rendered = output.getvalue()
         self.assertNotIn("never-print-this-value", rendered)
-        self.assertIn("[redacted]", rendered)
+        self.assertEqual(rendered.strip(), "[working]")
 
     def test_event_redacts_structured_sensitive_fields_before_printing(self):
         output = io.StringIO()
@@ -1376,7 +1376,47 @@ class ValidationAndDoctorTests(unittest.TestCase):
         self.assertNotIn(secret, rendered)
         self.assertNotIn(bearer, rendered)
         self.assertNotIn("private-response-secret", rendered)
-        self.assertGreaterEqual(rendered.count("[redacted]"), 3)
+        self.assertEqual(rendered.strip(), "[working]")
+
+    def test_event_reports_fixed_meaningful_progress_categories(self):
+        cases = {
+            "processing - step 3": "[processing]",
+            "reasoning - step 2": "[reasoning]",
+            "tool - web_search": "[tool activity]",
+            "researching - deterministic deep evidence": "[researching]",
+            "failover - provider unavailable": "[provider failover]",
+            "planning implementation - model": "[planning]",
+            "specialist delegated - Archivist - task #7": "[specialist coordination]",
+            "image generation - preparing the requested image": "[image work]",
+            "learning curriculum - scheduling recurring expert study": "[learning]",
+            "skill verified - network-engineering": "[skill management]",
+            "network inventory failed - fresh evidence unavailable": "[network analysis]",
+            "storage report reused - one scan per request": "[storage analysis]",
+            "connector readiness collected - deterministic read-only": "[connector activity]",
+            "implementation checkpoint - independent review": "[implementation review]",
+            "repair verification passed": "[repairing]",
+            "adversarial verification passed": "[adversarial verification]",
+            "artifact launch verified - healthy loopback HTTP response": "[artifact launch]",
+            "gateway cycle failed safely; retrying": "[gateway activity]",
+            "vault - reindexing": "[vault activity]",
+        }
+        for message, expected in cases.items():
+            with self.subTest(message=message):
+                output = io.StringIO()
+                with patch.object(cli.sys, "stdout", output):
+                    cli.event(message)
+                self.assertEqual(output.getvalue().strip(), expected)
+
+    def test_every_event_category_discards_sensitive_suffix_text(self):
+        secret = "password=must-never-reach-terminal"
+        for prefix, expected_label in cli._CLI_EVENT_LABELS:
+            with self.subTest(prefix=prefix):
+                output = io.StringIO()
+                with patch.object(cli.sys, "stdout", output):
+                    cli.event(f"{prefix} {secret}")
+                rendered = output.getvalue().strip()
+                self.assertEqual(rendered, f"[{expected_label}]")
+                self.assertNotIn("must-never-reach-terminal", rendered)
 
     def test_approval_list_shows_scope_and_exact_sanitized_resource(self):
         with tempfile.TemporaryDirectory() as temporary:

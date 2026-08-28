@@ -94,6 +94,7 @@ _ALLOWED_EMAIL_DOMAINS = {
     "users.noreply.github.com",
 }
 _ALLOWED_EMAIL_ADDRESSES = {"git@github.com", "noreply@github.com"}
+_HISTORY_REF_RE = re.compile(r"(?:HEAD|[0-9a-fA-F]{40})\Z")
 
 
 def _git(repo: Path, *args: str, input_bytes: bytes | None = None) -> bytes:
@@ -203,12 +204,32 @@ def _content_findings(text: str) -> list[str]:
     return sorted(set(findings))
 
 
-def _history_identity_findings(repo: Path) -> list[str]:
+def _validated_history_commit(repo: Path, history_ref: str) -> str:
+    candidate = str(history_ref).strip()
+    if _HISTORY_REF_RE.fullmatch(candidate) is None:
+        raise ValueError("history ref must be HEAD or a full 40-character commit ID")
+    commit_id = _git(repo, "rev-parse", "--verify", f"{candidate}^{{commit}}").decode(
+        "ascii", errors="strict"
+    ).strip()
+    ancestor = subprocess.run(
+        ["git", "merge-base", "--is-ancestor", commit_id, "HEAD"],
+        cwd=repo,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.PIPE,
+        check=False,
+    )
+    if ancestor.returncode != 0:
+        raise ValueError("history ref must be an ancestor of the checked-out snapshot")
+    return commit_id
+
+
+def _history_identity_findings(repo: Path, history_ref: str = "HEAD") -> list[str]:
     findings: list[str] = []
+    history_commit = _validated_history_commit(repo, history_ref)
     history = _git(
         repo,
         "log",
-        "HEAD",
+        history_commit,
         "--format=%H%x1f%an%x1f%ae%x1f%cn%x1f%ce%x1e",
     )
     for raw_record in history.split(b"\x1e"):
@@ -237,7 +258,7 @@ def _history_identity_findings(repo: Path) -> list[str]:
         repo,
         "tag",
         "--merged",
-        "HEAD",
+        history_commit,
         "--format=%(refname)%00%(taggername)%00%(taggeremail)",
     )
     for raw_record in tags.splitlines():
@@ -256,8 +277,8 @@ def _history_identity_findings(repo: Path) -> list[str]:
     return sorted(set(findings))
 
 
-def check_release(repo: Path) -> list[str]:
-    findings: list[str] = _history_identity_findings(repo)
+def check_release(repo: Path, *, history_ref: str = "HEAD") -> list[str]:
+    findings: list[str] = _history_identity_findings(repo, history_ref)
     for path, object_id, mode in _indexed_files(repo):
         for reason in _path_findings(path):
             findings.append(f"{path}: {reason}")
@@ -309,6 +330,14 @@ def _parse_args() -> argparse.Namespace:
         default=Path.cwd(),
         help="repository root (default: current directory)",
     )
+    parser.add_argument(
+        "--history-ref",
+        default="HEAD",
+        help=(
+            "reachable history commit to inspect; CI pull requests should pass the "
+            "full head commit instead of GitHub's synthetic merge commit"
+        ),
+    )
     return parser.parse_args()
 
 
@@ -316,7 +345,7 @@ def main() -> int:
     args = _parse_args()
     repo = args.repo.resolve()
     try:
-        findings = check_release(repo)
+        findings = check_release(repo, history_ref=args.history_ref)
     except (OSError, RuntimeError, ValueError) as exc:
         print(f"PUBLIC RELEASE CHECK ERROR: {exc}", file=sys.stderr)
         return 2

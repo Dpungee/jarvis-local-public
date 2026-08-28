@@ -28,6 +28,8 @@ Public-preview stabilization release.
   guidance.
 - Extended the public-release checker to inspect author, committer, tagger, commit-message,
   and annotated-tag metadata without echoing detected personal values.
+- Kept pull-request checks focused on the publishable head history instead of GitHub's
+  temporary merge commit while still scanning the merged working snapshot.
 - Added regression coverage for commit metadata and strengthened redaction at the CLI
   event-output boundary. CodeQL findings remain under review and are not claimed clean.
 - Added a fail-closed, two-phase public-publishing guard for protected candidate branches

@@ -26,7 +26,9 @@ jobs:
           persist-credentials: false
 
       - name: Check public-release privacy boundary
-        run: python scripts/check_public_release.py
+        env:
+          PUBLIC_RELEASE_HISTORY_REF: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: python scripts/check_public_release.py --history-ref "$PUBLIC_RELEASE_HISTORY_REF"
 
       - name: Scan Git history for secrets
         uses: gitleaks/gitleaks-action@e0c47f4f8be36e29cdc102c57e68cb5cbf0e8d1e # v3.0.0

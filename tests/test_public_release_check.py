@@ -82,6 +82,37 @@ class PublicReleaseCheckTests(unittest.TestCase):
         )
         self.assertEqual(check_release(self.repo), [])
 
+    def test_ci_can_scan_pr_head_without_trusting_synthetic_merge_identity(self) -> None:
+        safe_email = "12345+release-tester@users.noreply.github.com"
+        self._commit(safe_email, message="reviewed candidate")
+        candidate = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=self.repo,
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+        self._commit(self._blocked_email(), message="synthetic merge fixture")
+
+        default_findings = check_release(self.repo)
+        self.assertTrue(
+            any("author identity: non-example email address" in item for item in default_findings),
+            default_findings,
+        )
+        self.assertEqual(check_release(self.repo, history_ref=candidate), [])
+
+    def test_history_ref_must_be_a_full_commit_or_head(self) -> None:
+        self._commit("12345+release-tester@users.noreply.github.com")
+        with self.assertRaisesRegex(ValueError, "full 40-character"):
+            check_release(self.repo, history_ref="refs/heads/main")
+
+    def test_workflow_passes_the_pr_head_to_the_history_scan(self) -> None:
+        workflow = (
+            Path(__file__).resolve().parents[1] / ".github" / "workflows" / "ci.yml"
+        ).read_text(encoding="utf-8")
+        self.assertIn("github.event.pull_request.head.sha", workflow)
+        self.assertIn('--history-ref "$PUBLIC_RELEASE_HISTORY_REF"', workflow)
+
     def test_personal_commit_email_blocks_release(self) -> None:
         blocked_email = self._blocked_email()
         self._commit(blocked_email)

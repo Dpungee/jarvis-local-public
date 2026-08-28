@@ -202,6 +202,12 @@ class CliOfflineTests(unittest.TestCase):
         FakeMemory.instances = []
         FakeMemory.tasks = []
         FakeMemory.topics = []
+        # These tests exercise command behavior below the separately tested
+        # first-run provider gate. Never let a developer's local .env (or its
+        # absence on CI) decide whether their mocked command body runs.
+        gate = patch.object(cli, "_ensure_first_run_provider_setup")
+        gate.start()
+        self.addCleanup(gate.stop)
 
     def test_task_and_learning_lists_do_not_construct_agent(self):
         FakeMemory.tasks = [
@@ -979,6 +985,13 @@ class WorkerTests(unittest.TestCase):
 
 
 class ValidationAndDoctorTests(unittest.TestCase):
+    def setUp(self):
+        # Provider-gate behavior has its own focused suite. Keep validation and
+        # benchmark tests hermetic on a truly clean checkout.
+        gate = patch.object(cli, "_ensure_first_run_provider_setup")
+        gate.start()
+        self.addCleanup(gate.stop)
+
     def test_training_status_prints_readiness_and_blockers_without_agent(self):
         class EmptyTrainingMemory(FakeMemory):
             def list_training_examples(self, *, verified_only=False):

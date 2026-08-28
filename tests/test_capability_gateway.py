@@ -182,13 +182,8 @@ class CapabilityGatewayTests(unittest.TestCase):
         cases.append(wrong_enum)
         for index, manifest in enumerate(cases):
             with self.subTest(index=index):
-                # Synthetic invalid connector fixture; it contains an environment-variable
-                # name, never a credential value.
-                serialized = json.dumps(manifest)
-                # codeql[py/clear-text-storage-sensitive-data]
-                self.manifest_path.write_text(serialized, encoding="utf-8")
                 with self.assertRaises(ConnectorError):
-                    self.gateway.validate_workspace_manifest("connector.json")
+                    self.gateway.validate_manifest_document(json.dumps(manifest))
 
     def test_toolbox_uses_exact_one_shot_approval_for_connector_calls(self):
         self.install()

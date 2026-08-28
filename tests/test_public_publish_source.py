@@ -1,10 +1,14 @@
 from __future__ import annotations
 
+import io
 import importlib.util
 import subprocess
 import tempfile
 import unittest
+from contextlib import redirect_stdout
 from pathlib import Path
+from types import SimpleNamespace
+from unittest import mock
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -68,6 +72,75 @@ class PublicPublishSourceTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             repository, head = self.safe_repository(Path(temporary), with_tag=False)
             self.check(repository, head, mode="candidate")
+
+    def test_accepts_fast_forward_promotion_of_exact_checked_head(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            repository, root = self.safe_repository(Path(temporary), with_tag=False)
+            (repository / "second.txt").write_text("checked\n", encoding="utf-8")
+            self.git(repository, "add", "second.txt")
+            self.git(repository, "commit", "-m", "checked candidate")
+            head = self.git(repository, "rev-parse", "HEAD")
+            original_git = PUBLISH._git
+
+            def fake_git(repo, *arguments, allow_missing=False):
+                if arguments == (
+                    "ls-remote",
+                    "--exit-code",
+                    "public",
+                    "refs/heads/main",
+                ):
+                    return f"{root}\trefs/heads/main"
+                return original_git(repo, *arguments, allow_missing=allow_missing)
+
+            with mock.patch.object(PUBLISH, "_git", side_effect=fake_git):
+                self.check(repository, head, root=root, mode="promotion")
+
+    def test_rejects_non_fast_forward_promotion(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            repository, head = self.safe_repository(Path(temporary), with_tag=False)
+            tree = self.git(repository, "rev-parse", "HEAD^{tree}")
+            alternate = subprocess.run(
+                ["git", "-C", str(repository), "commit-tree", tree],
+                input="unrelated public main\n",
+                check=True,
+                capture_output=True,
+                text=True,
+            ).stdout.strip()
+            original_git = PUBLISH._git
+
+            def fake_git(repo, *arguments, allow_missing=False):
+                if arguments == (
+                    "ls-remote",
+                    "--exit-code",
+                    "public",
+                    "refs/heads/main",
+                ):
+                    return f"{alternate}\trefs/heads/main"
+                return original_git(repo, *arguments, allow_missing=allow_missing)
+
+            with mock.patch.object(PUBLISH, "_git", side_effect=fake_git):
+                with self.assertRaisesRegex(PUBLISH.PublishSourceError, "not an ancestor"):
+                    self.check(repository, head, mode="promotion")
+
+    def test_promotion_cli_prints_only_exact_fast_forward_command(self) -> None:
+        arguments = SimpleNamespace(
+            repository=Path("."),
+            expected_commit="a" * 40,
+            expected_root="b" * 40,
+            mode="promotion",
+            version_tag="v0.6.1",
+            remote_url=self.PUBLIC_URL,
+        )
+        parser = mock.Mock()
+        parser.parse_args.return_value = arguments
+        output = io.StringIO()
+        with (
+            mock.patch.object(PUBLISH, "_parser", return_value=parser),
+            mock.patch.object(PUBLISH, "check_public_publish_source"),
+            redirect_stdout(output),
+        ):
+            self.assertEqual(PUBLISH.main(), 0)
+        self.assertEqual(output.getvalue(), "git push public HEAD:refs/heads/main\n")
 
     def test_rejects_extra_local_ref(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -179,6 +252,10 @@ class PublicPublishSourceTests(unittest.TestCase):
             ["public", "HEAD:refs/heads/release/v0.6.0"],
         )
         self.assertEqual(
+            PUBLISH.expected_push_arguments("promotion", "v0.6.0"),
+            ["public", "HEAD:refs/heads/main"],
+        )
+        self.assertEqual(
             PUBLISH.expected_push_arguments("tag", "v0.6.0"),
             ["public", "refs/tags/v0.6.0:refs/tags/v0.6.0"],
         )
@@ -188,7 +265,10 @@ class PublicPublishSourceTests(unittest.TestCase):
         for forbidden in PUBLISH.FORBIDDEN_PUSH_OPTIONS:
             self.assertNotIn(forbidden, publishing)
         self.assertIn("HEAD:refs/heads/release/v0.6.1", publishing)
+        self.assertIn("HEAD:refs/heads/main", publishing)
         self.assertIn("refs/tags/v0.6.1:refs/tags/v0.6.1", publishing)
+        self.assertIn("Do not merge the pull request through", publishing)
+        self.assertNotIn("Merge only after", publishing)
 
 
 if __name__ == "__main__":

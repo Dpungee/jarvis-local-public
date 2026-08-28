@@ -19,7 +19,7 @@ class PublishSourceError(RuntimeError):
 
 
 FORBIDDEN_PUSH_OPTIONS = frozenset({"--all", "--tags", "--mirror"})
-PUBLISH_MODES = frozenset({"candidate", "tag"})
+PUBLISH_MODES = frozenset({"candidate", "promotion", "tag"})
 
 
 def _git(repository: Path, *arguments: str, allow_missing: bool = False) -> str:
@@ -67,9 +67,11 @@ def expected_push_arguments(mode: str, version_tag: str) -> list[str]:
 
     if mode == "candidate":
         return ["public", f"HEAD:refs/heads/release/{version_tag}"]
+    if mode == "promotion":
+        return ["public", "HEAD:refs/heads/main"]
     if mode == "tag":
         return ["public", f"refs/tags/{version_tag}:refs/tags/{version_tag}"]
-    raise PublishSourceError("publish mode must be candidate or tag")
+    raise PublishSourceError("publish mode must be candidate, promotion, or tag")
 
 
 def validate_push_arguments(arguments: list[str], mode: str, version_tag: str) -> None:
@@ -88,8 +90,50 @@ def validate_push_arguments(arguments: list[str], mode: str, version_tag: str) -
     expected = expected_push_arguments(mode, version_tag)
     if arguments != expected:
         raise PublishSourceError(
-            "push arguments must name only the intended candidate branch or release tag"
+            "push arguments must name only the intended candidate branch, main promotion, "
+            "or release tag"
         )
+
+
+def _check_promotion_is_fast_forward(repository: Path, head: str) -> None:
+    """Require the live public main tip to be present and ancestral to HEAD."""
+
+    remote_output = _git(
+        repository,
+        "ls-remote",
+        "--exit-code",
+        "public",
+        "refs/heads/main",
+    )
+    lines = [line for line in remote_output.splitlines() if line.strip()]
+    fields = lines[0].split() if len(lines) == 1 else []
+    if len(fields) != 2 or fields[1] != "refs/heads/main":
+        raise PublishSourceError("could not resolve exactly one public main tip")
+    remote_main = fields[0].casefold()
+    if len(remote_main) != 40 or any(
+        character not in "0123456789abcdef" for character in remote_main
+    ):
+        raise PublishSourceError("public main did not resolve to a full commit SHA-1")
+    try:
+        _git(repository, "cat-file", "-e", f"{remote_main}^{{commit}}")
+    except PublishSourceError as error:
+        raise PublishSourceError(
+            "public main is not present in the exact checked local history"
+        ) from error
+
+    completed = subprocess.run(
+        ["git", "-C", str(repository), "merge-base", "--is-ancestor", remote_main, head],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if completed.returncode == 1:
+        raise PublishSourceError(
+            "public main is not an ancestor of the approved release commit"
+        )
+    if completed.returncode != 0:
+        detail = completed.stderr.strip() or completed.stdout.strip() or "git failed"
+        raise PublishSourceError(f"could not verify promotion ancestry: {detail}")
 
 
 def check_public_publish_source(
@@ -105,7 +149,7 @@ def check_public_publish_source(
 
     repository = repository.resolve()
     if mode not in PUBLISH_MODES:
-        raise PublishSourceError("publish mode must be candidate or tag")
+        raise PublishSourceError("publish mode must be candidate, promotion, or tag")
     if not version_tag.startswith("v") or any(
         character.isspace() for character in version_tag
     ):
@@ -196,6 +240,9 @@ def check_public_publish_source(
     if _normalized_https_github_url(push_urls[0]) != expected_remote:
         raise PublishSourceError("public push URL does not match the approved repository")
 
+    if mode == "promotion":
+        _check_promotion_is_fast_forward(repository, head)
+
     if _git(repository, "config", "--get", "remote.public.mirror", allow_missing=True):
         raise PublishSourceError("mirror remotes are forbidden for public publishing")
     if _git(repository, "config", "--get-all", "remote.public.push", allow_missing=True):
@@ -239,8 +286,11 @@ def main() -> int:
     push_arguments = " ".join(
         expected_push_arguments(arguments.mode, arguments.version_tag)
     )
-    print("PUBLIC PUBLISH SOURCE PASSED")
-    print(f"Reviewed exact-ref command: git push {push_arguments}")
+    if arguments.mode == "promotion":
+        print(f"git push {push_arguments}")
+    else:
+        print("PUBLIC PUBLISH SOURCE PASSED")
+        print(f"Reviewed exact-ref command: git push {push_arguments}")
     return 0
 
 

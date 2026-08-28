@@ -30,8 +30,9 @@ Public-preview stabilization release.
   and annotated-tag metadata without echoing detected personal values.
 - Kept pull-request checks focused on the publishable head history instead of GitHub's
   temporary merge commit while still scanning the merged working snapshot.
-- Added regression coverage for commit metadata and strengthened redaction at the CLI
-  event-output boundary. CodeQL findings remain under review and are not claimed clean.
+- Added regression coverage for commit metadata and made CLI event output non-sensitive
+  by construction while preserving detailed, sanitized Presence activity. Actions,
+  JavaScript/TypeScript, and Python CodeQL analyses are required release gates.
 - Added a fail-closed, two-phase public-publishing guard for protected candidate branches
   and release tags from disposable public-only clones.
 

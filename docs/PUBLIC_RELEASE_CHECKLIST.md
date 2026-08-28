@@ -1,6 +1,6 @@
 # Public-release checklist
 
-This checklist records verified evidence for the published `v0.6.0` public preview and
+This checklist records verified evidence for the `v0.6.1` public-preview candidate and
 the operator or repository actions that remain pending. Do not infer completion of an
 unchecked item from a clean source scan.
 
@@ -17,19 +17,18 @@ unchecked item from a clean source scan.
 - [ ] Rotate every credential that was ever pasted into a prompt, terminal, report, or
       tracked file. This is an operator attestation; the published source and artifacts
       contain no detected credential.
-- [x] Ensure every reachable release commit and annotated tag uses a GitHub no-reply
-      address when the maintainer email should remain private. Public `main` and
-      `v0.6.0` now resolve to the sanitized no-reply release commit, with the released
-      source tree unchanged.
+- [x] Ensure every reachable release commit and tag uses a GitHub no-reply address when
+      the maintainer email should remain private. Public `main`, `v0.6.0`, and the
+      reviewed `v0.6.1` candidate resolve only through sanitized no-reply history.
 
 ## Product trust
 
 - [x] Finish active changes and run the full deterministic suite on the release candidate.
-- [x] Confirm the GitHub Actions matrix and privacy scan pass from a clean checkout on
-      Python 3.11, 3.12, and 3.13 for Windows.
-- [ ] Resolve or justify every open CodeQL finding from the completed Python,
-      JavaScript/TypeScript, and GitHub Actions analysis. Nine findings are under
-      triage; do not describe the CodeQL result as clean until that review is complete.
+- [ ] Confirm the GitHub Actions matrix and privacy scan pass from a clean checkout of
+      the exact final candidate on Python 3.11, 3.12, and 3.13 for Windows.
+- [ ] Resolve or justify every open finding from Python, JavaScript/TypeScript, and
+      GitHub Actions CodeQL analysis of the exact final candidate. Prior candidate runs
+      were clean; the reconstructed public repository must independently rerun all three.
 - [ ] Verify setup and first launch on a clean Windows user account.
 - [ ] Capture one sanitized Presence screenshot or short demo with synthetic content.
 - [x] Publish measured capabilities and current limitations without aspirational claims.
@@ -55,7 +54,7 @@ unchecked item from a clean source scan.
 
 **Package:** `jarvis-local`
 
-**Version:** 0.6.0 Public Preview (alpha)
+**Version:** 0.6.1 Public Preview (alpha)
 
 **Description:** Windows-first, local-first personal AI agent with automatic model
 routing, provenance-aware memory, bounded tools, and approval-gated automation.
@@ -77,6 +76,6 @@ public-only clone with exact branch and tag refspecs; never use `--all`, `--tags
 
 ## Remaining post-release gates
 
-Credential rotation attestation, CodeQL finding triage, clean-Windows-user first launch,
-sanitized demo capture, and a GitHub homepage/documentation link remain pending. Do not
-mark any of them complete until their direct evidence exists.
+Credential rotation attestation, clean-Windows-user first launch, sanitized demo capture,
+and a GitHub homepage/documentation link remain pending. Do not mark any of them complete
+until their direct evidence exists.

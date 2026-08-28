@@ -1,11 +1,12 @@
 # Public publishing
 
 Publish JARVIS Local only from a disposable clone that contains the reviewed public
-snapshot. Never publish directly from a development checkout. Use two separate,
+snapshot. Never publish directly from a development checkout. Use three separate,
 fail-closed phases: first push one candidate branch for a protected pull request; after
-that pull request passes and merges, create and push only the release tag from a fresh
-clone of public `main`. Each disposable clone has one remote named `public`, pointing
-at the approved public GitHub repository.
+that exact candidate commit passes every required check, promote only that commit to
+public `main`; then create and push only the release tag from a fresh clone of public
+`main`. Each disposable clone has one remote named `public`, pointing at the approved
+public GitHub repository.
 
 ## Prepare the isolated source
 
@@ -59,13 +60,35 @@ Use only the command printed by the guard. Its shape is:
 git push public HEAD:refs/heads/release/v0.6.1
 ```
 
-Open a pull request from `release/v0.6.1` to protected `main`. Merge only after every
-required check passes. Do not bypass protection or publish the version tag from the
-candidate clone.
+Open a pull request from `release/v0.6.1` to protected `main` so review and required
+checks run against the exact candidate commit. Do not merge the pull request through
+GitHub: after every required check passes, promote that exact commit as described below,
+then close the pull request. Do not publish the version tag from the candidate clone.
 
-## Tag the verified merge from a new clone
+## Promote the exact checked commit
 
-Record the exact merged `main` commit as `$approvedCommit`, then create another fresh,
+GitHub-hosted squash and rebase merges can create a new commit or rewrite committer
+identity. For a privacy-sensitive release, promote the exact candidate commit whose
+author and committer were already verified as approved no-reply identities. Recreate
+the candidate as a fresh disposable public-only clone, then run the guard with
+`--mode promotion`. The guard resolves `public` `main` without creating a tracking ref
+and requires that tip to exist in the checked history and be an ancestor of `HEAD`.
+This makes the printed update fast-forward-only; the command contains no force option.
+
+The promotion guard prints only this exact command:
+
+```powershell
+git push public HEAD:refs/heads/main
+```
+
+Run it only after all required checks have passed for that exact `HEAD`, and only under
+the repository's existing protection policy. If GitHub rejects the update, stop: do
+not weaken or bypass branch protection during a release, and do not substitute a broad
+push. Re-check the repository rules through a separately reviewed governance change.
+
+## Tag the verified promotion from a new clone
+
+Record the exact promoted `main` commit as `$approvedCommit`, then create another fresh,
 single-branch, tag-free clone directly from the public repository. Remove its source
 remote, add the credential-free destination as `public`, create a lightweight tag at
 `$approvedCommit`, and run the same guard with `--mode tag`. The tag clone must contain

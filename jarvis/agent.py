@@ -29,7 +29,7 @@ from .config import Config, load_constitution, load_soul
 from .fast_dialogue import (
     instant_casual_reply as _instant_casual_reply,
     instant_local_time_reply as _instant_local_time_reply,
-    is_local_time_request as _is_local_time_request,
+    is_local_time_request as _is_local_time_request,  # noqa: F401 - compatibility facade
     simple_fraction_comparison_reply as _simple_fraction_comparison_reply,
 )
 from .memory import Memory, ModelBudgetExceeded
@@ -53,28 +53,28 @@ from .proactive import (
 from .redaction import SECRET_VALUE as _SECRET_VALUE
 from .redaction import contains_secret, redact_secrets
 from .research_support import (
-    _DIALOGUE_DYNAMIC_TAGS,
-    _DIALOGUE_MEMORY_HEADING,
+    _DIALOGUE_DYNAMIC_TAGS,  # noqa: F401 - compatibility facade
+    _DIALOGUE_MEMORY_HEADING,  # noqa: F401 - compatibility facade
     _MEMORY_STOPWORDS,
-    _RESEARCH_ARTIFACT_DELIVERY,
-    _RESEARCH_BRAND_TERMS,
-    _RESEARCH_BUILD_DELIVERY,
+    _RESEARCH_ARTIFACT_DELIVERY,  # noqa: F401 - compatibility facade
+    _RESEARCH_BRAND_TERMS,  # noqa: F401 - compatibility facade
+    _RESEARCH_BUILD_DELIVERY,  # noqa: F401 - compatibility facade
     _RESEARCH_FUNCTION_STOPWORDS,
-    _RESEARCH_NO_FINDING_PREFIXES,
+    _RESEARCH_NO_FINDING_PREFIXES,  # noqa: F401 - compatibility facade
     _RESEARCH_QUERY_ACTION,
     _RESEARCH_TOPIC_STOPWORDS,
     _URL_IN_TEXT,
     canonical_topic_term as _canonical_topic_term,
     compact_research_query as _compact_research_query,
     normalize_dated_brief_heading as _normalize_dated_brief_heading,
-    research_distinctive_terms as _research_distinctive_terms,
+    research_distinctive_terms as _research_distinctive_terms,  # noqa: F401 - facade
     research_prose_stats as _research_prose_stats,
     research_relevant_urls as _research_relevant_urls,
     research_reports_no_finding as _research_reports_no_finding,
     research_subject_query as _research_subject_query,
-    research_terms_matching as _research_terms_matching,
+    research_terms_matching as _research_terms_matching,  # noqa: F401 - facade
     research_topic_coverage as _research_topic_coverage,
-    research_topic_terms as _research_topic_terms,
+    research_topic_terms as _research_topic_terms,  # noqa: F401 - compatibility facade
     stable_dialogue_prompt_parts as _stable_dialogue_prompt_parts,
 )
 from .run_observability import (
@@ -16325,4 +16325,3 @@ print("safe-path adversarial contract passed")
             requires_process_logs=requires_process_logs,
             reason=f"maximum of {run_step_limit} model steps reached",
         )
-

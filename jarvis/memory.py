@@ -26,13 +26,13 @@ from .claim_clock import (
     source_key as claim_source_key,
 )
 from .memory_retrieval import (
-    MAX_MEMORY_QUERY_TERMS,
+    MAX_MEMORY_QUERY_TERMS,  # noqa: F401 - compatibility facade
     MAX_MEMORY_SEARCH_CANDIDATES,
     _memory_fts_query,
     _memory_like_terms,
     _memory_query_terms,
     _memory_tokens,
-    _normalize_memory_token,
+    _normalize_memory_token,  # noqa: F401 - compatibility facade
     _rank_memory_rows,
 )
 from .redaction import (

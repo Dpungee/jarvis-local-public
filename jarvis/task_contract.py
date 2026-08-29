@@ -4,8 +4,13 @@ import json
 import re
 from copy import deepcopy
 from dataclasses import dataclass, replace
+from html import unescape
 from typing import Any, Iterable, Mapping, Sequence
 
+from .natural_language import (
+    has_current_public_information_shape,
+    public_web_evidence_boundary_allows,
+)
 from .redaction import contains_secret, redact_secrets
 
 
@@ -59,6 +64,167 @@ _SENSITIVE_MISSING_KEY_PARTS = frozenset({
     "secret",
     "token",
 })
+_SENSITIVE_MISSING_KEY_EXACT = frozenset({
+    "account_no",
+    "acct_number",
+    "birth_day",
+    "card_no",
+    "cc_number",
+    "cvc",
+    "cvc2",
+    "cvv",
+    "cvv2",
+    "debit_pin",
+    "dob",
+    "gov_id",
+    "hotp",
+    "iban",
+    "itin",
+    "login_otp",
+    "mfa_pin",
+    "mrn",
+    "mnemonic",
+    "otp",
+    "pan",
+    "pin",
+    "routing_no",
+    "ssn",
+    "tax_id",
+    "totp",
+    "two_factor_pin",
+    "unlock_pattern",
+})
+_SENSITIVE_MISSING_KEY_COLLAPSED = re.compile(
+    r"(?:"
+    r"api(?:key|token|secret|credential|password)|"
+    r"auth(?:code|key|token|secret|credential|password)|"
+    r"oauth(?:code|key|token|secret|credential|password)|"
+    r"client(?:key|token|secret|credential|password)|"
+    r"signing(?:key|secret)|"
+    r"ssh(?:key|privatekey|passphrase)|"
+    r"wallet(?:seed|mnemonic|privatekey|recoveryphrase)|"
+    r"(?:recovery|secret)seed(?:phrase)?|seedphrase|"
+    r"mnemonic(?:phrase|words?)?|"
+    r"(?:mfa|otp|totp|hotp|twofactor)(?:code|token|value|secret|seed|pin)|"
+    r"(?:verification|security|backup)(?:code|pin)|"
+    r"(?:account|transaction|device|user)pin|pin(?:code|number|value)|"
+    r"(?:creditcard|card|cc)(?:number|no|cvv2?|cvc2?)|"
+    r"(?:creditcard|card)(?:expiry|expiration)(?:date)?|"
+    r"(?:bank)?(?:account|acct)(?:number|no|routingnumber)|routing(?:number|no)|"
+    r"(?:socialsecuritynumber|ssn)|"
+    r"(?:socialsecurity|taxpayer|tax|national|government|gov)(?:id|number|no)|"
+    r"(?:passport|drivers?license|drivinglicense)(?:id|number|no)?|"
+    r"(?:dateofbirth|birthdate|birthday|dob)|(?:itin|mrn)|"
+    r"(?:medicalrecord|patientrecord|healthinsurance)(?:id|number|no)?|"
+    r"(?:bank)?iban|(?:creditcard|card)pan|"
+    r"login(?:code|otp|pin|passcode|password|token|credential)|"
+    r"(?:one)?time(?:code|pin|passcode|password|token)|"
+    r"(?:unlock|device)(?:code|pattern|pin|passcode)|debitpin|passcode|"
+    r"(?:access|private|secret|recovery)(?:code|key|token|secret|credential|password|file)|"
+    r"credential(?:file|path|value|data)|"
+    r"password|passphrase|"
+    r"(?:access|auth|bearer|refresh|session)?token"
+    r")",
+    re.I,
+)
+_SENSITIVE_IDENTIFIER_PARTS = frozenset({
+    "id", "identifier", "no", "num", "number", "nbr",
+})
+_SENSITIVE_AUTH_VALUE_PARTS = frozenset({
+    "answer", "code", "credential", "passcode", "password", "pin",
+    "response", "secret", "seed", "token", "value",
+})
+_SENSITIVE_AUTH_KIND_PARTS = frozenset({
+    "authentication", "authn", "hotp", "mfa", "otp", "totp", "twofa",
+    "twofactor",
+})
+_BENIGN_AUTH_DESCRIPTOR_PARTS = frozenset({
+    "channel", "delivery", "method", "mode", "provider", "type",
+})
+
+
+def _missing_input_key_is_sensitive(key: str) -> bool:
+    """Classify secret/PII semantic-key families without trusting aliases.
+
+    Resolver keys are model-selected and later rendered as questions.  Exact
+    deny lists alone are therefore insufficient: ``routing_number`` can be
+    trivially restated as ``routing_num``.  This classifier combines bounded
+    token families while retaining descriptive, non-secret fields such as
+    ``otp_delivery_method`` and ``pin_location``.
+    """
+
+    parts = frozenset(part for part in key.casefold().split("_") if part)
+    collapsed = key.casefold().replace("_", "")
+    if (
+        key in _SENSITIVE_MISSING_KEY_EXACT
+        or _SENSITIVE_MISSING_KEY_PARTS.intersection(parts)
+        or _SENSITIVE_MISSING_KEY_COLLAPSED.search(collapsed)
+    ):
+        return True
+
+    identifier = bool(_SENSITIVE_IDENTIFIER_PARTS.intersection(parts))
+    if identifier and parts.intersection({
+        "routing", "govt", "government", "federal", "national", "social",
+        "tax", "taxpayer", "passport", "license", "dl", "driver", "drivers",
+        "licence", "health", "healthcare", "patient", "medical", "medicare",
+        "medicaid", "insurance", "policy", "session",
+    }):
+        return True
+    if identifier and (
+        bool(parts.intersection({"bank", "banking"})) and "account" in parts
+        or {"insurance", "policy"}.issubset(parts)
+    ):
+        return True
+    if (
+        "account" in parts
+        and parts.intersection(_SENSITIVE_IDENTIFIER_PARTS | {"ref", "reference"})
+    ) or key == "expiry":
+        return True
+
+    auth_kinds = parts.intersection(_SENSITIVE_AUTH_KIND_PARTS)
+    if auth_kinds:
+        non_descriptive = parts.difference(
+            _SENSITIVE_AUTH_KIND_PARTS | _BENIGN_AUTH_DESCRIPTOR_PARTS
+        )
+        if non_descriptive or not parts.intersection(_BENIGN_AUTH_DESCRIPTOR_PARTS):
+            return True
+    if (
+        {"second", "factor"}.issubset(parts)
+        and parts.intersection(_SENSITIVE_AUTH_VALUE_PARTS)
+    ):
+        return True
+    if (
+        {"two", "step"}.issubset(parts)
+        and parts.intersection(_SENSITIVE_AUTH_VALUE_PARTS)
+    ) or (
+        "bearer" in parts
+        and parts.intersection(_SENSITIVE_AUTH_VALUE_PARTS)
+    ):
+        return True
+    if (
+        parts.intersection({"security", "sec", "challenge"})
+        and parts.intersection({"answer", "response"})
+    ):
+        return True
+    if parts.intersection({"mother", "mothers"}) and "maiden" in parts:
+        return True
+    if (
+        parts.intersection({"backup", "recovery", "wallet", "mnemonic"})
+        and parts.intersection({"code", "key", "phrase", "seed", "word", "words"})
+    ) or (
+        "seed" in parts and parts.intersection({"phrase", "word", "words"})
+    ):
+        return True
+    if (
+        parts.intersection({"card", "creditcard", "cc"})
+        and parts.intersection({"exp", "expiry", "expiration"})
+    ):
+        return True
+    if (
+        "transit" in parts and parts.intersection(_SENSITIVE_IDENTIFIER_PARTS)
+    ) or {"sort", "code"}.issubset(parts):
+        return True
+    return False
 
 
 class _ResolutionGroundingTexts(tuple):
@@ -81,22 +247,141 @@ _ACKNOWLEDGEMENT_ONLY = re.compile(
     re.I,
 )
 _TASK_CONTROL_TEXT = re.compile(
-    r"^\s*(?:(?:actually|wait|no)[,:]?\s*)?(?:"
+    r"^\s*(?:(?:actually|wait|no|nah)[,:]?\s*)?(?:"
     r"cancel(?:\s+(?:it|that\b.*|this\b.*|the\b.+|my\b.+|task\b.*|request\b.*))?"
-    r"|stop(?:\s+(?:it|that\b.*|this\b.*|now|working|work|the\s+task|task))?"
+    r"|stop(?:\s+(?:it|that\b.*|this\b.*|now|working|work|the\s+task|task|"
+    r"working\s+on\s+(?:it|that|this|the\s+task|task|the\s+request|request)))?"
     r"|(?:abort|drop)(?:\s+(?:it|that\b.*|this\b.*|the\s+task|task|request))?"
     r"|hold\s+off(?:\s+on\s+.+)?|never\s+mind"
-    r"|don['’]?t\s+(?:do|continue|proceed)(?:\s+.+)?"
-    r"|do\s+not\s+(?:do|continue|proceed)(?:\s+.+)?"
-    r")[\s.!?]*$",
+    r"|(?:don['’]?t|do\s+not)\s+(?:"
+    r"(?:continue|proceed)(?:\s+(?:(?:with|working\s+on)\s+)?"
+    r"(?:it|that|this|the\s+task|task|the\s+request|request))?"
+    r"|do\s+(?:it|that|this|anything|the\s+task|task|the\s+request|request)"
+    r"(?:\s+(?:yet|now|anymore|else))?"
+    r")"
+    r")(?:,?\s+please)?[\s.!?]*$",
+    re.I,
+)
+
+_DEICTIC_SOURCE_TARGET = re.compile(
+    r"^(?:"
+    r"(?:this|that|these|those|the)\s+(?:attached\s+)?"
+    r"(?:files?|documents?|images?|attachments?|uploads?|texts?|data|notes?|"
+    r"content|excerpts?|materials?|screenshots?|photos?|pictures?)|"
+    r"(?:the\s+)?attached\s+(?:files?|documents?|images?|attachments?|uploads?|"
+    r"texts?|data|notes?|content|excerpts?|materials?|screenshots?|photos?|pictures?)|"
+    r"(?:the\s+)?(?:attached\s+)?(?:upload|attachment)|"
+    r"(?:the\s+)?(?:above|below)|"
+    r"what\s+(?:i|we)\s+(?:attached|uploaded|provided|sent)|"
+    r"here|this|that|it|these|those"
+    r")$",
+    re.I,
+)
+
+_SHORT_UNRESOLVED_REFERENCE = re.compile(
+    r"^\s*(?!i\b|we\b|you\b|he\b|she\b|they\b)(?:please\s+)?"
+    r"(?:[A-Za-z][A-Za-z'’\-]*\s+){1,2}"
+    r"(?:this|that|it|these|those|there|them)\b|"
+    r"^\s*what\b.{0,80}\bthere\b",
+    re.I,
+)
+_ARGUMENTLESS_DIALOGUE_REQUEST = re.compile(
+    r"^\s*(?:please\s+)?(?:help\s+me\s+)?(?:choose|decide)\s*[?.!]*$|"
+    r"^\s*(?:so[,\s.]*)?what(?:['’]s|\s+is)\s+(?:your\s+)?"
+    r"(?:take|opinion|view|thoughts?)\s*[?.!]*$",
     re.I,
 )
 
 
+def _operator_asserted_grounding_text(value: str) -> str:
+    """Return current-turn prose outside inert quoted/code containers."""
+
+    safe = unescape(redact_secrets(str(value))[:MAX_RESOLVER_CONTEXT_CHARS])
+    safe = re.sub(r"```.*?(?:```|\Z)|~~~.*?(?:~~~|\Z)", " ", safe, flags=re.S)
+    safe = re.sub(
+        r"<(code|blockquote|pre|textarea|script|style)\b[^>]{0,500}>"
+        r".*?</\1\s*>",
+        " ",
+        safe,
+        flags=re.S | re.I,
+    )
+    safe = re.sub(r"\[[^\]\r\n]{0,2000}\]\([^\)\r\n]{0,2000}\)", " ", safe)
+    safe = re.sub(r"`[^`\r\n]{0,2000}(?:`|\Z)", " ", safe)
+    safe = re.sub(r'"[^"]{0,5000}(?:"|\Z)', " ", safe, flags=re.S)
+    safe = re.sub(r"“[^”]{0,5000}(?:”|\Z)|‘[^’]{0,5000}(?:’|\Z)", " ", safe, flags=re.S)
+    safe = re.sub(r"«[^»]{0,5000}(?:»|\Z)", " ", safe, flags=re.S)
+    safe = re.sub(r"(?<!\w)'[^']{1,5000}(?:'(?!\w)|\Z)", " ", safe, flags=re.S)
+    safe = "\n".join(
+        line for line in safe.splitlines()
+        if not line.lstrip().startswith(">")
+        and not line.startswith(("    ", "\t"))
+    )
+    return re.sub(r"\s+", " ", safe).strip()
+
+
 def _operator_starts_with_task_control(value: str) -> bool:
-    safe = redact_secrets(str(value))
-    first_line = next((line.strip() for line in safe.splitlines() if line.strip()), "")
-    return bool(first_line and _TASK_CONTROL_TEXT.fullmatch(first_line))
+    # Keep the historical helper name for callers, but cancellation is a
+    # turn-wide control signal.  Ignore quoted/code examples so untrusted text
+    # cannot stop a task merely by containing the words "cancel that task".
+    safe = redact_secrets(str(value))[:MAX_RESOLVER_CONTEXT_CHARS]
+    safe = re.sub(r"```.*?```|~~~.*?~~~", " ", safe, flags=re.S)
+    safe = re.sub(r"<code(?:\s[^>]*)?>.*?</code>", " ", safe, flags=re.S | re.I)
+    safe = re.sub(r"`[^`\r\n]*`", " ", safe)
+    safe = re.sub(r'"[^"\r\n]*"', " ", safe)
+    safe = re.sub(r"“[^”\r\n]*”|‘[^’\r\n]*’", " ", safe)
+    safe = re.sub(r"(?<!\w)'[^'\r\n]*'(?!\w)", " ", safe)
+    safe = "\n".join(
+        line for line in safe.splitlines()
+        if not line.lstrip().startswith(">")
+        and not line.startswith(("    ", "\t"))
+    )
+    for raw_segment in re.split(r"(?:\r?\n)+|(?<=[.!?;])\s+", safe):
+        segment = re.sub(r"^\s*(?:[-*+]\s+|\d+[.)]\s+)", "", raw_segment)
+        segment = re.sub(
+            r"^\s*(?:(?:and|also|then|please|jarvis|hey\s+jarvis|"
+            r"one\s+more\s+thing|to\s+be\s+clear|i\s+mean)[,:]?\s+)+",
+            "",
+            segment,
+            flags=re.I,
+        ).strip()
+        if segment and _TASK_CONTROL_TEXT.fullmatch(segment):
+            return True
+    return False
+
+
+def _needs_structural_clarification(
+    current_turn: str,
+    *,
+    lane: object,
+    target: object,
+) -> bool:
+    """Detect only compact requests whose required referent is absent.
+
+    This is deliberately grammatical rather than domain-specific. It never
+    selects or invents a referent, and callers use it only when there is no
+    pending contract or recent user-authored context that could bind one.
+    """
+
+    asserted = _operator_asserted_grounding_text(current_turn)
+    words = re.findall(r"[A-Za-z0-9]+", asserted)
+    if not asserted or len(words) > 12 or _bounded_material_payload(asserted) is not None:
+        return False
+    if _ARGUMENTLESS_DIALOGUE_REQUEST.fullmatch(asserted):
+        return True
+    if (
+        isinstance(target, str)
+        and _DEICTIC_SOURCE_TARGET.fullmatch(target.strip()) is not None
+    ) or _SHORT_UNRESOLVED_REFERENCE.search(asserted):
+        return True
+    # A terse persistent-artifact request with neither an operational target
+    # nor supplied content does not define a verifiable outcome. Longer turns
+    # are left to the semantic resolver because their requirements may be
+    # expressed naturally without a separate target field.
+    return bool(
+        lane == "creation"
+        and target is None
+        and len(words) <= 6
+    )
 
 
 class TaskContractError(ValueError):
@@ -221,6 +506,8 @@ def normalize_task_contract_response(
     grounding_texts: Iterable[str] = (),
     canonical_goal: str | None = None,
     continued_goal: str | None = None,
+    operator_turn: str | None = None,
+    pending_contract: TaskContract | None = None,
 ) -> dict[str, Any]:
     """Canonicalize only fields that are wholly implied by the selected lane.
 
@@ -250,6 +537,34 @@ def normalize_task_contract_response(
     else:
         raise TaskContractError("task contract response must be an object")
 
+    current_turn = redact_secrets(
+        str(operator_turn if operator_turn is not None else canonical_goal or "").strip()
+    )
+
+    # Explicit cancellation is one of the few meanings that can be resolved
+    # completely without trusting a model-selected lane. Canonicalize it
+    # before strict parsing so a provider cannot copy the pending research or
+    # creation contract and accidentally keep it alive. This only narrows a
+    # pending task; it grants no tool or mutation authority.
+    if (
+        continued_goal is not None
+        and current_turn
+        and is_explicit_task_cancellation(current_turn)
+    ):
+        return {
+            "version": TASK_CONTRACT_VERSION,
+            "relation": "cancel",
+            "lane": "dialogue",
+            "artifact_kind": "none",
+            "evidence_source": "none",
+            "requested_effect": "none",
+            "goal": redact_secrets(str(continued_goal).strip()),
+            "target": None,
+            "constraint_quotes": [],
+            "missing_inputs": [],
+            "acceptance": ["answer"],
+        }
+
     relation = payload.get("relation")
     if canonical_goal is not None:
         selected_goal = (
@@ -258,6 +573,36 @@ def normalize_task_contract_response(
             else canonical_goal
         )
         payload["goal"] = redact_secrets(str(selected_goal).strip())
+
+    # A continuation cannot redefine fields already fixed by its validated
+    # pending contract. Canonicalize those schema invariants before parsing,
+    # while retaining current-turn target/missing-input changes for the strict
+    # reconciliation step to verify. This removes harmless provider omission
+    # without granting any new effect or authority.
+    if relation == "continue" and pending_contract is not None:
+        payload["lane"] = pending_contract.lane
+        payload["artifact_kind"] = pending_contract.artifact_kind
+        payload["requested_effect"] = pending_contract.requested_effect
+        if pending_contract.evidence_source != "none":
+            payload["evidence_source"] = pending_contract.evidence_source
+        if payload.get("target") is None and pending_contract.target is not None:
+            payload["target"] = pending_contract.target
+        current_constraints = payload.get("constraint_quotes")
+        if isinstance(current_constraints, list):
+            retained_constraints = list(pending_contract.constraint_quotes)
+            retained_folded = {item.casefold() for item in retained_constraints}
+            for item in current_constraints:
+                if isinstance(item, str) and item.casefold() not in retained_folded:
+                    retained_constraints.append(item)
+                    retained_folded.add(item.casefold())
+            payload["constraint_quotes"] = retained_constraints
+        current_acceptance = payload.get("acceptance")
+        if isinstance(current_acceptance, list):
+            retained_acceptance = list(pending_contract.acceptance)
+            for item in current_acceptance:
+                if item not in retained_acceptance:
+                    retained_acceptance.append(item)
+            payload["acceptance"] = retained_acceptance
 
     lane = payload.get("lane")
     acceptance = payload.get("acceptance")
@@ -281,6 +626,45 @@ def normalize_task_contract_response(
     if lane == "external_action":
         payload["requested_effect"] = "external"
 
+    # Current public facts are inherently evidence-backed reads unless the
+    # operator also requested a persistent artifact. This recognizes a
+    # generic grammatical shape (recency + public state + lookup), not named
+    # products or memorized prompts, and never authorizes a tool by itself.
+    if (
+        current_turn
+        and relation in {"new", "replace"}
+        and lane != "creation"
+        and payload.get("evidence_source") == "public_web"
+        and has_current_public_information_shape(current_turn)
+    ):
+        lane = "research"
+        payload["lane"] = lane
+        payload["artifact_kind"] = "none"
+        payload["evidence_source"] = "public_web"
+        payload["requested_effect"] = "read"
+
+    # A provider may call a supplied-source comparison "dialogue" even while
+    # correctly declaring that it must read the supplied evidence. The
+    # evidence/effect pair makes this a research operation independent of the
+    # topic or wording. Plain transformations and summaries remain dialogue
+    # because they request no read effect.
+    if (
+        lane == "dialogue"
+        and payload.get("evidence_source") == "provided"
+        and payload.get("requested_effect") == "read"
+    ):
+        lane = "research"
+        payload["lane"] = lane
+        payload["artifact_kind"] = "none"
+
+    # These effects are structural consequences of their lane. Canonicalizing
+    # them removes harmless provider variance while preserving the exact
+    # operator text as the only source of targets and constraints.
+    if lane == "dialogue":
+        payload["requested_effect"] = "none"
+    elif lane in {"research", "inspection"}:
+        payload["requested_effect"] = "read"
+
     sources = [
         redact_secrets(str(item))
         for item in grounding_texts
@@ -293,12 +677,67 @@ def normalize_task_contract_response(
     # and external actions keep the stricter rejection because their exact
     # targets are operationally material.
     if (
-        lane in {"dialogue", "research"}
+        lane in {"dialogue", "research", "configuration"}
         and isinstance(target, str)
         and sources
         and not _is_grounded(redact_secrets(target.strip()), sources)
     ):
         payload["target"] = None
+
+    missing_inputs = payload.get("missing_inputs")
+    if (
+        relation == "new"
+        and pending_contract is None
+        and len(sources) == 1
+        and isinstance(missing_inputs, list)
+        and not missing_inputs
+        and not (
+            lane in {"creation", "inspection"}
+            and payload.get("evidence_source") == "provided"
+        )
+        and _needs_structural_clarification(
+            current_turn,
+            lane=lane,
+            target=payload.get("target"),
+        )
+    ):
+        missing_inputs.append({"key": "target"})
+
+    # A complete contract's minimum proof is implied by its selected lane and
+    # effect. Canonicalize the structurally possible evidence rather than
+    # rejecting an otherwise valid resolution because a model omitted a
+    # redundant enum or retaining evidence that the selected lane cannot
+    # produce.
+    # Incomplete contracts remain untouched so they can ask exactly one
+    # bounded clarification without claiming work was completed.
+    acceptance = payload.get("acceptance")
+    if (
+        isinstance(missing_inputs, list)
+        and not missing_inputs
+        and isinstance(acceptance, list)
+    ):
+        if lane in {"dialogue", "inspection", "configuration"}:
+            payload["acceptance"] = ["answer"]
+        elif lane == "research":
+            payload["acceptance"] = [
+                "sources"
+                if payload.get("evidence_source") == "public_web"
+                else "answer"
+            ]
+        elif lane == "external_action":
+            payload["acceptance"] = ["external_receipt"]
+        elif lane == "creation":
+            allowed = {"artifact", "tests", "launch"}
+            if payload.get("evidence_source") == "public_web":
+                allowed.add("sources")
+            retained = [item for item in acceptance if item in allowed]
+            required = ["artifact"]
+            if payload.get("evidence_source") == "public_web":
+                required.append("sources")
+            for item in required:
+                if item not in retained:
+                    retained.append(item)
+            payload["acceptance"] = retained
     return payload
 
 
@@ -497,9 +936,16 @@ def parse_task_contract(
     if not sources:
         raise TaskContractError("task contract requires user-authored grounding text")
 
+    relation = _enum(payload, "relation", RELATIONS)
     goal = _required_string(payload, "goal", 2_000)
     if not _is_grounded(goal, sources):
         raise TaskContractError("goal is not an exact quote from user-authored input")
+    if relation == "replace" and (
+        not current_turn or goal.casefold() != current_turn.casefold()
+    ):
+        raise TaskContractError(
+            "replacement goal is not grounded in the current operator turn"
+        )
     target_raw = payload.get("target")
     if target_raw is None:
         target = None
@@ -507,10 +953,22 @@ def parse_task_contract(
         target = _bounded_text(target_raw, 500, "target")
         if not _is_grounded(target, sources):
             raise TaskContractError("target is not an exact quote from user-authored input")
+        if (
+            relation in {"new", "replace"}
+            and current_turn
+            and not _is_grounded(
+                target,
+                [_operator_asserted_grounding_text(current_turn)],
+            )
+        ):
+            raise TaskContractError(
+                "replacement target is not grounded in the current operator turn"
+                if relation == "replace"
+                else "new-task target is not grounded in asserted current-turn text"
+            )
     else:
         raise TaskContractError("target must be a string or null")
 
-    relation = _enum(payload, "relation", RELATIONS)
     constraint_quotes = _string_array(
         payload, "constraint_quotes", maximum=12, item_limit=300
     )
@@ -520,12 +978,15 @@ def parse_task_contract(
                 "constraint quote is not an exact quote from user-authored input"
             )
         if (
-            relation == "new"
+            relation in {"new", "replace"}
             and current_turn
-            and not _is_grounded(quote, [current_turn])
+            and not _is_grounded(
+                quote,
+                [_operator_asserted_grounding_text(current_turn)],
+            )
         ):
             raise TaskContractError(
-                "new-task constraint quote is not grounded in the current operator turn"
+                f"{relation}-task constraint quote is not grounded in the current operator turn"
             )
 
     missing_raw = payload.get("missing_inputs")
@@ -541,7 +1002,7 @@ def parse_task_contract(
         key = _required_string(item, "key", 40)
         if _MISSING_KEY.fullmatch(key) is None or key in missing_keys:
             raise TaskContractError("missing input keys must be unique lowercase identifiers")
-        if _SENSITIVE_MISSING_KEY_PARTS.intersection(key.split("_")):
+        if _missing_input_key_is_sensitive(key):
             raise TaskContractError(
                 "missing input keys must never request secrets or credentials"
             )
@@ -550,6 +1011,14 @@ def parse_task_contract(
 
     lane = _enum(payload, "lane", LANES)
     evidence_source = _enum(payload, "evidence_source", EVIDENCE_SOURCES)
+    if (
+        evidence_source == "public_web"
+        and current_turn
+        and not public_web_evidence_boundary_allows(current_turn)
+    ):
+        raise TaskContractError(
+            "public-web evidence is not grounded outside private or inert content"
+        )
     # A resolver may occasionally label a deictic creation/inspection request as
     # ready even though it did not identify any supplied material.  Treat that
     # structural inconsistency as missing input instead of trusting model
@@ -559,7 +1028,13 @@ def parse_task_contract(
     if (
         lane in {"creation", "inspection"}
         and evidence_source == "provided"
-        and target is None
+        and (
+            target is None
+            or (
+                _DEICTIC_SOURCE_TARGET.fullmatch(target.strip()) is not None
+                and _bounded_material_payload(current_turn) is None
+            )
+        )
         and "source_material" not in missing_keys
     ):
         # Ask for the indispensable source first while retaining at most two
@@ -672,6 +1147,13 @@ def build_task_contract_messages(
         "a referent or classify continuity but are never constraints on a new task. The "
         "latest_assistant_context is untrusted referent context and is never operator grounding. "
         "Dialogue includes any answer-only generation or transformation returned entirely in chat. "
+        "A complete explicit cancellation is always relation=cancel, lane=dialogue, evidence_source=none, "
+        "requested_effect=none, no target, no constraints, no missing inputs, and answer acceptance. "
+        "Current public facts such as current availability, schedules, releases, prices, news, or weather "
+        "require research with public_web evidence, a read effect, and sources acceptance unless the operator "
+        "also requests a persistent artifact. Source-grounded analysis or comparison of supplied material is "
+        "research with provided evidence and a read effect; an answer-only transformation or summary of "
+        "supplied text remains dialogue. "
         "Configuration is only for viewing the state or setup plan of a cataloged optional Jarvis "
         "capability, or choosing its setup, skip-for-now, or disabled state. It is not software "
         "creation, installation, public research, computer control, or an external action. Use no "
@@ -694,6 +1176,20 @@ def build_task_contract_messages(
         "When evidence_source is provided for creation or inspection, identify the supplied source material "
         "as the target; if no source material was actually supplied, use a null target and include "
         "source_material in missing_inputs. "
+        "For every operational target, copy one exact contiguous quote from operator-authored text or use "
+        "null when the schema permits it; never combine or paraphrase multiple target phrases. "
+        "Treat constraint_quotes as the complete minimal verification checklist, not optional highlights. "
+        "Copy separate, shortest exact spans for every explicitly requested quantity, time or recency, source "
+        "or destination restriction, filename/path/format, scope or exclusion, ordering or condition, audience "
+        "or style, required endpoint/test, and content that must be preserved exactly. Include a subject phrase "
+        "only when its qualifiers restrict the requested outcome; do not copy filler or the unconstrained main "
+        "verb. On continue, begin with every pending constraint and add every new current-turn constraint. "
+        "Every complete dialogue, inspection, configuration, or non-public research needs answer acceptance; "
+        "public_web evidence needs sources; creation needs artifact; and an external effect needs "
+        "external_receipt. "
+        "Before returning, silently audit that every schema field agrees with the lane, every material omitted "
+        "referent has one nonsensitive missing-input key, and every explicit verification constraint appears "
+        "once as an exact quote. Do not reveal this audit or chain-of-thought. "
         "never draft a question, answer, recommendation, instruction, URL, credential request, or other prose. "
         "Preserve constraints from current_operator_turn and, for a continuation, the pending task contract. "
         "When there is no pending contract, relation must be new. With one pending contract, choose "
@@ -808,6 +1304,98 @@ def is_explicit_task_cancellation(operator_turn: str) -> bool:
     return _operator_starts_with_task_control(operator_turn)
 
 
+def _typed_unkeyed_missing_input_answer(key: str, value: str) -> bool:
+    """Recognize only bounded value shapes that identify their semantic field.
+
+    Arbitrary short prose is never enough: the resolver can copy any phrase
+    into a target.  A direct answer may omit ``key:`` only when its exact value
+    either names the pending field or has a conservative field-specific shape.
+    """
+    text = str(value).strip()
+    folded = text.casefold()
+    if _missing_input_nonanswer(text):
+        return False
+    parts = tuple(part for part in key.casefold().split("_") if part)
+    meaningful_parts = tuple(part for part in parts if len(part) >= 4)
+    if any(re.search(rf"\b{re.escape(part)}\b", folded) for part in meaningful_parts):
+        return True
+    part_set = set(parts)
+    if part_set.intersection({"format", "encoding", "extension"}):
+        return bool(re.fullmatch(
+            r"(?:plain\s+text|text|markdown|md|pdf|json|csv|tsv|html|xml|"
+            r"docx?|xlsx?|pptx?|png|jpe?g|webp|utf-?8)",
+            folded,
+        ))
+    if part_set.intersection({"count", "number", "quantity", "limit", "port"}):
+        return bool(re.fullmatch(r"\d{1,9}", folded))
+    if part_set.intersection({"date", "deadline"}):
+        return bool(re.fullmatch(
+            r"(?:\d{4}-\d{1,2}-\d{1,2}|\d{1,2}/\d{1,2}/\d{2,4}|"
+            r"today|tomorrow|next\s+(?:monday|tuesday|wednesday|thursday|friday|"
+            r"saturday|sunday))",
+            folded,
+        ))
+    if part_set.intersection({"time"}):
+        return bool(re.fullmatch(r"\d{1,2}(?::\d{2})?\s*(?:am|pm)?", folded))
+    if part_set.intersection({"duration"}):
+        return bool(re.fullmatch(
+            r"\d+(?:\.\d+)?\s*(?:seconds?|minutes?|hours?|days?|weeks?)",
+            folded,
+        ))
+    if part_set.intersection({"url", "link"}):
+        return bool(re.fullmatch(r"https?://\S+", text, re.I))
+    if part_set.intersection({"email"}):
+        return bool(re.fullmatch(r"[^\s@]+@[^\s@]+\.[^\s@]+", text))
+    if part_set.intersection({"zip", "zipcode", "postal"}):
+        return bool(re.fullmatch(r"\d{5}(?:-\d{4})?", folded))
+    if part_set.intersection({"enabled", "disabled", "boolean", "choice"}):
+        return folded in {"yes", "no", "on", "off", "enabled", "disabled"}
+    if part_set.intersection({"path", "file", "capture", "attachment"}):
+        return bool(re.fullmatch(
+            r"(?:[a-z]:[\\/]|[./~]|\\\\).+|[^\r\n]+\.[a-z0-9]{1,12}",
+            text,
+            re.I,
+        ))
+    if part_set.intersection({"city", "location"}):
+        return bool(
+            re.fullmatch(r"\d{5}(?:-\d{4})?", folded)
+            or re.fullmatch(r"[A-Z][A-Za-z .'-]{1,79}", text)
+        )
+    return False
+
+
+_MISSING_INPUT_NONANSWER = re.compile(
+    r"(?:^|\b)(?:i\s+)?(?:do\s+not|don['’]?t|dont|cannot|can['’]?t|cant)\s+"
+    r"(?:know|have|remember|say|provide)\b|"
+    r"(?:^|\b)(?:unknown|unsure|not\s+sure|no\s+idea|none|n/?a|tbd|"
+    r"whatever|anything|skip)(?:\b|$)",
+    re.I,
+)
+
+
+def _missing_input_nonanswer(value: str) -> bool:
+    text = str(value).strip()
+    return bool(not text or _MISSING_INPUT_NONANSWER.search(text))
+
+
+def _contract_retains_resolution_value(
+    contract: TaskContract,
+    value: str,
+) -> bool:
+    """Require a cleared keyed answer to survive in the strict contract."""
+    candidate = str(value).strip().strip(".!?")
+    if not candidate:
+        return False
+    retained = [
+        *(contract.constraint_quotes),
+        *([contract.target] if contract.target is not None else []),
+    ]
+    return any(
+        str(item).strip().strip(".!?").casefold() == candidate.casefold()
+        for item in retained
+    )
+
+
 def _has_grounded_resolution(
     key: str,
     contract: TaskContract,
@@ -817,22 +1405,73 @@ def _has_grounded_resolution(
     allow_unkeyed: bool,
 ) -> bool:
     current = redact_secrets(str(operator_turn).strip())
-    if not current or _ACKNOWLEDGEMENT_ONLY.fullmatch(current):
+    if (
+        not current
+        or _ACKNOWLEDGEMENT_ONLY.fullmatch(current)
+        or _operator_starts_with_task_control(current)
+        or re.search(
+            r"```|~~~|`[^`\r\n]*`|<code\b|^\s*>|"
+            r"\"[^\"\r\n]*\"|“[^”\r\n]*”|‘[^’\r\n]*’",
+            current,
+            re.I | re.M,
+        )
+    ):
         return False
 
     # Multiple missing fields require explicit key:value framing so one value
     # cannot silently clear several independent requirements.
-    label = re.escape(key.replace("_", " "))
-    keyed = re.search(rf"(?:^|\n)\s*{label}\s*:\s*(\S.+?)\s*(?:$|\n)", current, re.I)
+    label_text = key.replace("_", " ")
+    label = rf"(?:{re.escape(label_text)}|{re.escape(key)})"
+    keyed = re.search(
+        rf"(?:^|\n)\s*(?:the\s+)?{label}\s*(?::|=|\bis\b)\s*"
+        rf"(\S(?:.*?\S)?)\s*(?:$|\n)",
+        current,
+        re.I,
+    )
+    if keyed is None:
+        keyed = re.fullmatch(
+            rf"\s*(?:use\s+)?(\S(?:.*?\S)?)\s+for\s+(?:the\s+)?{label}\s*[.!]?\s*",
+            current,
+            re.I,
+        )
+    if keyed is None:
+        keyed = re.fullmatch(
+            rf"\s*for\s+(?:the\s+)?{label}\s*[,:]\s*(\S(?:.*?\S)?)\s*",
+            current,
+            re.I,
+        )
     if keyed is not None:
         value = keyed.group(1).strip()
         return bool(
             len(value) <= 500
+            and not _missing_input_nonanswer(value)
             and not _TASK_CONTROL_TEXT.search(value)
             and not _ACKNOWLEDGEMENT_ONLY.fullmatch(value)
+            and _contract_retains_resolution_value(contract, value)
         )
 
     if not allow_unkeyed:
+        return False
+
+    # An unkeyed answer must look like a bounded value, not an unrelated new
+    # sentence that merely gave the resolver another grounded phrase to copy.
+    # Longer prose and multi-line material remain available through explicit
+    # key:value or framed source-material binding.
+    words = re.findall(r"[A-Za-z0-9]+", current)
+    if (
+        len(current) > 500
+        or "\n" in current
+        or not words
+        or len(words) > 12
+        or "?" in current
+        or re.match(
+            r"^(?:i|we|you|he|she|they)\s+"
+            r"(?:am|are|is|was|were|have|has|had|think|thought|want|wanted|"
+            r"need|needed|mean|meant|said|say|wonder|wondered)\b",
+            current,
+            re.I,
+        )
+    ):
         return False
 
     old_values = {
@@ -850,8 +1489,9 @@ def _has_grounded_resolution(
         if (
             value
             and len(value) <= 500
+            and value.casefold() == current.casefold()
             and value.casefold() not in old_values
-            and _is_grounded(value, [current])
+            and _typed_unkeyed_missing_input_answer(key, current)
             and not _TASK_CONTROL_TEXT.search(value)
             and not _ACKNOWLEDGEMENT_ONLY.fullmatch(value)
         ):
@@ -872,8 +1512,32 @@ def reconcile_task_contract_continuation(
     it only narrows a continuation and then re-runs the strict consistency
     checks before the contract may become ready.
     """
-    if pending_contract is None or contract.relation != "continue":
+    if pending_contract is None:
         return contract
+    if is_explicit_task_cancellation(operator_turn):
+        cancelled = TaskContract(
+            version=TASK_CONTRACT_VERSION,
+            relation="cancel",
+            lane="dialogue",
+            artifact_kind="none",
+            evidence_source="none",
+            requested_effect="none",
+            goal=pending_contract.goal,
+            target=None,
+            constraint_quotes=(),
+            missing_inputs=(),
+            acceptance=("answer",),
+        )
+        _validate_consistency(cancelled, has_pending_goal=True)
+        return cancelled
+    if contract.relation == "cancel":
+        raise TaskContractError(
+            "cancellation requires an explicit operator cancellation"
+        )
+    if contract.relation != "continue":
+        return contract
+    if contract.goal.casefold() != pending_contract.goal.casefold():
+        raise TaskContractError("continuation may not change the pending goal")
     for field in ("lane", "artifact_kind", "requested_effect"):
         if getattr(contract, field) != getattr(pending_contract, field):
             raise TaskContractError(
@@ -915,10 +1579,11 @@ def reconcile_task_contract_continuation(
             contract,
             pending_contract,
             operator_turn,
-            # A model omission plus an unrelated grounded phrase is not proof
-            # that the operator answered this semantic key. Non-source fields
-            # therefore require explicit key:value framing.
-            allow_unkeyed=False,
+            # A natural grounded answer may resolve one and only one pending
+            # semantic key. When several independent fields are missing, each
+            # still requires explicit key:value framing so one phrase cannot
+            # silently satisfy more than the operator supplied.
+            allow_unkeyed=len(pending_keys) == 1,
         ):
             raise TaskContractError(
                 f"continuation did not ground pending missing input: {key}"

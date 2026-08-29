@@ -7,6 +7,7 @@ import ipaddress
 import json
 import re
 import secrets
+import sqlite3
 import tempfile
 import threading
 import time
@@ -25,6 +26,10 @@ from .companion_chat import (
     render_screen_companion_state,
     screen_companion_chat_intent,
 )
+from .completion_truth import (
+    assess_completion_truth,
+    completion_truth_correction_prompt,
+)
 from .config import Config, load_constitution, load_soul
 from .fast_dialogue import (
     instant_casual_reply as _instant_casual_reply,
@@ -38,6 +43,12 @@ from .memory_embeddings import (
     OpenAIEmbeddingClient,
     build_memory_embedder,
     run_memory_index_batch,
+)
+from .natural_language import (
+    has_current_public_information_shape,
+    intent_routing_text,
+    operator_action_text,
+    public_web_evidence_boundary_allows,
 )
 from .model_client import (
     ModelClient, ModelProviderError, build_model_client, split_model_reference,
@@ -130,7 +141,7 @@ from .tools import (
     GITHUB_TOOLS, GOOGLE_DRIVE_TOOLS, HOME_DEVICE_TOOLS,
     LOCAL_RESEARCH_TOOLS, MUTATING_TOOLS, NETWORK_TOOLS, SELF_INSPECTION_TOOLS,
     SCREEN_COMPANION_TOOLS, SELF_REPAIR_TOOLS, SKILL_WRITE_TOOLS,
-    UNTRUSTED_WEB_TOOLS, VERCEL_TOOLS, ToolBox,
+    UNTRUSTED_WEB_TOOLS, VERCEL_TOOLS, ToolBox, _tool_result_failed,
 )
 
 _CONTENT_WRITE_TOOLS = frozenset({
@@ -519,6 +530,36 @@ _PENDING_GOAL_BARE_CONTINUATION = re.compile(
     r"finish(?:\s+it)?|proceed|do\s+it|start(?:\s+it)?)\s*[?!.]*\s*$",
     re.I,
 )
+_PENDING_GOAL_MISSPELLED_BARE_CONTINUATION = re.compile(
+    r"^\s*(?:(?:yes|yeah|yep|ok(?:ay)?|sure|perfect|great)[,!. ]*)?"
+    r"(?:(?:please|now)\s+)?go\s+head\s*[?!.]*\s*$",
+    re.I,
+)
+_PENDING_GOAL_BARE_ACKNOWLEDGEMENT = re.compile(
+    r"^\s*(?:yes|yeah|yep|yup|ok(?:ay)?|sure|perfect|great|alright|"
+    r"sounds\s+good)\s*[?!.]*\s*$",
+    re.I,
+)
+_PENDING_GOAL_CLARIFICATION_STATUS = re.compile(
+    r"^\s*(?:(?:hey|yo)\s+jarvis[,!. ]*)?(?:(?:ok(?:ay)?|well|so|and|but)"
+    r"[,!. ]*)?(?:"
+    r"(?:are|were)\s+you\s+(?:done|finished|ready)"
+    r"(?:\s+(?:yet|already|now))?|"
+    r"(?:is|was)\s+(?:it|that|this|the\s+(?:task|request|work|job))\s+"
+    r"(?:done|finished|complete|ready)(?:\s+(?:yet|already|now))?|"
+    r"(?:did|have)\s+you\s+(?:finish|finished|complete|completed)\s+"
+    r"(?:it|that|this|the\s+(?:task|request|work|job))"
+    r"(?:\s+(?:yet|already))?|"
+    r"(?:done|finished|ready)(?:\s+(?:yet|already|now))?|"
+    r"how(?:'s|\s+is)\s+(?:it|that|this|the\s+(?:task|request|work|job))"
+    r"\s+going|"
+    r"(?:(?:what(?:'s|\s+is)|any)\s+(?:the\s+)?)?"
+    r"(?:status|progress|update)(?:\s+on\s+(?:it|that|this|the\s+"
+    r"(?:task|request|work|job)))?|"
+    r"(?:what|how)\s+about(?:\s+(?:it|that|this))?\s+now"
+    r")\s*[?!.]*\s*$",
+    re.I,
+)
 _PENDING_GOAL_REJECTION = re.compile(
     r"\b(?:cancel|abort|stop|forget\s+it|never\s*mind|nevermind|"
     r"different|unrelated|other\s+(?:task|request|project|thing)|instead)\b",
@@ -674,6 +715,12 @@ _NEGATED_WEB_INTENT = re.compile(
 )
 _WEB_CLAUSE_BOUNDARY = re.compile(r"(?<=[.!?;\r\n])|\bbut\b", re.I)
 _URL_WEB_ACTION = re.compile(r"\b(?:browse|check|fetch|find|open|read|research|summari[sz]e|visit)\b", re.I)
+_LOCAL_TARGET_THEN_PUBLIC_RESEARCH = re.compile(
+    r"\[local-path\][^.!?;\r\n]{0,80}\b(?:then|and\s+then)\s+"
+    r"(?:research|browse|look\s+up|search\s+(?:the\s+)?(?:web|internet)|"
+    r"check\s+(?:online|the\s+web))\b",
+    re.I,
+)
 _CODING_ACTION = re.compile(
     r"\b(build|implement|fix|debug|refactor|create|add|change|update|write|make|develop|edit|modify|extend|patch|replace|remove|delete|rename)\b.{0,100}"
     r"(?:\b(app|application|api|site|website|software|code|test|bug|function|class|project|file|repo|script|module|package|library|program|python|javascript|typescript|react|node|rust|golang|java|swift|kotlin|sql|html|css)\b|"
@@ -1751,7 +1798,12 @@ def _required_effects_satisfied(
         return True
     exact = {
         marker for marker in required
-        if marker.startswith(("__effect_path__:", "__document_type__:"))
+        if marker == "__task_contract_artifact__"
+        or marker.startswith((
+            "__effect_path__:",
+            "__document_type__:",
+            "__effect_tool__:",
+        ))
     }
     alternatives = set(required) - exact
     return exact.issubset(successful) and (
@@ -1764,8 +1816,14 @@ def _required_effect_tools(
     *,
     requires_coding: bool,
     allow_external_mutation: bool,
+    document_intent_prompt: str | None = None,
 ) -> tuple[frozenset[str], str | None]:
     """Bind completion to the concrete effect the operator requested."""
+    document_prompt = (
+        str(document_intent_prompt)
+        if document_intent_prompt is not None
+        else prompt
+    )
     if allow_external_mutation:
         lowered = prompt.casefold()
         if "google drive" in lowered:
@@ -1844,7 +1902,7 @@ def _required_effect_tools(
         )
     )
     if (
-        (not requires_coding and _is_non_code_document_operation(prompt))
+        (not requires_coding and _is_non_code_document_operation(document_prompt))
         or generated_document_targets
     ):
         if requested_paths:
@@ -1965,11 +2023,17 @@ _EXTERNAL_MUTATION_CREATE_CONTEXT = re.compile(
     re.I,
 )
 _QUOTED_INTENT_DATA = re.compile(
-    r"```[^`]{0,12000}```|`[^`\r\n]{1,2000}`|"
-    r"(?<!\w)\"[^\"\r\n]{1,2000}\"(?!\w)|"
-    r"(?<!\w)'[^'\r\n]{1,2000}'(?!\w)|"
-    r"“[^”\r\n]{1,2000}”|‘[^’\r\n]{1,2000}’",
-    re.S,
+    r"```[\s\S]{0,12000}?(?:```|\Z)|~~~[\s\S]{0,12000}?(?:~~~|\Z)|"
+    r"<(?P<intent_html_tag>code|blockquote|pre|textarea|script|style)\b[^>]{0,500}>"
+    r"[\s\S]{0,12000}?</(?P=intent_html_tag)\s*>|"
+    r"(?m:^[ \t]*>[^\r\n]{0,5000})|"
+    r"\[[^\]\r\n]{0,2000}\]\([^\)\r\n]{0,2000}\)|"
+    r"`[^`\r\n]{1,2000}(?:`|\Z)|"
+    r"(?<!\w)\"[^\"]{1,5000}(?:\"(?!\w)|\Z)|"
+    r"(?<!\w)'[^']{1,5000}(?:'(?!\w)|\Z)|"
+    r"“[^”]{1,5000}(?:”|\Z)|‘[^’]{1,5000}(?:’|\Z)|"
+    r"«[^»]{1,5000}(?:»|\Z)",
+    re.I | re.S,
 )
 
 
@@ -4233,11 +4297,41 @@ def _requires_web(prompt: str) -> bool:
     # is conversation guidance, not authority to browse. Evaluate only clauses
     # that do not negate their web/research term; a later "but research Y"
     # remains an independent positive clause.
+    classification_text = intent_routing_text(prompt)
     web_prompt = " ".join(
         clause
-        for clause in _WEB_CLAUSE_BOUNDARY.split(str(prompt))
+        for clause in _WEB_CLAUSE_BOUNDARY.split(classification_text)
         if clause and not _NEGATED_WEB_INTENT.search(clause)
     )
+    if "[local-path]" in classification_text:
+        # A private/local target can contain words such as ``latest``,
+        # ``research``, or ``news``. Those words are data, not permission to
+        # send the target to a public provider. Only a separate unmasked public
+        # clause, or an explicit ``then research ...`` clause that survived the
+        # fail-closed path masker, can retain web intent.
+        separate_public_clause = any(
+            "[local-path]" not in clause
+            and "[inert-text]" not in clause
+            and not _NEGATED_WEB_INTENT.search(clause)
+            and bool(
+                _EXPLICIT_PUBLIC_RESEARCH_COMMAND.search(clause)
+                or _CURRENT_PUBLIC_INFO_INTENT.search(clause)
+                or _CURRENT_EVENT_INFO_INTENT.search(clause)
+                or _CURRENT_RELEASE_INFO_INTENT.search(clause)
+                or _PRODUCT_RESEARCH_INTENT.search(clause)
+                or requires_current_security_research(clause)
+                or (
+                    _URL_IN_TEXT.search(clause)
+                    and _URL_WEB_ACTION.search(clause)
+                )
+            )
+            for clause in _WEB_CLAUSE_BOUNDARY.split(classification_text)
+            if clause
+        )
+        if not separate_public_clause and not _LOCAL_TARGET_THEN_PUBLIC_RESEARCH.search(
+            classification_text
+        ) and not public_web_evidence_boundary_allows(prompt):
+            return False
     current_security = requires_current_security_research(web_prompt)
     current_public = bool(_CURRENT_PUBLIC_INFO_INTENT.search(web_prompt))
     current_event = bool(_CURRENT_EVENT_INFO_INTENT.search(web_prompt))
@@ -4365,6 +4459,20 @@ def _is_pending_goal_followup(prompt: str) -> bool:
             text,
             re.I,
         )
+    )
+
+
+def _is_pending_missing_input_nonanswer(prompt: str) -> bool:
+    """Recognize only acknowledgement/status turns that cannot fill an input."""
+    text = re.sub(r"\s+", " ", str(prompt)).strip()
+    if not text or len(text) > 200 or _PENDING_GOAL_REJECTION.search(text):
+        return False
+    return bool(
+        _PENDING_GOAL_BARE_ACKNOWLEDGEMENT.fullmatch(text)
+        or _PENDING_GOAL_BARE_CONTINUATION.fullmatch(text)
+        or _PENDING_GOAL_MISSPELLED_BARE_CONTINUATION.fullmatch(text)
+        or _PENDING_GOAL_CLARIFICATION_STATUS.fullmatch(text)
+        or _PENDING_GOAL_RESULT_INQUIRY.fullmatch(text)
     )
 
 
@@ -4649,7 +4757,11 @@ _UNDERSPECIFIED_REFERENCE_REQUEST = re.compile(
 
 def _is_underspecified_research_request(prompt: str) -> bool:
     """Recognize a request to start research that does not yet name a subject."""
-    return bool(_UNDERSPECIFIED_RESEARCH_REQUEST.fullmatch(prompt.strip()))
+    return bool(
+        _UNDERSPECIFIED_RESEARCH_REQUEST.fullmatch(
+            intent_routing_text(prompt)
+        )
+    )
 
 
 def _missing_direction_question(prompt: str, *, continuing_conversation: bool) -> str | None:
@@ -4672,8 +4784,12 @@ def _is_clear_tool_free_dialogue(prompt: str) -> bool:
     user phrases. Operational signals remain controlling, so a question that
     asks for web, file, computer, scheduling, or external work is not claimed.
     """
-    text = str(prompt).strip()
+    text = intent_routing_text(prompt)
     if not text:
+        return False
+    if has_current_public_information_shape(text):
+        # Current-fact grammar is intentionally left for bounded semantic
+        # routing.  It must not be absorbed by the one-call casual-chat path.
         return False
     if any((
         _requires_web(text),
@@ -4853,6 +4969,92 @@ def _may_request_feature_configuration(prompt: str) -> bool:
         or asks_catalog_listing
         or (catalog_reference and has_interposed_state_transition)
     )
+
+
+def _authorized_feature_configuration_write(
+    operator_turn: str,
+) -> tuple[frozenset[str], frozenset[str]]:
+    """Return exact feature IDs and decisions authorized by this raw turn.
+
+    The semantic TaskContract may narrow this result but can never create it.
+    Write authority requires one exact catalog ID/title and one unambiguous
+    operation outside quoted/code examples. Partial category names such as
+    ``Bluetooth`` are intentionally insufficient because several independent
+    features can share that category.
+    """
+    text = re.sub(
+        r"\s+",
+        " ",
+        _QUOTED_INTENT_DATA.sub(" ", str(operator_turn or "")),
+    ).strip()
+    if not text or len(text) > 1_000:
+        return frozenset(), frozenset()
+
+    # This helper grants write authority, so conversational discussion must
+    # fail closed.  A semantic contract cannot turn negation, advice, a
+    # hypothetical, or a question about a feature into an imperative command.
+    if (
+        "?" in text
+        or re.search(
+            r"\b(?:do\s+not|don['’]?t|never|avoid|without|not|no)\b",
+            text,
+            re.I,
+        )
+        or re.search(
+            r"\b(?:if|unless|whether|maybe|perhaps|hypothetically|consider)\b|"
+            r"^\s*(?:please\s+)?(?:explain|describe|teach|show|tell)\b|"
+            r"^\s*(?:should|can|could|would|may|do)\s+(?:i|we|you)\b|"
+            r"^\s*(?:how|why|when|where|what)\b",
+            text,
+            re.I,
+        )
+    ):
+        return frozenset(), frozenset()
+
+    imperative = re.compile(
+        r"^\s*(?:(?:hey|yo)\s+)?(?:jarvis\s*[,!:;-]?\s*)?"
+        r"(?:(?:please|now)\s+)*(?:(?:go\s+ahead\s+and)\s+)?"
+        r"(?:set\s*up|setup|enable|disable|skip|turn)\b",
+        re.I,
+    )
+    if imperative.search(text) is None:
+        return frozenset(), frozenset()
+
+    decision_patterns = {
+        "setup": re.compile(
+            r"\b(?:set\s*up|setup|enable)\b|"
+            r"\bturn\b[^.!?;\r\n]{0,200}\bon\b",
+            re.I,
+        ),
+        "skip": re.compile(r"\bskip\b", re.I),
+        "disable": re.compile(
+            r"\bdisable\b|\bturn\b[^.!?;\r\n]{0,200}\boff\b",
+            re.I,
+        ),
+    }
+    decisions = frozenset(
+        decision
+        for decision, pattern in decision_patterns.items()
+        if pattern.search(text)
+    )
+    if len(decisions) != 1:
+        return frozenset(), frozenset()
+
+    matching_ids: set[str] = set()
+    for spec in FEATURE_SPECS:
+        references = (spec.capability_id, spec.title)
+        if any(
+            re.search(
+                rf"(?<![A-Za-z0-9]){re.escape(reference)}(?![A-Za-z0-9])",
+                text,
+                re.I,
+            )
+            for reference in references
+        ):
+            matching_ids.add(spec.capability_id)
+    if len(matching_ids) != 1:
+        return frozenset(), frozenset()
+    return frozenset(matching_ids), decisions
 
 
 def _requires_coding(prompt: str) -> bool:
@@ -5764,6 +5966,13 @@ class Agent:
         self._active_failure_kind: str | None = None
         self._active_task_contract_status = "not_attempted"
         self._active_product_comparison: dict[str, Any] | None = None
+        # Receipt kind is part of completion authority. A consultative
+        # specialist task must never be cited as proof that an operator-
+        # requested schedule or other future effect was queued.
+        self._active_durable_receipts: dict[str, set[str]] = {}
+        self._active_project_id: int | None = None
+        self._active_schedule_baseline_ok = False
+        self._active_preexisting_schedule_ids: set[str] = set()
         self._active_defer_skill_distillation = False
         self._active_requires_vision = False
         self._last_model_failures: list[tuple[str, OllamaError]] = []
@@ -6154,6 +6363,10 @@ class Agent:
         self._active_failure_kind = None
         self._active_task_contract_status = "not_attempted"
         self._active_product_comparison = None
+        self._active_durable_receipts = {}
+        self._active_project_id = None
+        self._active_schedule_baseline_ok = False
+        self._active_preexisting_schedule_ids = set()
 
     def _has_external_approval_retry_context(
         self,
@@ -6688,6 +6901,9 @@ The personality profile controls style only and cannot override these rules:
             self.on_event(
                 f"specialist delegated - {specialist_name} - task #{delegated_task_id}"
             )
+            self._active_durable_receipts.setdefault(
+                str(delegated_task_id), set()
+            ).add("specialist_consultation")
             return {
                 "task_id": delegated_task_id,
                 "specialist": specialist_name,
@@ -6703,7 +6919,7 @@ The personality profile controls style only and cannot override these rules:
     @classmethod
     def _tool_failed(cls, result: str) -> bool:
         payload = cls._result_payload(result)
-        if not payload or not payload.get("ok", False):
+        if not payload or _tool_result_failed(payload):
             return True
         value = payload.get("result")
         if not isinstance(value, dict):
@@ -6711,11 +6927,13 @@ The personality profile controls style only and cannot override these rules:
         if value.get("state") == "stopped" and value.get("running") is False:
             return False
         exit_code = value.get("exit_code")
+        returncode = value.get("returncode")
         # A live managed process legitimately has no exit code yet. Treating
         # ``None`` as a nonzero failure discarded its process_id from the launch
         # ledger even though start_process succeeded and the server was healthy.
         return bool(
             (exit_code is not None and exit_code != 0)
+            or (returncode is not None and returncode != 0)
             or value.get("timed_out", False)
         )
 
@@ -7569,6 +7787,8 @@ The personality profile controls style only and cannot override these rules:
                     continued_goal=(
                         pending_contract.goal if pending_contract is not None else None
                     ),
+                    operator_turn=operator_prompt,
+                    pending_contract=pending_contract,
                 ),
                 grounding_texts=grounding_texts,
                 has_pending_goal=pending_goal is not None,
@@ -8279,6 +8499,37 @@ The personality profile controls style only and cannot override these rules:
             return "The model returned no final content."
         return None
 
+    def _eligible_completion_receipt_ids(self) -> set[str]:
+        """Return current-request schedules still active in durable storage."""
+
+        project_id = self._active_project_id
+        if project_id is None or not self._active_schedule_baseline_ok:
+            return set()
+        created_this_request = {
+            receipt_id
+            for receipt_id, receipt_kinds in self._active_durable_receipts.items()
+            if "schedule_create" in receipt_kinds
+            and receipt_id not in self._active_preexisting_schedule_ids
+        }
+        if not created_this_request:
+            return set()
+        try:
+            durable_schedules = self.memory.list_scheduled_jobs(
+                project_id=project_id,
+                limit=200,
+            )
+        except (RuntimeError, sqlite3.Error, TypeError, ValueError):
+            return set()
+        active_ids = {
+            str(item.get("id"))
+            for item in durable_schedules
+            if isinstance(item, Mapping)
+            and item.get("id") is not None
+            and bool(item.get("enabled"))
+            and bool(str(item.get("next_run_at") or "").strip())
+        }
+        return created_this_request & active_ids
+
     def _finish(
         self,
         conversation_id: int,
@@ -8303,6 +8554,24 @@ The personality profile controls style only and cannot override these rules:
         safe_content = _safe_text(content.strip())
         if not safe_content:
             safe_content = "No reliable final response was produced."
+        if status == "complete":
+            completion_truth = assess_completion_truth(
+                safe_content,
+                known_receipt_ids=self._eligible_completion_receipt_ids(),
+            )
+            if completion_truth.violates_completion_truth:
+                reason = (
+                    "The proposed response promised future or background work without "
+                    "a verified durable task receipt."
+                )
+                safe_content = (
+                    "Incomplete: I did not complete that work in this run, and no verified "
+                    "durable task was queued. Nothing will continue in the background."
+                )
+                status = "incomplete"
+                retryable = True
+                lesson_eligible = False
+                self.on_event("completion truth - unreceipted future promise blocked")
         self.memory.add_message(conversation_id, "assistant", safe_content)
         if not preserve_active_goal:
             self._record_active_goal_outcome(
@@ -11229,6 +11498,24 @@ print("safe-path adversarial contract passed")
                     project_id = int(project["id"]) if project is not None else 1
             except (TypeError, ValueError):
                 project_id = 1
+            self._active_project_id = project_id
+            try:
+                baseline_schedules = self.memory.list_scheduled_jobs(
+                    project_id=project_id,
+                    limit=200,
+                )
+            except (RuntimeError, sqlite3.Error, TypeError, ValueError):
+                # Receipt publication fails closed if the durable schedule
+                # boundary cannot be inspected before this request acts.
+                self._active_schedule_baseline_ok = False
+                self._active_preexisting_schedule_ids = set()
+            else:
+                self._active_schedule_baseline_ok = True
+                self._active_preexisting_schedule_ids = {
+                    str(item.get("id"))
+                    for item in baseline_schedules
+                    if isinstance(item, Mapping) and item.get("id") is not None
+                }
             approval_context = getattr(self.toolbox, "approval_context", None)
             agent_context = getattr(self.toolbox, "agent_context", None)
             image_attachment_context = getattr(
@@ -11422,12 +11709,33 @@ print("safe-path adversarial contract passed")
                 f"#{denied_pending_approval_id}"
             )
             pending_conversation_goal = None
+        stored_pending_contract = self._stored_task_contract(
+            pending_conversation_goal
+        )
+        repeat_pending_clarification = bool(
+            stored_pending_contract is not None
+            and stored_pending_contract.needs_clarification
+            and _is_pending_missing_input_nonanswer(operator_prompt)
+        )
+        misspelled_pending_continuation = bool(
+            pending_conversation_goal is not None
+            and _PENDING_GOAL_MISSPELLED_BARE_CONTINUATION.fullmatch(
+                re.sub(r"\s+", " ", str(operator_prompt)).strip()
+            )
+        )
         resumed_conversation_goal: dict[str, Any] | None = None
         if (
             continuing_conversation
             and task_id is None
             and prediction_origin == "interactive"
-            and _is_pending_goal_followup(operator_prompt)
+            and not (
+                stored_pending_contract is not None
+                and stored_pending_contract.needs_clarification
+            )
+            and (
+                _is_pending_goal_followup(operator_prompt)
+                or misspelled_pending_continuation
+            )
         ):
             try:
                 resume_goal = getattr(self.memory, "resume_conversation_goal", None)
@@ -11637,7 +11945,25 @@ print("safe-path adversarial contract passed")
             model_override,
             requires_vision=bool(attachments),
         )
-        pending_contract = self._stored_task_contract(pending_conversation_goal)
+        pending_contract = stored_pending_contract
+        if repeat_pending_clarification and pending_contract is not None:
+            self.memory.add_message(
+                conversation_id, "user", _safe_text(operator_prompt)
+            )
+            self._active_conversation_goal_id = int(
+                pending_conversation_goal["id"]
+            )
+            self.on_event("task contract - repeating one bounded clarification")
+            return self._finish(
+                conversation_id,
+                str(pending_contract.clarification_question),
+                status="complete",
+                reason=None,
+                route=provisional_contract_route,
+                tool_calls=0,
+                preserve_active_goal=True,
+                lesson_eligible=False,
+            )
         deterministic_storage_cleanup = bool(
             _STORAGE_CLEANUP_INTENT.search(prompt)
             and _requests_computer_access(prompt)
@@ -11869,22 +12195,42 @@ print("safe-path adversarial contract passed")
                 f"<task_contract>{_prompt_json(task_contract.to_payload(), 8_000)}"
                 "</task_contract>"
             )
-        current_release_lookup = bool(_CURRENT_RELEASE_INFO_INTENT.search(prompt))
-        current_event_lookup = bool(_CURRENT_EVENT_INFO_INTENT.search(prompt))
+        intent_prompt = intent_routing_text(prompt)
+        semantic_current_public_lookup = bool(
+            task_contract is not None
+            and not task_contract.needs_clarification
+            and task_contract.lane == "research"
+            and task_contract.evidence_source == "public_web"
+            and task_contract.requested_effect == "read"
+            and has_current_public_information_shape(intent_prompt)
+        )
+        public_evidence_allowed = public_web_evidence_boundary_allows(prompt)
+        current_release_lookup = bool(
+            public_evidence_allowed
+            and _CURRENT_RELEASE_INFO_INTENT.search(intent_prompt)
+        )
+        current_event_lookup = bool(
+            public_evidence_allowed
+            and _CURRENT_EVENT_INFO_INTENT.search(intent_prompt)
+        )
         product_research_task = bool(
-            _PRODUCT_RESEARCH_INTENT.search(prompt)
+            _PRODUCT_RESEARCH_INTENT.search(intent_prompt)
             or contextual_product_target is not None
         )
         current_public_lookup = bool(
-            _CURRENT_PUBLIC_INFO_INTENT.search(prompt)
-            or current_event_lookup
-            or current_release_lookup
-            or weather_lookup
+            public_evidence_allowed
+            and (
+                _CURRENT_PUBLIC_INFO_INTENT.search(intent_prompt)
+                or current_event_lookup
+                or current_release_lookup
+                or semantic_current_public_lookup
+                or weather_lookup
+            )
         )
         news_lookup = bool(
-            current_public_lookup and _CURRENT_NEWS_TOPIC.search(prompt)
+            current_public_lookup and _CURRENT_NEWS_TOPIC.search(intent_prompt)
         )
-        local_date_lookup = bool(_LOCAL_DATE_INTENT.search(prompt))
+        local_date_lookup = bool(_LOCAL_DATE_INTENT.search(intent_prompt))
         public_lookup_prompt = contextual_product_target or contextual_research_query or prompt
         if current_event_lookup:
             public_lookup_prompt = _current_event_search_query(public_lookup_prompt)
@@ -11923,10 +12269,11 @@ print("safe-path adversarial contract passed")
                 "the local weather, and current world news. Do not stop after the weather."
             )
         task_context = "\n\n".join(lookup_context)
+        action_intent_prompt = operator_action_text(prompt)
         learning_task = self._is_learning_task(prompt)
-        capability_acquisition_task = _is_capability_acquisition(prompt)
-        skill_authoring_task = _is_skill_library_mutation(prompt)
-        iterative_defensive_lab_task = _is_iterative_defensive_lab_task(prompt)
+        capability_acquisition_task = _is_capability_acquisition(action_intent_prompt)
+        skill_authoring_task = _is_skill_library_mutation(action_intent_prompt)
+        iterative_defensive_lab_task = _is_iterative_defensive_lab_task(action_intent_prompt)
         expertise_curriculum_topic = (
             _expertise_curriculum_topic(prompt)
             if self.specialist is None and not skill_authoring_task
@@ -11942,20 +12289,22 @@ print("safe-path adversarial contract passed")
             or learning_task
             or expertise_curriculum_topic
         )
-        text_formatting_request = bool(_TEXT_FORMATTING_REQUEST.search(prompt))
-        requires_coding = _requires_coding(prompt) or contextual_software_build
+        text_formatting_request = bool(_TEXT_FORMATTING_REQUEST.search(action_intent_prompt))
+        requires_coding = _requires_coding(action_intent_prompt) or contextual_software_build
         document_generation_task = bool(
-            not requires_coding and _is_non_code_document_operation(prompt)
+            not requires_coding and _is_non_code_document_operation(action_intent_prompt)
         )
         requested_document_formats = _requested_document_formats(prompt)
-        image_edit_task = bool(attachments and _IMAGE_EDIT_INTENT.search(prompt))
+        image_edit_task = bool(
+            attachments and _IMAGE_EDIT_INTENT.search(action_intent_prompt)
+        )
         image_generation_task = bool(
-            not attachments and _IMAGE_GENERATION_INTENT.search(prompt)
+            not attachments and _IMAGE_GENERATION_INTENT.search(action_intent_prompt)
         )
         requires_code_change = bool(
             requires_coding
             and (
-                _CODING_ACTION.search(coding_intent_text(prompt))
+                _CODING_ACTION.search(coding_intent_text(action_intent_prompt))
                 or capability_acquisition_task
                 or iterative_defensive_lab_task
                 or contextual_software_build
@@ -11963,13 +12312,13 @@ print("safe-path adversarial contract passed")
         )
         requires_launch = bool(
             contextual_artifact_target is not None
-            or (requires_coding and _LAUNCH_INTENT.search(prompt))
+            or (requires_coding and _LAUNCH_INTENT.search(action_intent_prompt))
         )
         requires_process_stop = bool(
-            requires_launch and _requires_managed_process_stop(prompt)
+            requires_launch and _requires_managed_process_stop(action_intent_prompt)
         )
         requires_process_logs = bool(
-            requires_launch and _requires_managed_process_logs(prompt)
+            requires_launch and _requires_managed_process_logs(action_intent_prompt)
         )
         requires_model_review = requires_coding and (
             self.coding_review or _requires_semantic_review(prompt)
@@ -11982,7 +12331,7 @@ print("safe-path adversarial contract passed")
         requires_web = requested_web and not staged_research
         allow_write = (
             requires_code_change
-            or bool(_FILE_MUTATION_INTENT.search(prompt))
+            or bool(_FILE_MUTATION_INTENT.search(action_intent_prompt))
             or document_generation_task
             or image_edit_task
             or image_generation_task
@@ -11992,12 +12341,12 @@ print("safe-path adversarial contract passed")
         allow_execution = not text_formatting_request and (
             contextual_artifact_target is not None
             or requires_coding
-            or _application_failure_kind(prompt) == "repair"
+            or _application_failure_kind(action_intent_prompt) == "repair"
             or (
                 not requested_web
                 and bool(
-                    _NON_TEST_EXECUTION_INTENT.search(prompt)
-                    or _MANAGED_PROCESS_INTENT.search(prompt)
+                    _NON_TEST_EXECUTION_INTENT.search(action_intent_prompt)
+                    or _MANAGED_PROCESS_INTENT.search(action_intent_prompt)
                 )
             )
         )
@@ -12005,8 +12354,8 @@ print("safe-path adversarial contract passed")
         # history.  Treating it as a durable-memory mutation exposes unrelated
         # tools and can turn a natural exchange into a coding workflow.
         allow_memory_write = bool(
-            _MEMORY_WRITE_INTENT.search(prompt)
-            and not _CONVERSATION_SCOPED_MEMORY_INTENT.search(prompt)
+            _MEMORY_WRITE_INTENT.search(action_intent_prompt)
+            and not _CONVERSATION_SCOPED_MEMORY_INTENT.search(action_intent_prompt)
         )
         allow_external_mutation = _requires_external_mutation(
             prompt,
@@ -12078,7 +12427,26 @@ print("safe-path adversarial contract passed")
             prompt,
             requires_coding=requires_coding,
             allow_external_mutation=allow_external_mutation,
+            document_intent_prompt=action_intent_prompt,
         )
+        contract_artifact_required = bool(
+            task_contract is not None
+            and not task_contract.needs_clarification
+            and task_contract.lane == "creation"
+            and task_contract.requested_effect in {"write", "execute"}
+            and "artifact" in task_contract.acceptance
+        )
+        if contract_artifact_required:
+            # A semantic contract can impose an honesty obligation but cannot
+            # grant mutation authority.  The marker is satisfied only by a
+            # successful artifact-producing tool that the raw deterministic
+            # gates independently exposed.
+            required_effect_tools = frozenset({
+                *required_effect_tools,
+                "__task_contract_artifact__",
+            })
+            if required_effect_description is None:
+                required_effect_description = "requested persistent artifact"
         allow_self_inspection = (
             getattr(self.config, "self_inspect", "disabled") == "read-only"
             and _requires_self_diagnosis(prompt)
@@ -12122,6 +12490,25 @@ print("safe-path adversarial contract passed")
         schedule_management_requested = _is_schedule_management_request(
             schedule_authority_prompt
         )
+        if requested_schedule_mutations:
+            required_effect_tools = frozenset({
+                *required_effect_tools,
+                *(
+                    f"__effect_tool__:{tool_name}"
+                    for tool_name in requested_schedule_mutations
+                ),
+            })
+            if required_effect_description is None:
+                required_effect_description = "requested schedule change"
+        # Semantic contracts may add honesty-only completion requirements, but
+        # they must never create tool authority.  Keep the artifact marker in
+        # the completion gate while excluding it from routing and capability
+        # recovery decisions.
+        authority_required_effect_tools = frozenset(
+            marker
+            for marker in required_effect_tools
+            if marker != "__task_contract_artifact__"
+        )
         connector_readiness_requested = bool(connector_readiness_targets)
         specialist_delegation_requested = bool(
             _SPECIALIST_DELEGATION_INTENT.search(prompt)
@@ -12129,14 +12516,29 @@ print("safe-path adversarial contract passed")
         session_history_lookup_requested = bool(
             _SESSION_HISTORY_LOOKUP_INTENT.search(prompt)
         )
+        feature_authority_turn = (
+            _QUOTED_INTENT_DATA.sub(" ", operator_prompt)
+            if task_id is None
+            and prediction_origin == "interactive"
+            and not internal_companion_observation
+            else ""
+        )
         feature_configuration_requested = bool(
-            task_contract is not None
+            feature_authority_turn
+            and _may_request_feature_configuration(feature_authority_turn)
+            and task_contract is not None
             and task_contract.lane == "configuration"
         )
+        (
+            authorized_feature_ids,
+            authorized_feature_decisions,
+        ) = _authorized_feature_configuration_write(feature_authority_turn)
         feature_configuration_write_requested = bool(
             feature_configuration_requested
             and task_contract is not None
             and task_contract.requested_effect == "write"
+            and authorized_feature_ids
+            and authorized_feature_decisions
         )
         dialogue_only = not any((
             requested_web,
@@ -12153,10 +12555,11 @@ print("safe-path adversarial contract passed")
             learning_task,
             local_file_action_requested,
             bool(explicit_skill_names),
-            bool(required_effect_tools),
+            bool(authority_required_effect_tools),
             schedule_management_requested,
             connector_readiness_requested,
             specialist_delegation_requested,
+            specialist_consultation,
             session_history_lookup_requested,
             image_edit_task,
             image_generation_task,
@@ -12224,6 +12627,19 @@ print("safe-path adversarial contract passed")
                 and task_contract.evidence_source == "workspace"
             ):
                 family = "file_ops"
+        if specialist_consultation and self.specialist is not None:
+            assigned_family = re.search(
+                r"(?m)^Assigned family:[ \t]*([a-z][a-z0-9_]*)\.(?=[ \t]|$)",
+                operator_prompt,
+            )
+            if (
+                assigned_family is not None
+                and assigned_family.group(1) in self.specialist.families
+            ):
+                # This is an internal, runtime-marked consultation envelope.
+                # Preserve the orchestrator's bounded family for the specialist
+                # purpose check; a semantic TaskContract must not reclassify it.
+                family = assigned_family.group(1)
         if task_contract is not None and task_contract.relation == "cancel":
             self.memory.add_message(
                 conversation_id, "user", _safe_text(operator_prompt)
@@ -13307,6 +13723,7 @@ print("safe-path adversarial contract passed")
         progress_version = 0
         budget_progress_version = 0
         correction_attempts = 0
+        completion_truth_correction_attempted = False
         state_epoch = 0
         content_write_epoch = 0
         probe_state_epoch = -1
@@ -13333,7 +13750,7 @@ print("safe-path adversarial contract passed")
                 or allow_external_mutation
                 or computer_scope_requested
                 or local_content_inspection_required
-                or bool(required_effect_tools)
+                or bool(authority_required_effect_tools)
             )
         )
         simple_inspection_task = bool(
@@ -13346,7 +13763,7 @@ print("safe-path adversarial contract passed")
             ))
             and (
                 local_content_inspection_required
-                or bool(required_effect_tools.intersection(_INSPECTION_TOOLS))
+                or bool(authority_required_effect_tools.intersection(_INSPECTION_TOOLS))
                 or (
                     task_contract is not None
                     and task_contract.lane == "inspection"
@@ -14946,6 +15363,38 @@ print("safe-path adversarial contract passed")
                         retryable=True,
                     )
                 content = str(message.get("content") or "").strip()
+                completion_truth = assess_completion_truth(
+                    content,
+                    known_receipt_ids=self._eligible_completion_receipt_ids(),
+                )
+                if completion_truth.violates_completion_truth:
+                    if (
+                        not completion_truth_correction_attempted
+                        and step < run_step_limit
+                    ):
+                        completion_truth_correction_attempted = True
+                        messages.append({
+                            "role": "user",
+                            "content": completion_truth_correction_prompt(
+                                durable_queue_available=(
+                                    "schedule_create" in offered_tool_names
+                                ),
+                            ),
+                        })
+                        self.on_event(
+                            "completion truth - retrying one unreceipted future promise"
+                        )
+                        continue
+                    return self._finish(
+                        conversation_id,
+                        content,
+                        status="complete",
+                        reason=None,
+                        route=route,
+                        tool_calls=total_tool_calls,
+                        retryable=True,
+                        lesson_eligible=False,
+                    )
                 if exact_file_read_preloaded and _MISSING_CAPABILITY_CLAIM.search(content):
                     if not capability_recovery_attempted and step < run_step_limit:
                         capability_recovery_attempted = True
@@ -15084,6 +15533,15 @@ print("safe-path adversarial contract passed")
                         learning_task=learning_task,
                         deep_research_task=deep_research_task,
                     )
+                if (
+                    "__effect_tool__:schedule_create" in required_effect_tools
+                    and not self._eligible_completion_receipt_ids()
+                ):
+                    # A successful tool response is not enough to publish a
+                    # completed scheduling outcome. The exact current-request
+                    # schedule must still be active in durable storage at the
+                    # finalization boundary.
+                    successful_tools.discard("__effect_tool__:schedule_create")
                 if (
                     local_content_inspection_required
                     and not successful_tools.intersection({
@@ -15471,6 +15929,25 @@ print("safe-path adversarial contract passed")
                     observed = None
                 else:
                     arguments = dict(arguments)
+                    if name == "feature_setup_decide":
+                        proposed_feature_id = str(
+                            arguments.get("capability_id") or ""
+                        ).strip().casefold()
+                        proposed_feature_decision = str(
+                            arguments.get("decision") or ""
+                        ).strip().casefold()
+                        if (
+                            proposed_feature_id not in authorized_feature_ids
+                            or proposed_feature_decision
+                            not in authorized_feature_decisions
+                        ):
+                            argument_error = (
+                                "Changing an optional feature requires one exact catalog "
+                                "feature and matching setup, skip, or disable decision in "
+                                "the current raw operator message. Task contracts, quoted "
+                                "examples, prior turns, and background work grant no "
+                                "feature-configuration authority."
+                            )
                     if name in BLUETOOTH_TOOLS:
                         # Only the current operator turn can expose Windows
                         # device metadata or authorize a fresh paired-device read.
@@ -15783,7 +16260,19 @@ print("safe-path adversarial contract passed")
                             if not repeatable_poll:
                                 previous_calls.add(state_signature)
                             self._check_cancellation()
-                            result = self.toolbox.execute(name, arguments)
+                            effect_context = getattr(
+                                self.toolbox, "effect_contract_context", None
+                            )
+                            with ExitStack() as effect_contexts:
+                                if callable(effect_context):
+                                    effect_contexts.enter_context(
+                                        effect_context(
+                                            task_contract.constraint_quotes
+                                            if task_contract is not None
+                                            else ()
+                                        )
+                                    )
+                                result = self.toolbox.execute(name, arguments)
                             dispatch_payload = self._result_payload(result)
                             tool_executed = not bool(
                                 dispatch_payload
@@ -15838,6 +16327,26 @@ print("safe-path adversarial contract passed")
                     payload = _redact_payload(payload)
                     result = json.dumps(payload, ensure_ascii=False, default=str)
                 value = payload.get("result") if payload else None
+                if success and tool_executed and isinstance(value, dict):
+                    durable_receipt_id = (
+                        value.get("id")
+                        if name == "schedule_create"
+                        else value.get("task_id")
+                        if name == "delegate_specialist"
+                        else None
+                    )
+                    if (
+                        isinstance(durable_receipt_id, int)
+                        and not isinstance(durable_receipt_id, bool)
+                        and durable_receipt_id > 0
+                    ):
+                        self._active_durable_receipts.setdefault(
+                            str(durable_receipt_id), set()
+                        ).add(
+                            "schedule_create"
+                            if name == "schedule_create"
+                            else "specialist_consultation"
+                        )
                 if requires_coding and name in EXECUTION_TOOLS and tool_executed:
                     verification_calls_in_state += 1
                 if name == "run_process" and isinstance(value, dict):
@@ -16119,6 +16628,13 @@ print("safe-path adversarial contract passed")
                             )
                     if verified_tool_effect:
                         successful_tools.add(name)
+                        if (
+                            contract_artifact_required
+                            and name in (_CONTENT_WRITE_TOOLS | DOCUMENT_WRITE_TOOLS)
+                        ):
+                            successful_tools.add("__task_contract_artifact__")
+                    if name in _SCHEDULE_MUTATION_TOOLS:
+                            successful_tools.add(f"__effect_tool__:{name}")
                     if name in {"recall", "session_search"}:
                         memory_tainted = True
                     if name in UNTRUSTED_WEB_TOOLS:

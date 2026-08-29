@@ -843,10 +843,16 @@ class OpenAIClient(_CloudHTTPClient):
         if tool_calls:
             message["tool_calls"] = tool_calls
         usage = result.get("usage") if isinstance(result.get("usage"), dict) else {}
+        reported_model = (
+            result.get("model")
+            if isinstance(result.get("model"), str) and result["model"].strip()
+            else None
+        )
         synthetic = {
             "done": status == "completed",
             "done_reason": done_reason,
-            "model": result.get("model") if isinstance(result.get("model"), str) else model,
+            "model": reported_model or model,
+            "model_attested": reported_model is not None,
             "prompt_eval_count": usage.get("input_tokens"),
             "eval_count": usage.get("output_tokens"),
         }
@@ -1115,10 +1121,16 @@ class AnthropicClient(_CloudHTTPClient):
         if tool_calls:
             message["tool_calls"] = tool_calls
         usage = result.get("usage") if isinstance(result.get("usage"), dict) else {}
+        reported_model = (
+            result.get("model")
+            if isinstance(result.get("model"), str) and result["model"].strip()
+            else None
+        )
         synthetic = {
             "done": raw_reason != "max_tokens",
             "done_reason": done_reason,
-            "model": result.get("model") if isinstance(result.get("model"), str) else model,
+            "model": reported_model or model,
+            "model_attested": reported_model is not None,
             "prompt_eval_count": usage.get("input_tokens"),
             "eval_count": usage.get("output_tokens"),
         }
@@ -1172,19 +1184,21 @@ class AnthropicClient(_CloudHTTPClient):
         payload["stream"] = True
         text_parts: list[str] = []
         model_name = model
+        model_attested = False
         input_tokens: int | None = None
         output_tokens: int | None = None
         stop_reason = "stop"
         stopped = False
 
         def handle(event: dict[str, Any]) -> None:
-            nonlocal model_name, input_tokens, output_tokens, stop_reason, stopped
+            nonlocal model_name, model_attested, input_tokens, output_tokens, stop_reason, stopped
             event_type = str(event.get("type") or "")
             if event_type == "message_start":
                 message = event.get("message")
                 if isinstance(message, dict):
-                    if isinstance(message.get("model"), str):
+                    if isinstance(message.get("model"), str) and message["model"].strip():
                         model_name = message["model"]
+                        model_attested = True
                     usage = message.get("usage")
                     if isinstance(usage, dict) and isinstance(usage.get("input_tokens"), int):
                         input_tokens = usage["input_tokens"]
@@ -1217,6 +1231,7 @@ class AnthropicClient(_CloudHTTPClient):
                     "done": stop_reason != "max_tokens",
                     "done_reason": "length" if stop_reason == "max_tokens" else stop_reason,
                     "model": model_name,
+                    "model_attested": model_attested,
                     "prompt_eval_count": input_tokens,
                     "eval_count": output_tokens,
                 },
@@ -1739,6 +1754,13 @@ class ClaudeCLIClient:
 
     def _subprocess_environment(self) -> dict[str, str]:
         return trusted_cli_environment(include_ssh_agent=False)
+
+    def close(self) -> None:
+        """Release an owned isolated launch directory deterministically."""
+        owner = self._working_directory_owner
+        self._working_directory_owner = None
+        if owner is not None:
+            owner.cleanup()
 
     def _run_cli(
         self,
@@ -2277,6 +2299,12 @@ class _CodexAppServerConversation:
     transcript: tuple[str, ...]
     last_used: float
     busy: bool = False
+    # Appended after ``busy`` so existing positional constructors remain
+    # source-compatible. ``thread/start`` may report the model selected for the
+    # thread, which is useful routing telemetry, but it happens before any turn
+    # is generated and therefore is never served-model attestation.
+    reported_model: str | None = None
+    model_attested: bool = False
 
 
 class _CodexAppServerTransport:
@@ -2629,7 +2657,7 @@ class _CodexAppServerTransport:
                 self._stderr_tail.extend(chunk)
                 if len(self._stderr_tail) > 64 * 1024:
                     del self._stderr_tail[: len(self._stderr_tail) - 64 * 1024]
-        except OSError:
+        except (OSError, ValueError):
             return
 
     def _handle_message(self, message: dict[str, Any]) -> None:
@@ -2841,25 +2869,59 @@ class _CodexAppServerTransport:
         *,
         think: bool | str | None,
         cancellation_guard: Callable[[], bool] | None,
+        response_format: str | dict[str, Any] | None = None,
     ) -> ChatResponse:
         deadline = time.monotonic() + self.generation_timeout
         self._ensure_started(deadline)
-        conversation, fingerprints = self._claim_conversation_thread(messages, model)
+        structured = response_format is not None
+        if structured:
+            # Structured resolver turns are self-contained and schema-specific.
+            # Do not let them reuse, or later become, a dialogue continuation.
+            conversation = None
+            fingerprints = self._message_fingerprints(messages)
+        else:
+            conversation, fingerprints = self._claim_conversation_thread(messages, model)
         prompt_messages = messages if conversation is None else messages[-1:]
         conversation_json = json.dumps(
             prompt_messages, ensure_ascii=False, separators=(",", ":"), default=str
         )
-        prompt = (
-            "<jarvis_conversation_json>\n"
-            + conversation_json
-            + "\n</jarvis_conversation_json>\nContinue the conversation now."
-        )
+        output_schema: dict[str, Any] | None = None
+        if structured:
+            output_schema = _codex_cli_output_schema([], response_format)
+            content_schema = (
+                {"type": "object"}
+                if response_format == "json"
+                else response_format
+            )
+            content_schema_json = json.dumps(
+                content_schema, ensure_ascii=False, separators=(",", ":")
+            )
+            prompt = (
+                "<jarvis_backend_contract>\n"
+                + _CODEX_CLI_SYSTEM_PROMPT
+                + "\n</jarvis_backend_contract>\n<jarvis_conversation_json>\n"
+                + conversation_json
+                + "\n</jarvis_conversation_json>\n<jarvis_tool_schemas_json>\n[]"
+                + "\n</jarvis_tool_schemas_json>\n<jarvis_content_schema_json>\n"
+                + content_schema_json
+                + "\n</jarvis_content_schema_json>"
+            )
+        else:
+            prompt = (
+                "<jarvis_conversation_json>\n"
+                + conversation_json
+                + "\n</jarvis_conversation_json>\nContinue the conversation now."
+            )
         if len(prompt.encode("utf-8")) > self._MAX_PROTOCOL_LINE_BYTES // 2:
             raise ModelProviderError("codex-cli", "request exceeded the safety limit")
         if conversation is None:
             thread_params: dict[str, Any] = {
                 "approvalPolicy": "never",
-                "baseInstructions": _CODEX_APP_SERVER_SYSTEM_PROMPT,
+                "baseInstructions": (
+                    _CODEX_CLI_SYSTEM_PROMPT
+                    if structured
+                    else _CODEX_APP_SERVER_SYSTEM_PROMPT
+                ),
                 "cwd": str(Path(self.working_directory).resolve(strict=True)),
                 "ephemeral": True,
                 "sandbox": "read-only",
@@ -2878,13 +2940,28 @@ class _CodexAppServerTransport:
                 raise ModelProviderError(
                     "codex-cli", "app server returned a malformed thread"
                 )
+            reported_model = thread_result.get("model")
+            reported_provider = thread_result.get("modelProvider")
+            model_report_valid = (
+                reported_provider == "openai"
+                and isinstance(reported_model, str)
+                and re.fullmatch(
+                    r"[A-Za-z0-9][A-Za-z0-9._:/-]{0,199}", reported_model
+                )
+                is not None
+            )
             conversation = _CodexAppServerConversation(
                 thread_id,
-                _ACTIVE_MODEL_CONVERSATION.get() or "",
+                "" if structured else (_ACTIVE_MODEL_CONVERSATION.get() or ""),
                 model,
                 (),
                 time.monotonic(),
                 busy=True,
+                reported_model=reported_model if model_report_valid else None,
+                # The app-server v1 turn completion envelope contains no model
+                # provenance. A pre-turn thread selection must not be promoted
+                # into proof of the model that actually generated this answer.
+                model_attested=False,
             )
         else:
             thread_id = conversation.thread_id
@@ -2912,6 +2989,8 @@ class _CodexAppServerTransport:
                 turn_params["effort"] = effort
             if model.casefold() not in {"auto", "default"}:
                 turn_params["model"] = model
+            if output_schema is not None:
+                turn_params["outputSchema"] = output_schema
             turn_result = self._request(
                 "turn/start",
                 turn_params,
@@ -2967,13 +3046,46 @@ class _CodexAppServerTransport:
                 raise ModelProviderError(
                     "codex-cli", "response exceeded the configured size limit"
                 )
+            message: dict[str, Any]
+            done_reason = "stop"
+            if structured:
+                try:
+                    structured_result = json.loads(text)
+                except json.JSONDecodeError:
+                    raise ModelProviderError(
+                        "codex-cli", "returned malformed structured JSON"
+                    ) from None
+                if not isinstance(structured_result, dict):
+                    raise ModelProviderError(
+                        "codex-cli", "returned malformed structured JSON"
+                    )
+                content = structured_result.get("content")
+                if isinstance(content, (dict, list)):
+                    content_text = json.dumps(
+                        content, ensure_ascii=False, separators=(",", ":")
+                    )
+                elif isinstance(content, str):
+                    content_text = content
+                else:
+                    raise ModelProviderError(
+                        "codex-cli", "returned invalid structured content"
+                    )
+                tool_calls = structured_result.get("tool_calls")
+                if not isinstance(tool_calls, list) or tool_calls:
+                    raise ModelProviderError(
+                        "codex-cli", "returned unauthorized structured tool calls"
+                    )
+                message = {"role": "assistant", "content": content_text}
+            else:
+                message = {"role": "assistant", "content": text}
             conversation_answer = text
             return ChatResponse(
-                {"role": "assistant", "content": text},
+                message,
                 {
                     "done": True,
-                    "done_reason": "stop",
-                    "model": model,
+                    "done_reason": done_reason,
+                    "model": conversation.reported_model or model,
+                    "model_attested": conversation.model_attested,
                     "prompt_eval_count": None,
                     "eval_count": None,
                 },
@@ -2994,6 +3106,10 @@ class _CodexAppServerTransport:
             self._conversations.clear()
         process = self._process
         self._process = None
+        reader = self._reader
+        stderr_reader = self._stderr_reader
+        self._reader = None
+        self._stderr_reader = None
         if process is not None and process.poll() is None:
             try:
                 process.terminate()
@@ -3004,6 +3120,18 @@ class _CodexAppServerTransport:
                     process.wait(timeout=2.0)
                 except (OSError, subprocess.TimeoutExpired):
                     pass
+        if process is not None:
+            for stream in (process.stdin, process.stdout, process.stderr):
+                if stream is None:
+                    continue
+                try:
+                    stream.close()
+                except (OSError, ValueError):
+                    pass
+        current = threading.current_thread()
+        for thread in (reader, stderr_reader):
+            if thread is not None and thread is not current:
+                thread.join(timeout=0.5)
         self._fail_all("app server was closed")
 
     def close(self) -> None:
@@ -3076,6 +3204,7 @@ class CodexCLIClient(ClaudeCLIClient):
         self._codex_home_owner = None
         if owner is not None:
             owner.cleanup()
+        super().close()
 
     def prewarm(self, model: str | None = None) -> None:
         """Make the persistent app-server ready before the first user message."""
@@ -3254,7 +3383,7 @@ class CodexCLIClient(ClaudeCLIClient):
             provider_unavailable=True,
         )
 
-    def chat(
+    def _chat_exec(
         self,
         messages: list[dict[str, Any]],
         tools: list[dict[str, Any]],
@@ -3622,6 +3751,9 @@ class CodexCLIClient(ClaudeCLIClient):
                 "done": True,
                 "done_reason": "tool_use" if tool_calls else "stop",
                 "model": model,
+                # `codex exec` does not report the served model in its result
+                # envelope.  This value is the request, never an attestation.
+                "model_attested": False,
                 "prompt_eval_count": usage.get("input_tokens"),
                 "eval_count": usage.get("output_tokens"),
             }
@@ -3633,6 +3765,88 @@ class CodexCLIClient(ClaudeCLIClient):
                     path.unlink()
                 except OSError:
                     pass
+
+    def chat(
+        self,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]],
+        model: str,
+        context_length: int = 16384,
+        think: bool | str | None = None,
+        temperature: float = 0.2,
+        response_format: str | dict[str, Any] | None = None,
+        seed: int | None = None,
+        cancellation_guard: Callable[[], bool] | None = None,
+    ) -> ChatResponse:
+        """Use App Server for schema-constrained text; retain exec as fallback."""
+        if self.authentication_method == "api-key":
+            raise ModelProviderError(
+                self.provider,
+                "is authenticated with an API key instead of ChatGPT",
+                status_code=401,
+                provider_unavailable=True,
+            )
+        if not isinstance(messages, list) or any(
+            not isinstance(item, dict) for item in messages
+        ):
+            raise ModelProviderError(self.provider, "received malformed message history")
+        if (
+            not isinstance(model, str)
+            or re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:/-]{0,199}", model) is None
+        ):
+            raise ModelProviderError(self.provider, "received an invalid model name")
+        try:
+            workspace = Path(self.working_directory).resolve(strict=True)
+        except OSError:
+            raise ModelProviderError(
+                self.provider,
+                "isolated working directory is unavailable",
+                provider_unavailable=True,
+            ) from None
+        if not workspace.is_dir():
+            raise ModelProviderError(
+                self.provider,
+                "isolated working directory is unavailable",
+                provider_unavailable=True,
+            )
+
+        if (
+            response_format is not None
+            and not tools
+            and self._streamable_messages(messages)
+        ):
+            try:
+                response = self._app_server_transport().chat_stream(
+                    messages,
+                    model,
+                    lambda _text: None,
+                    think=think,
+                    cancellation_guard=cancellation_guard,
+                    response_format=response_format,
+                )
+            except ModelProviderError:
+                with self._app_server_lock:
+                    app_server = self._app_server
+                    self._app_server = None
+                if app_server is not None:
+                    app_server.close()
+                if cancellation_guard is not None and cancellation_guard():
+                    raise
+            else:
+                self.authentication_method = "chatgpt"
+                return response
+
+        return self._chat_exec(
+            messages,
+            tools,
+            model,
+            context_length=context_length,
+            think=think,
+            temperature=temperature,
+            response_format=response_format,
+            seed=seed,
+            cancellation_guard=cancellation_guard,
+        )
 
     @staticmethod
     def _streamable_messages(messages: list[dict[str, Any]]) -> bool:

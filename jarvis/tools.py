@@ -370,6 +370,119 @@ def _serialize_tool_response(ok: bool, field: str, value: Any) -> str:
     }, ensure_ascii=False, default=str)
 
 
+def _tool_result_failed(value: Any, *, _depth: int = 0) -> bool:
+    """Fail closed when a handler returns a nested failure envelope.
+
+    A provider adapter may return a structured ``ok: false`` result instead of
+    raising.  Treating the outer Python return as success lets that failed
+    operation satisfy completion and audit gates.  Tool results are already
+    bounded before they reach the model; the depth cap is defense in depth for
+    custom handlers.
+    """
+    if _depth > 8:
+        # An indeterminate over-deep envelope cannot certify a side effect.
+        return True
+    if isinstance(value, dict):
+        if value.get("ok") is False or value.get("success") is False:
+            return True
+        if value.get("timed_out") is True:
+            return True
+        expected_stopped_process = (
+            value.get("state") == "stopped" and value.get("running") is False
+        )
+        if not expected_stopped_process:
+            for key in ("exit_code", "returncode"):
+                code = value.get(key)
+                if isinstance(code, int) and not isinstance(code, bool) and code != 0:
+                    return True
+        return any(
+            _tool_result_failed(item, _depth=_depth + 1)
+            for item in value.values()
+            if isinstance(item, (dict, list, tuple))
+        )
+    if isinstance(value, (list, tuple)):
+        return any(
+            _tool_result_failed(item, _depth=_depth + 1)
+            for item in value
+            if isinstance(item, (dict, list, tuple))
+        )
+    return False
+
+
+def _tool_call_target_sha256(name: str, arguments: dict[str, Any]) -> str:
+    """Bind an audit receipt to the exact tool name and argument object.
+
+    Only the digest is persisted: file paths, recipients, content, and other
+    potentially private target values never enter the generic activity log.
+    """
+    canonical = json.dumps(
+        {"tool": str(name), "arguments": arguments},
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        default=str,
+    )
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def _tool_result_receipt_id(name: str, value: Any) -> str | None:
+    """Return a bounded durable-effect identifier for supported tool results."""
+    if not isinstance(value, dict):
+        return None
+    keys = (
+        ("id",) if name == "schedule_create" else
+        ("task_id",) if name == "delegate_specialist" else
+        ("receipt_id", "operation_id", "deployment_id")
+    )
+    for key in keys:
+        candidate = value.get(key)
+        if isinstance(candidate, bool) or not isinstance(candidate, (str, int)):
+            continue
+        rendered = str(candidate).strip()
+        if re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}", rendered):
+            return rendered
+    return None
+
+
+def _effect_constraint_sha256(value: str) -> str:
+    normalized = re.sub(r"\s+", " ", str(value).strip().casefold())
+    return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
+
+
+def _matched_effect_constraint_receipts(
+    name: str,
+    arguments: dict[str, Any],
+    constraints: tuple[str, ...],
+) -> list[str]:
+    """Hash only contract text that is actually present in executed arguments."""
+    semantic_parts = [str(name).replace("_", " ")]
+
+    def collect(value: Any, key: str = "") -> None:
+        if isinstance(value, dict):
+            for child_key, child in value.items():
+                collect(child, str(child_key))
+            return
+        if isinstance(value, (list, tuple)):
+            for child in value:
+                collect(child, key)
+            return
+        if isinstance(value, bool) and key:
+            semantic_parts.append(f"{key} {str(value).casefold()}")
+            if value is False:
+                semantic_parts.append(f"not {key}")
+            return
+        semantic_parts.append(str(value))
+
+    collect(arguments)
+    haystack = re.sub(r"\s+", " ", " ".join(semantic_parts).casefold())
+    matched: list[str] = []
+    for constraint in constraints[:12]:
+        normalized = re.sub(r"\s+", " ", str(constraint).strip().casefold())
+        if normalized and normalized in haystack:
+            matched.append(_effect_constraint_sha256(normalized))
+    return sorted(set(matched))
+
+
 def _origin(parsed: urllib.parse.SplitResult) -> tuple[str, str, int]:
     port = parsed.port or (443 if parsed.scheme == "https" else 80)
     return parsed.scheme, (parsed.hostname or "").casefold(), port
@@ -1779,6 +1892,10 @@ class ToolBox:
             f"jarvis_toolbox_run_trace_{id(self)}",
             default=None,
         )
+        self._effect_contract_constraints: ContextVar[tuple[str, ...]] = ContextVar(
+            f"jarvis_toolbox_effect_constraints_{id(self)}",
+            default=(),
+        )
         self._active_image_attachments: ContextVar[tuple[ImageAttachment, ...]] = (
             ContextVar(
                 f"jarvis_toolbox_image_attachments_{id(self)}",
@@ -1836,6 +1953,23 @@ class ToolBox:
             yield
         finally:
             self._active_image_attachments.reset(token)
+
+    @contextmanager
+    def effect_contract_context(
+        self,
+        constraints: tuple[str, ...] | list[str],
+    ) -> Iterator[None]:
+        """Bind one tool dispatch to grounded TaskContract constraints."""
+        bounded = tuple(
+            str(value).strip()[:300]
+            for value in tuple(constraints)[:12]
+            if str(value).strip()
+        )
+        token = self._effect_contract_constraints.set(bounded)
+        try:
+            yield
+        finally:
+            self._effect_contract_constraints.reset(token)
 
     def _effective_approval_arguments(
         self,
@@ -2096,12 +2230,30 @@ class ToolBox:
         tool = self.tools.get(name)
         if not tool:
             return _serialize_tool_response(False, "error", f"Unknown tool: {name}")
+        effect_contract_state = getattr(
+            self, "_effect_contract_constraints", None
+        )
+        effect_contract_constraints = (
+            tuple(effect_contract_state.get())
+            if effect_contract_state is not None
+            else ()
+        )
         started = time.monotonic()
         succeeded = False
         approval_id: int | None = None
         approved_arguments_token = None
+        target_sha256: str | None = None
+        result_receipt_id: str | None = None
+        matched_constraint_sha256: list[str] = []
+        handler_dispatched = False
         try:
             self._validate_arguments(tool, arguments)
+            target_sha256 = _tool_call_target_sha256(name, arguments)
+            matched_constraint_sha256 = _matched_effect_constraint_receipts(
+                name,
+                arguments,
+                effect_contract_constraints,
+            )
             approval = SENSITIVE_ACTIONS.get(name)
             # Moving toward less authority is always safe to do immediately.
             # Only ``setup`` expands Jarvis's configured capability surface;
@@ -2126,6 +2278,14 @@ class ToolBox:
                 approval_action, approval_reason = approval
                 approval_scope, task_id = execution_context
                 approval_arguments = self._effective_approval_arguments(name, arguments)
+                target_sha256 = _tool_call_target_sha256(
+                    name, approval_arguments
+                )
+                matched_constraint_sha256 = _matched_effect_constraint_receipts(
+                    name,
+                    approval_arguments,
+                    effect_contract_constraints,
+                )
                 exact_resource = approval_resource(name, approval_arguments)
                 display_resource = approval_display_resource(
                     name, approval_arguments, exact_resource
@@ -2154,10 +2314,25 @@ class ToolBox:
                     raise PermissionError(
                         "Approved tool target changed during the final execution check"
                     )
+                # The audit digest describes the post-authorization snapshot
+                # actually dispatched, including bounded provider defaults and
+                # resolved resource digests, not merely the model's sparse args.
+                target_sha256 = _tool_call_target_sha256(
+                    name, confirmed_arguments
+                )
+                matched_constraint_sha256 = _matched_effect_constraint_receipts(
+                    name,
+                    confirmed_arguments,
+                    effect_contract_constraints,
+                )
                 approved_arguments_token = self._approved_sensitive_arguments.set(
                     (name, confirmed_arguments)
                 )
+            handler_dispatched = True
             result = tool.function(**arguments)
+            result_receipt_id = _tool_result_receipt_id(name, result)
+            if _tool_result_failed(result):
+                return _serialize_tool_response(False, "result", result)
             succeeded = True
             return _serialize_tool_response(True, "result", result)
         except Exception as exc:
@@ -2181,12 +2356,20 @@ class ToolBox:
                             sorted(arguments) if isinstance(arguments, dict) else []
                         ),
                         "duration_ms": int((time.monotonic() - started) * 1000),
+                        "handler_dispatched": handler_dispatched,
                     }
                     trace_id = self._run_trace_id.get()
                     if trace_id is not None:
                         details["trace_id"] = trace_id
                     if isinstance(approval_id, int):
                         details["approval_id"] = approval_id
+                    if target_sha256 is not None:
+                        details["target_sha256"] = target_sha256
+                    if result_receipt_id is not None:
+                        details["result_receipt_id"] = result_receipt_id
+                    details["matched_constraint_sha256"] = (
+                        matched_constraint_sha256
+                    )
                     self.memory.log_activity(
                         "tool",
                         name,

@@ -53,7 +53,7 @@ from jarvis.agent import (
 )
 from jarvis.config import Config
 from jarvis.memory import Memory
-from jarvis.tools import Tool, ToolBox, _OutputCollector
+from jarvis.tools import FILE_WRITE_TOOLS, Tool, ToolBox, _OutputCollector
 from tests.test_agent import (
     SUBSTANTIVE_RESEARCH_RESULT,
     FakeResponse,
@@ -421,6 +421,20 @@ class AgentHardeningTests(unittest.TestCase):
             },
         })
         self.assertFalse(Agent._tool_failed(stopped))
+
+    def test_nested_provider_failure_cannot_count_as_a_successful_tool(self):
+        for result in (
+            {
+                "ok": True,
+                "result": {"operation": "deploy", "ok": False, "returncode": 1},
+            },
+            {
+                "ok": True,
+                "result": {"data": {"success": False}, "returncode": None},
+            },
+        ):
+            with self.subTest(result=result):
+                self.assertTrue(Agent._tool_failed(json.dumps(result)))
 
     def test_explicit_process_cleanup_and_logs_are_completion_obligations(self):
         prompt = (
@@ -2300,6 +2314,78 @@ class AgentHardeningTests(unittest.TestCase):
         self.assertIn("read_file", exposed)
         self.assertNotIn("write_file", exposed)
         self.assertNotIn("edit_file", exposed)
+
+    def test_inert_or_negated_examples_never_expose_write_tools(self):
+        prompts = (
+            'Explain why "delete all files" is dangerous.',
+            "Explain why `delete all files` is dangerous.",
+            "Explain this example:\n> move the files into archives",
+            'Translate "move the files into archives".',
+            "Do not delete any files.",
+        )
+        for prompt in prompts:
+            with self.subTest(prompt=prompt):
+                agent, client = self.make_agent([
+                    FakeResponse(content="That example is data, not an instruction to mutate files."),
+                ])
+
+                result = agent.run(prompt)
+
+                self.assertEqual(result.status, "complete")
+                exposed = {
+                    schema["function"]["name"] for schema in client.requests[0]["tools"]
+                }
+                self.assertFalse(exposed.intersection(FILE_WRITE_TOOLS), exposed)
+
+    def test_private_path_recency_words_never_expose_public_web_tools(self):
+        prompt = r"What is the latest version recorded in C:\Private Roadmap.txt?"
+        agent, client = self.make_agent([
+            FakeResponse(content="I would need to inspect the local roadmap to answer that."),
+        ])
+
+        result = agent.run(prompt)
+
+        self.assertEqual(result.status, "complete")
+        exposed = {
+            schema["function"]["name"] for schema in client.requests[0]["tools"]
+        }
+        self.assertNotIn("web_search", exposed)
+        self.assertNotIn("web_fetch", exposed)
+
+    def test_non_directive_action_language_never_exposes_effect_tools(self):
+        prompts = (
+            "Jarvis, explain how to delete these files.",
+            "Would it be safe to delete these files?",
+            "The prompt says delete all files.",
+            "Explain how to run the application.",
+            "What command should I run for the app?",
+            "Explain how to create a PDF report.",
+            "Do you remember that preference?",
+            "What do you remember about my preference?",
+            "Where do you store that preference?",
+            "Why did you save that fact?",
+        )
+        prohibited = {
+            *FILE_WRITE_TOOLS,
+            "run_process",
+            "remember",
+            "build_document",
+            "generate_image",
+            "edit_attached_image",
+        }
+        for prompt in prompts:
+            with self.subTest(prompt=prompt):
+                agent, client = self.make_agent([
+                    FakeResponse(content="I answered the question without performing that action."),
+                ])
+
+                result = agent.run(prompt)
+
+                self.assertEqual(result.status, "complete", result.reason)
+                exposed = {
+                    schema["function"]["name"] for schema in client.requests[0]["tools"]
+                }
+                self.assertFalse(exposed.intersection(prohibited), exposed)
 
     def test_project_code_opinion_is_grounded_in_current_files(self):
         toolbox = FakeToolBox()

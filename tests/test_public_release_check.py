@@ -68,6 +68,15 @@ class PublicReleaseCheckTests(unittest.TestCase):
             },
         )
 
+    def _head(self) -> str:
+        return subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=self.repo,
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+
     def test_github_no_reply_commit_and_tag_identities_are_allowed(self) -> None:
         email = "12345+release-tester@users.noreply.github.com"
         self._commit(email)
@@ -112,16 +121,12 @@ class PublicReleaseCheckTests(unittest.TestCase):
             )
         )
 
-    def test_ci_can_scan_pr_head_without_trusting_synthetic_merge_identity(self) -> None:
+    def test_ranged_scan_requires_checkout_of_the_exact_pr_head(self) -> None:
         safe_email = "12345+release-tester@users.noreply.github.com"
+        self._commit(safe_email, message="trusted base")
+        base = self._head()
         self._commit(safe_email, message="reviewed candidate")
-        candidate = subprocess.run(
-            ["git", "rev-parse", "HEAD"],
-            cwd=self.repo,
-            check=True,
-            capture_output=True,
-            text=True,
-        ).stdout.strip()
+        candidate = self._head()
         self._commit(self._blocked_email(), message="synthetic merge fixture")
 
         default_findings = check_release(self.repo)
@@ -129,12 +134,120 @@ class PublicReleaseCheckTests(unittest.TestCase):
             any("author identity: non-example email address" in item for item in default_findings),
             default_findings,
         )
-        self.assertEqual(check_release(self.repo, history_ref=candidate), [])
+        with self.assertRaisesRegex(ValueError, "checked-out HEAD"):
+            check_release(
+                self.repo,
+                history_ref=candidate,
+                history_base=base,
+            )
 
     def test_history_ref_must_be_a_full_commit_or_head(self) -> None:
         self._commit("12345+release-tester@users.noreply.github.com")
         with self.assertRaisesRegex(ValueError, "full 40-character"):
             check_release(self.repo, history_ref="refs/heads/main")
+
+    def test_validated_base_excludes_only_already_trusted_history(self) -> None:
+        self._commit(self._blocked_email(), message="pre-existing public history")
+        base = self._head()
+        self._commit(
+            "12345+release-tester@users.noreply.github.com",
+            message="reviewed candidate",
+        )
+        candidate = self._head()
+
+        self.assertEqual(
+            check_release(
+                self.repo,
+                history_ref=candidate,
+                history_base=base,
+            ),
+            [],
+        )
+
+    def test_validated_base_still_rejects_new_private_identity(self) -> None:
+        self._commit("12345+release-tester@users.noreply.github.com")
+        base = self._head()
+        self._commit(self._blocked_email(), message="unsafe candidate")
+        candidate = self._head()
+
+        findings = check_release(
+            self.repo,
+            history_ref=candidate,
+            history_base=base,
+        )
+        self.assertTrue(
+            any("author identity: non-example email address" in item for item in findings),
+            findings,
+        )
+
+    def test_history_base_must_be_full_and_ancestral(self) -> None:
+        safe_email = "12345+release-tester@users.noreply.github.com"
+        self._commit(safe_email, message="root")
+        root = self._head()
+        self._git("switch", "--quiet", "-c", "unrelated")
+        self._commit(safe_email, message="unrelated base")
+        unrelated = self._head()
+        self._git("switch", "--quiet", "-c", "candidate", root)
+        self._commit(safe_email, message="candidate")
+        candidate = self._head()
+
+        with self.assertRaisesRegex(ValueError, "full 40-character"):
+            check_release(
+                self.repo,
+                history_ref=candidate,
+                history_base="HEAD",
+            )
+        with self.assertRaisesRegex(ValueError, "precede"):
+            check_release(
+                self.repo,
+                history_ref=candidate,
+                history_base=candidate,
+            )
+        with self.assertRaisesRegex(ValueError, "all-zero"):
+            check_release(
+                self.repo,
+                history_ref=candidate,
+                history_base="0" * 40,
+            )
+        with self.assertRaisesRegex(ValueError, "ancestor"):
+            check_release(
+                self.repo,
+                history_ref=candidate,
+                history_base=unrelated,
+            )
+
+    def test_ranged_release_must_be_one_direct_non_merge_commit(self) -> None:
+        safe_email = "12345+release-tester@users.noreply.github.com"
+        self._commit(safe_email, message="trusted base")
+        base = self._head()
+        self._commit(safe_email, message="first candidate commit")
+        self._commit(safe_email, message="second candidate commit")
+        candidate = self._head()
+
+        with self.assertRaisesRegex(ValueError, "exactly one reviewed"):
+            check_release(
+                self.repo,
+                history_ref=candidate,
+                history_base=base,
+            )
+
+    def test_ranged_release_index_must_match_candidate_commit(self) -> None:
+        safe_email = "12345+release-tester@users.noreply.github.com"
+        self._commit(safe_email, message="trusted base")
+        base = self._head()
+        self._commit(safe_email, message="reviewed candidate")
+        candidate = self._head()
+        (self.repo / "README.md").write_text(
+            "different staged tree\n", encoding="utf-8"
+        )
+        self._git("add", "README.md")
+
+        with self.assertRaisesRegex(ValueError, "index"):
+            check_release(
+                self.repo,
+                history_ref=candidate,
+                history_base=base,
+            )
 
     def test_poisoned_path_git_is_rejected_without_execution(self) -> None:
         self._commit("12345+release-tester@users.noreply.github.com")
@@ -175,7 +288,12 @@ class PublicReleaseCheckTests(unittest.TestCase):
             Path(__file__).resolve().parents[1] / ".github" / "workflows" / "ci.yml"
         ).read_text(encoding="utf-8")
         self.assertIn("github.event.pull_request.head.sha", workflow)
+        self.assertIn("github.event.pull_request.base.sha", workflow)
+        self.assertIn("github.event.before", workflow)
+        self.assertIn("workflow_dispatch", workflow)
+        self.assertIn("refs/heads/main", workflow)
         self.assertIn('--history-ref "$PUBLIC_RELEASE_HISTORY_REF"', workflow)
+        self.assertIn('--history-base "$PUBLIC_RELEASE_HISTORY_BASE"', workflow)
 
     def test_personal_commit_email_blocks_release(self) -> None:
         blocked_email = self._blocked_email()

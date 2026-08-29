@@ -4,6 +4,7 @@ on:
   push:
     branches: [main]
   pull_request:
+    branches: [main]
   workflow_dispatch:
 
 permissions:
@@ -24,11 +25,20 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: false
+          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
 
       - name: Check public-release privacy boundary
         env:
           PUBLIC_RELEASE_HISTORY_REF: ${{ github.event.pull_request.head.sha || github.sha }}
-        run: python scripts/check_public_release.py --history-ref "$PUBLIC_RELEASE_HISTORY_REF"
+          PUBLIC_RELEASE_HISTORY_BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
+        run: |
+          if [[ "$GITHUB_EVENT_NAME" == "workflow_dispatch" ]]; then
+            [[ "$GITHUB_REF" == "refs/heads/main" ]] || exit 1
+            PUBLIC_RELEASE_HISTORY_BASE="$(git rev-parse "${PUBLIC_RELEASE_HISTORY_REF}^")"
+          fi
+          [[ "$PUBLIC_RELEASE_HISTORY_BASE" =~ ^[0-9a-fA-F]{40}$ ]] || exit 1
+          [[ ! "$PUBLIC_RELEASE_HISTORY_BASE" =~ ^0+$ ]] || exit 1
+          python scripts/check_public_release.py --history-ref "$PUBLIC_RELEASE_HISTORY_REF" --history-base "$PUBLIC_RELEASE_HISTORY_BASE"
 
       - name: Scan Git history for secrets
         uses: gitleaks/gitleaks-action@e0c47f4f8be36e29cdc102c57e68cb5cbf0e8d1e # v3.0.0

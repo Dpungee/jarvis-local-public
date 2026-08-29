@@ -171,6 +171,10 @@ class ChatResponse(dict[str, Any]):
             response.get("done_reason") if isinstance(response.get("done_reason"), str) else None
         )
         self.model = response.get("model") if isinstance(response.get("model"), str) else None
+        # ``model`` is sometimes copied from the request by compatibility
+        # transports.  Callers that need proof of the actually served model
+        # must require this explicit provider-observation bit as well.
+        self.model_attested = response.get("model_attested") is True
         self.created_at = (
             response.get("created_at") if isinstance(response.get("created_at"), str) else None
         )
@@ -189,6 +193,7 @@ class ChatResponse(dict[str, Any]):
             "done": self.done,
             "done_reason": self.done_reason,
             "model": self.model,
+            "model_attested": self.model_attested,
             "created_at": self.created_at,
             "metrics": self.metrics,
         }
@@ -464,6 +469,12 @@ class OllamaClient:
         message = result.get("message")
         if not isinstance(message, dict):
             raise OllamaError("Ollama response did not contain a valid message")
+        # Ollama's response-level model name is server-produced.  Preserve an
+        # explicit observation bit so exact-model evaluation never mistakes a
+        # locally copied request value for provider evidence.
+        result["model_attested"] = bool(
+            isinstance(result.get("model"), str) and result["model"].strip()
+        )
         return ChatResponse(message, result)
 
     def preload(self, model: str, *, context_length: int = 4096) -> GenerationMetrics:

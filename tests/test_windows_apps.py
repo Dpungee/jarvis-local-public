@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import hashlib
 import json
 import os
 import re
@@ -59,6 +60,10 @@ class WindowsAppControllerTests(unittest.TestCase):
         listed = controller.list_apps("photo")
         self.assertEqual(listed["count"], 1)
         approved = controller.launch_snapshot("Photoshop")
+        self.assertEqual(
+            approved["executable_sha256"],
+            hashlib.sha256(self.photoshop.read_bytes()).hexdigest(),
+        )
         with patch.dict(
             os.environ,
             {"OPENAI_API_KEY": "synthetic-secret", "SYSTEMROOT": r"C:\Windows"},
@@ -70,6 +75,38 @@ class WindowsAppControllerTests(unittest.TestCase):
         self.assertEqual(positional[0], [str(self.photoshop.resolve())])
         self.assertNotIn("OPENAI_API_KEY", keyword["env"])
         self.assertEqual(keyword["env"]["SYSTEMROOT"], r"C:\Windows")
+
+    def test_launch_rejects_same_size_same_mtime_executable_replacement(self):
+        calls = []
+        controller = self.controller(
+            launcher=lambda *args, **kwargs: calls.append((args, kwargs))
+        )
+        approved = controller.launch_snapshot("Photoshop")
+        original = self.photoshop.stat()
+        original_bytes = self.photoshop.read_bytes()
+        self.photoshop.write_bytes(b"x" * len(original_bytes))
+        os.utime(
+            self.photoshop,
+            ns=(original.st_atime_ns, original.st_mtime_ns),
+        )
+
+        with self.assertRaisesRegex(PermissionError, "changed"):
+            controller.launch_app("Photoshop", approved=approved)
+
+        self.assertEqual(self.photoshop.stat().st_size, original.st_size)
+        self.assertEqual(self.photoshop.stat().st_mtime_ns, original.st_mtime_ns)
+        self.assertEqual(calls, [])
+
+    def test_hard_linked_executable_is_rejected(self):
+        alias = self.apps / "Photoshop-alias.exe"
+        try:
+            os.link(self.photoshop, alias)
+        except OSError as exc:
+            self.skipTest(f"Hard links are unavailable: {exc}")
+
+        controller = self.controller()
+        with self.assertRaisesRegex(PermissionError, "hard-linked"):
+            controller.launch_snapshot("Photoshop")
 
     def test_shells_and_ambiguous_apps_fail_closed(self):
         shell = self.apps / "cmd.exe"
@@ -116,7 +153,10 @@ class WindowsAppControllerTests(unittest.TestCase):
         approved = controller.launch_snapshot("Calculator")
         self.assertEqual(approved["activation_id"], activation_id)
 
-        with patch("jarvis.windows_apps._regular_file", return_value=explorer.resolve()):
+        with patch(
+            "jarvis.windows_apps.windows_system_executable",
+            return_value=explorer.resolve(),
+        ):
             launched = controller.launch_app("Calculator", approved=approved)
 
         self.assertEqual(launched["pid"], 9876)
@@ -137,7 +177,10 @@ class WindowsAppControllerTests(unittest.TestCase):
 
         controller = self.controller(launcher=launcher)
         approved = controller.url_snapshot("https://example.com/weather?q=10001")
-        with patch("jarvis.windows_apps._regular_file", return_value=explorer.resolve()):
+        with patch(
+            "jarvis.windows_apps.windows_system_executable",
+            return_value=explorer.resolve(),
+        ):
             launched = controller.open_url(
                 "https://example.com/weather?q=10001", approved=approved
             )
@@ -174,6 +217,10 @@ class WindowsAppControllerTests(unittest.TestCase):
             "Pictures/subject.jpg",
             "Pictures/subject-transparent.png",
         )
+        self.assertEqual(
+            approved["photoshop_executable_sha256"],
+            hashlib.sha256(self.photoshop.read_bytes()).hexdigest(),
+        )
         result = controller.remove_photoshop_background(
             "Pictures/subject.jpg",
             "Pictures/subject-transparent.png",
@@ -193,6 +240,37 @@ class WindowsAppControllerTests(unittest.TestCase):
                 "Pictures/another.png",
                 approved=approved,
             )
+
+    def test_photoshop_rejects_same_size_same_mtime_executable_replacement(self):
+        pictures = self.profile / "Pictures"
+        pictures.mkdir()
+        (pictures / "subject.jpg").write_bytes(b"synthetic image bytes")
+        calls = []
+        controller = self.controller(
+            runner=lambda *args, **kwargs: calls.append((args, kwargs))
+        )
+        approved = controller.photoshop_snapshot(
+            "Pictures/subject.jpg",
+            "Pictures/subject-transparent.png",
+        )
+        original = self.photoshop.stat()
+        original_bytes = self.photoshop.read_bytes()
+        self.photoshop.write_bytes(b"z" * len(original_bytes))
+        os.utime(
+            self.photoshop,
+            ns=(original.st_atime_ns, original.st_mtime_ns),
+        )
+
+        with self.assertRaisesRegex(PermissionError, "changed"):
+            controller.remove_photoshop_background(
+                "Pictures/subject.jpg",
+                "Pictures/subject-transparent.png",
+                approved=approved,
+            )
+
+        self.assertEqual(self.photoshop.stat().st_size, original.st_size)
+        self.assertEqual(self.photoshop.stat().st_mtime_ns, original.st_mtime_ns)
+        self.assertEqual(calls, [])
 
     def test_photoshop_output_must_be_png_and_overwrite_is_explicit(self):
         pictures = self.profile / "Pictures"

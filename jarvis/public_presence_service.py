@@ -213,12 +213,21 @@ def public_presence_database_path(value: str | os.PathLike[str] | None = None) -
     This intentionally does not import the private Config object or read a dotenv
     file, because either would make private configuration available to the public
     process. A launcher may pass the conventional JARVIS_DATA value through the
-    environment; otherwise the source-tree data directory is used.
+    environment. Source checkouts use their local data directory; installed
+    packages use the same per-user JarvisLocal data root as the private runtime.
     """
 
     if value is None:
         raw = os.environ.get("JARVIS_DATA")
-        candidate = _SOURCE_ROOT / "data" if raw is None else Path(raw)
+        if raw is not None:
+            candidate = Path(raw)
+        elif (_SOURCE_ROOT / "pyproject.toml").is_file():
+            candidate = _SOURCE_ROOT / "data"
+        else:
+            user_root = Path(
+                os.getenv("LOCALAPPDATA", Path.home() / "AppData" / "Local")
+            ) / "JarvisLocal"
+            candidate = user_root / "data"
     else:
         raw = os.fspath(value)
         candidate = Path(raw)

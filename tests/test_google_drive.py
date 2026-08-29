@@ -677,6 +677,30 @@ class GoogleDriveProviderTests(unittest.TestCase):
         with self.assertRaises(GoogleDriveValidationError):
             provider.download_file("file123", "downloads/report.txt")
 
+    def test_download_approval_binds_account_and_rejects_changed_remote_item(self):
+        service = FakeService()
+        dependencies = fake_dependencies(service=service)
+        provider = self.provider(service=service, max_transfer_bytes=20)
+        with patch("jarvis.google_drive._google_dependencies", return_value=dependencies):
+            approved = provider.download_approval_snapshot("file123")
+
+        self.assertEqual(approved["drive_account_permission_id"], "account123")
+        self.assertEqual(approved["download_item"]["id"], "file123")
+        self.assertEqual(approved["download_item"]["size"], 7)
+
+        service.resource.metadata_response["name"] = "changed.txt"
+        with (
+            patch("jarvis.google_drive._google_dependencies", return_value=dependencies),
+            self.assertRaisesRegex(PermissionError, "changed after approval"),
+        ):
+            provider.download_file(
+                "file123",
+                "downloads/blocked.txt",
+                expected_approval_snapshot=approved,
+            )
+        self.assertFalse(any(name == "get_media" for name, _ in service.resource.calls))
+        self.assertFalse((self.workspace / "downloads" / "blocked.txt").exists())
+
     def test_streaming_download_limit_removes_partial_file(self):
         service = FakeService()
         service.resource.metadata_response.pop("size")

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import html
+import hashlib
 import json
 import os
 import stat
@@ -529,6 +530,7 @@ def build_offline_document(
             "path": str(output_path),
             "relative_path": output_path.relative_to(Path(workspace).resolve()).as_posix(),
             "bytes": size,
+            "sha256": hashlib.sha256(output_path.read_bytes()).hexdigest(),
             "title": spec.title,
         }
         if kind == "xlsx":
@@ -616,6 +618,7 @@ def build_document_preview(
         "path": str(output_path),
         "relative_path": output_path.relative_to(Path(workspace).resolve()).as_posix(),
         "bytes": len(encoded),
+        "sha256": hashlib.sha256(encoded).hexdigest(),
         "title": spec.title,
         "section_count": len(sections),
         "qa_passed": not warnings,

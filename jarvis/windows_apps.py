@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Any
 
 from .desktop import resolve_computer_path
+from .trusted_executables import windows_system_executable
 
 try:
     import winreg
@@ -80,6 +81,15 @@ def _regular_file(path: Path) -> Path:
     ):
         raise PermissionError("Application and image targets must be ordinary files")
     return path.resolve(strict=True)
+
+
+def _ordinary_executable(path: Path) -> Path:
+    """Resolve one executable without accepting link-based identity ambiguity."""
+    executable = _regular_file(path)
+    details = os.stat(executable, follow_symlinks=False)
+    if int(getattr(details, "st_nlink", 1)) > 1:
+        raise PermissionError("Application executables must not be hard-linked")
+    return executable
 
 
 def _clean_display_name(executable: Path) -> str:
@@ -201,11 +211,10 @@ class WindowsAppController:
         """Discover signed Start-menu package activations such as Calculator."""
         if os.name != "nt":
             return []
-        powershell = Path(os.environ.get("SystemRoot", r"C:\Windows")) / (
-            r"System32\WindowsPowerShell\v1.0\powershell.exe"
-        )
         try:
-            powershell = _regular_file(powershell)
+            powershell = windows_system_executable(
+                "System32", "WindowsPowerShell", "v1.0", "powershell.exe"
+            )
             completed = self._runner(
                 [
                     str(powershell), "-NoLogo", "-NoProfile", "-NonInteractive",
@@ -300,7 +309,7 @@ class WindowsAppController:
             return app
         if app.executable is None:
             raise FileNotFoundError(f"Installed application target is unavailable: {application}")
-        executable = _regular_file(app.executable)
+        executable = _ordinary_executable(app.executable)
         if executable.name.casefold() in _BLOCKED_EXECUTABLES:
             raise PermissionError("Shells, installers, and system-management apps cannot be launched")
         return InstalledApplication(app.name, executable, app.source)
@@ -321,6 +330,7 @@ class WindowsAppController:
             "resolved_executable": str(app.executable),
             "executable_bytes": details.st_size,
             "executable_mtime_ns": details.st_mtime_ns,
+            "executable_sha256": _sha256_file(app.executable),
             "source": app.source,
         }
 
@@ -342,9 +352,7 @@ class WindowsAppController:
         if os.name == "nt":
             flags = subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.DETACHED_PROCESS
         if "activation_id" in confirmed:
-            explorer = _regular_file(
-                Path(os.environ.get("SystemRoot", r"C:\Windows")) / "explorer.exe"
-            )
+            explorer = windows_system_executable("explorer.exe")
             command = [
                 str(explorer),
                 "shell:AppsFolder\\" + str(confirmed["activation_id"]),
@@ -378,7 +386,7 @@ class WindowsAppController:
         source = str(approved.get("source") or "").strip()
         if not executable_value or not application or not source:
             raise PermissionError("Approved application snapshot is incomplete")
-        executable = _regular_file(Path(executable_value))
+        executable = _ordinary_executable(Path(executable_value))
         if (
             executable.suffix.casefold() != ".exe"
             or executable.name.casefold() in _BLOCKED_EXECUTABLES
@@ -440,9 +448,7 @@ class WindowsAppController:
         confirmed = self.url_snapshot(url)
         if confirmed != approved:
             raise PermissionError("Approved browser URL changed before launch")
-        explorer = _regular_file(
-            Path(os.environ.get("SystemRoot", r"C:\Windows")) / "explorer.exe"
-        )
+        explorer = windows_system_executable("explorer.exe")
         flags = 0
         if os.name == "nt":
             flags = subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.DETACHED_PROCESS
@@ -502,7 +508,7 @@ class WindowsAppController:
             if app.executable is None:
                 continue
             try:
-                executable = _regular_file(app.executable)
+                executable = _ordinary_executable(app.executable)
             except (OSError, PermissionError):
                 continue
             server = lookup(prog_id)
@@ -550,6 +556,7 @@ class WindowsAppController:
             "photoshop_executable": str(app.executable),
             "photoshop_executable_bytes": app_details.st_size,
             "photoshop_executable_mtime_ns": app_details.st_mtime_ns,
+            "photoshop_executable_sha256": _sha256_file(app.executable),
             "photoshop_prog_id": prog_id,
         }
         if destination_exists:
@@ -563,10 +570,14 @@ class WindowsAppController:
 
     @staticmethod
     def _powershell_executable() -> Path:
-        discovered = shutil.which("powershell.exe") or shutil.which("powershell")
-        if not discovered:
-            raise RuntimeError("Windows PowerShell is unavailable for Photoshop automation")
-        return Path(discovered).resolve()
+        try:
+            return windows_system_executable(
+                "System32", "WindowsPowerShell", "v1.0", "powershell.exe"
+            )
+        except (OSError, PermissionError, ValueError) as exc:
+            raise RuntimeError(
+                "Windows PowerShell is unavailable for Photoshop automation"
+            ) from exc
 
     def remove_photoshop_background(
         self,

@@ -5,6 +5,33 @@ semantic versioning for tagged releases.
 
 ## [Unreleased]
 
+### Capability and supply-chain hardening
+
+- Treat bounded `research_question` excerpts as untrusted web evidence, block
+  every subsequent mutation lane except constrained research/report notes, and
+  prevent private local evidence from entering later outbound research calls.
+- Require a single unambiguous schedule mutation in the current interactive
+  operator message; quoted, remembered, background, companion, negated, advice,
+  and multi-operation text cannot grant schedule authority.
+- Bind dependency-install approval to exact manifest digests, refuse executable
+  local Python build backends, require binary Python distributions, disable Node
+  lifecycle scripts, and redact command output before it reaches logs or models.
+- Resolve Windows system utilities from the OS-reported Windows directory rather
+  than ambient search paths, reject link substitution, and prevent self-diagnosis
+  from executing a workspace-controlled Git binary.
+- Reject credential-forwarding redirects in the OpenAI Images, Telegram, and
+  loopback Companion HTTP clients; strengthen Drive download TOCTOU checks and
+  connector/provider error redaction.
+- Bind artifact launch to an ordinary, non-linked file with a bounded size and
+  rechecked SHA-256 identity, and prevent readonly Companion control from
+  expanding observation authority.
+- Add recursive tool-schema validation, direct wiring tests for every read-only
+  GitHub/Drive/Vercel adapter, specialist compatibility checks for scheduled
+  work, and exhaustive schema-to-runtime-signature contract tests.
+- Add a Windows CI quality gate covering the full document extra, branch
+  coverage, package build, JavaScript syntax, dependency audit, and public-
+  release privacy scan.
+
 ### Installed-application recovery
 
 - Added a profile-driven Windows application diagnosis contract that classifies

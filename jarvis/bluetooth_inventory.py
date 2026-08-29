@@ -15,6 +15,8 @@ from pathlib import Path
 from typing import Any, Callable, Iterator
 from uuid import uuid4
 
+from .trusted_executables import windows_system_executable
+
 
 BLUETOOTH_INVENTORY_SCHEMA_VERSION = 3
 MAX_BLUETOOTH_DEVICES = 256
@@ -209,11 +211,11 @@ def _windows_paired_bluetooth(*, timeout: float = 8.0) -> dict[str, Any]:
         raise BluetoothInventoryError(
             "Paired Bluetooth inventory currently requires Windows"
         )
-    system_root = Path(os.environ.get("SystemRoot", r"C:\Windows"))
-    executable = (
-        system_root / "System32" / "WindowsPowerShell" / "v1.0" / "powershell.exe"
-    )
-    if not executable.is_file():
+    try:
+        executable = windows_system_executable(
+            "System32", "WindowsPowerShell", "v1.0", "powershell.exe"
+        )
+    except (OSError, PermissionError, ValueError):
         raise BluetoothInventoryError("Windows PowerShell is unavailable")
     flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
     try:
@@ -827,7 +829,10 @@ class BluetoothInventory:
                 """,
                 (_iso(now),),
             ).fetchone()
-        assert row is not None
+        if row is None:
+            raise BluetoothInventoryError(
+                "Bluetooth check lease could not be persisted"
+            )
         return owner, int(row["id"])
 
     def _release_check(self, owner: str) -> None:

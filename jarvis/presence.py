@@ -385,7 +385,7 @@ def _safe_approval(row: dict[str, Any]) -> dict[str, Any]:
         "action": safe_presence_text(row.get("action") or "", 100),
         # Approval resources are already structured, sanitized, and bounded before
         # persistence. Treating that JSON as an assignment string can corrupt it.
-        "resource": str(row.get("resource") or "")[:2_000],
+        "resource": str(row.get("resource") or "")[:32_000],
         "reason": safe_presence_text(row.get("reason") or "", 2_000),
         "status": safe_presence_text(row.get("status") or "", 40),
         "expires_at": safe_presence_text(row.get("expires_at") or "", 100),
@@ -402,7 +402,7 @@ def _safe_persistent_approval(row: dict[str, Any]) -> dict[str, Any]:
         "created_at": safe_presence_text(row.get("created_at") or "", 100),
         "updated_at": safe_presence_text(row.get("updated_at") or "", 100),
         "action": safe_presence_text(row.get("action") or "", 100),
-        "resource": str(row.get("resource") or "")[:2_000],
+        "resource": str(row.get("resource") or "")[:32_000],
         "reason": safe_presence_text(row.get("reason") or "", 2_000),
         "source_approval_id": row.get("source_approval_id"),
         "revoked_at": safe_presence_text(row.get("revoked_at") or "", 100),
@@ -3806,7 +3806,7 @@ class PresenceRequestHandler(BaseHTTPRequestHandler):
         parsed = urlsplit(self.path)
         path = parsed.path
         try:
-            remote_host = self._require_remote_enabled()
+            self._require_remote_enabled()
         except (PermissionError, ValueError) as exc:
             self._error(HTTPStatus.FORBIDDEN, str(exc))
             return

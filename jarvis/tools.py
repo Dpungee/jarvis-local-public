@@ -11,6 +11,8 @@ import shutil
 import ssl
 import ipaddress
 import json
+import logging
+import math
 import os
 import re
 import socket
@@ -33,7 +35,7 @@ from html.parser import HTMLParser
 from pathlib import Path, PurePosixPath
 from typing import Any, Callable, Iterator
 
-from .approvals import SENSITIVE_ACTIONS, approval_resource
+from .approvals import SENSITIVE_ACTIONS, approval_display_resource, approval_resource
 from .attachments import MAX_IMAGE_BYTES, ImageAttachment, inspect_image_attachment
 from .bluetooth_inventory import BluetoothInventory, BluetoothInventoryError
 from .feature_onboarding import FEATURE_SPECS, FeatureOnboardingStore
@@ -59,7 +61,7 @@ from .offline_documents import (
     build_offline_document,
 )
 from .policy import resolve_workspace_path, validate_process
-from .redaction import contains_secret
+from .redaction import contains_secret, redact_secrets
 from .skill_library import (
     create_learned_skill,
     list_available_skills,
@@ -68,6 +70,11 @@ from .skill_library import (
 )
 from .source_quality import is_authoritative_source
 from .specialists import specialist_for_prompt
+from .trusted_executables import (
+    trusted_install_file,
+    trusted_path_executable,
+    windows_system_executable,
+)
 from .vercel_provider import VercelProvider
 from .windows_apps import WindowsAppController
 from .windows_app_repair import WindowsAppRepairController
@@ -95,6 +102,7 @@ MAX_STORAGE_SCAN_SECONDS = 12.0
 MAX_TOOL_DEFINITION_BYTES = 512_000
 MAX_GENERATED_TOOL_FILES = 16
 MAX_GENERATED_TOOL_FILE_BYTES = 128_000
+MAX_LAUNCH_ARTIFACT_BYTES = 512 * 1024 * 1024
 _GENERATED_TOOL_SUFFIXES = frozenset({
     ".css", ".html", ".js", ".json", ".md", ".mjs", ".py", ".pyw",
     ".toml", ".ts", ".tsx", ".txt", ".yaml", ".yml",
@@ -103,6 +111,7 @@ _GITHUB_REPOSITORY = re.compile(
     r"[A-Za-z0-9](?:[A-Za-z0-9_.-]{0,99})/[A-Za-z0-9](?:[A-Za-z0-9_.-]{0,99})\Z"
 )
 _GITHUB_REF = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9._/-]{0,99})\Z")
+_LOGGER = logging.getLogger(__name__)
 
 
 def _safe_xml_root(raw: str) -> ET.Element:
@@ -248,7 +257,8 @@ EXTERNAL_MUTATION_TOOLS = frozenset({
     "connector_call",
 })
 EXTERNAL_TOOLS = frozenset({
-    *GITHUB_TOOLS, *GOOGLE_DRIVE_TOOLS, *VERCEL_TOOLS, "connector_call",
+    *GITHUB_TOOLS, *GOOGLE_DRIVE_TOOLS, *VERCEL_TOOLS,
+    "connector_call", "install_project_dependencies",
 })
 DELEGATION_TOOLS = frozenset({"delegate_specialist", "specialist_reports"})
 SCREEN_COMPANION_TOOLS = frozenset({
@@ -1047,6 +1057,22 @@ def _minimal_environment(data_dir: Path) -> dict[str, str]:
             or not stat.S_ISDIR(details.st_mode)
         ):
             raise PermissionError("Process runtime paths must be ordinary directories")
+    empty_npmrc = runtime / "empty-npmrc"
+    try:
+        with empty_npmrc.open("xb"):
+            pass
+    except FileExistsError:
+        pass
+    npmrc_details = os.lstat(empty_npmrc)
+    npmrc_attributes = getattr(npmrc_details, "st_file_attributes", 0)
+    if (
+        not stat.S_ISREG(npmrc_details.st_mode)
+        or stat.S_ISLNK(npmrc_details.st_mode)
+        or npmrc_attributes & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+        or npmrc_details.st_nlink > 1
+        or npmrc_details.st_size != 0
+    ):
+        raise PermissionError("The isolated npm configuration must be one empty ordinary file")
     allowed = (
         "PATH",
         "PATHEXT",
@@ -1066,10 +1092,10 @@ def _minimal_environment(data_dir: Path) -> dict[str, str]:
         "GIT_CONFIG_VALUE_0": str(hooks),
         "GIT_CONFIG_KEY_1": "core.fsmonitor",
         "GIT_CONFIG_VALUE_1": "false",
-        "GIT_CONFIG_KEY_2": "credential.helper",
-        "GIT_CONFIG_VALUE_2": "",
-        "GIT_CONFIG_KEY_3": "protocol.allow",
-        "GIT_CONFIG_VALUE_3": "never",
+        "GIT_CONFIG_KEY_2": "protocol.allow",
+        "GIT_CONFIG_VALUE_2": "never",
+        "GIT_CONFIG_KEY_3": "credential.helper",
+        "GIT_CONFIG_VALUE_3": "",
         "GIT_OPTIONAL_LOCKS": "0",
         "GIT_PAGER": "cat",
         "GIT_CONFIG_NOSYSTEM": "1",
@@ -1078,9 +1104,18 @@ def _minimal_environment(data_dir: Path) -> dict[str, str]:
         "HOME": str(home),
         "LOCALAPPDATA": str(home / "AppData" / "Local"),
         "NPM_CONFIG_CACHE": str(cache / "npm"),
-        "NPM_CONFIG_USERCONFIG": str(runtime / "empty-npmrc"),
+        "NPM_CONFIG_GLOBAL": "false",
+        "NPM_CONFIG_GLOBALCONFIG": str(empty_npmrc),
+        "NPM_CONFIG_HTTPS_PROXY": "",
+        "NPM_CONFIG_IGNORE_SCRIPTS": "true",
+        "NPM_CONFIG_PROXY": "",
+        "NPM_CONFIG_REGISTRY": "https://registry.npmjs.org/",
+        "NPM_CONFIG_STRICT_SSL": "true",
+        "NPM_CONFIG_USERCONFIG": str(empty_npmrc),
         "PIP_CACHE_DIR": str(cache / "pip"),
+        "PIP_CONFIG_FILE": os.devnull,
         "PIP_DISABLE_PIP_VERSION_CHECK": "1",
+        "PIP_NO_INPUT": "1",
         "PYTHONIOENCODING": "utf-8",
         "PYTHONUTF8": "1",
         "TEMP": str(temp_dir),
@@ -1115,16 +1150,42 @@ def _program_command(program: str, arguments: list[str], workspace: Path) -> lis
     if not executable:
         raise FileNotFoundError(f"Allowlisted program is not installed: {program}")
     if name in {"npm", "npm.cmd"}:
-        node = shutil.which("node")
-        npm_cli = Path(executable).parent / "node_modules" / "npm" / "bin" / "npm-cli.js"
-        if not node or not npm_cli.is_file():
-            raise FileNotFoundError("Could not locate npm's trusted Node.js entry point")
-        return [trusted_executable(node), str(npm_cli.resolve()), *arguments]
+        prohibited = (workspace,)
+        node = trusted_path_executable("node", prohibited_roots=prohibited)
+        npm_launcher = trusted_path_executable(program, prohibited_roots=prohibited)
+        if node is None or npm_launcher is None:
+            raise PermissionError(
+                "Node.js and npm must resolve from an OS-administered installation"
+            )
+        npm_cli = trusted_install_file(
+            npm_launcher.parent / "node_modules" / "npm" / "bin" / "npm-cli.js",
+            prohibited_roots=prohibited,
+        )
+        if npm_cli is None:
+            raise PermissionError(
+                "npm's JavaScript entry point is not an ordinary trusted-install file"
+            )
+        return [str(node), str(npm_cli), *arguments]
+    # Every other host executable must be anchored below an OS-administered
+    # installation root. Merely being outside the workspace is insufficient:
+    # Temp, AppData, and another project directory are normally user-writable
+    # and can poison inherited PATH resolution.
+    trusted_host_executable = trusted_path_executable(
+        program,
+        prohibited_roots=(workspace,),
+    )
+    if trusted_host_executable is None:
+        # Preserve the more specific diagnostic for a workspace-local binary.
+        trusted_executable(executable)
+        raise PermissionError(
+            "Allowlisted host programs must resolve from an OS-administered installation"
+        )
+    executable = str(trusted_host_executable)
     if name == "git" and arguments and arguments[0].casefold() in {"diff", "log", "show"}:
         arguments = [arguments[0], "--no-ext-diff", "--no-textconv", *arguments[1:]]
     if executable.casefold().endswith((".cmd", ".bat")):
         raise PermissionError("Batch wrappers are not executed; use a direct executable")
-    return [trusted_executable(executable), *arguments]
+    return [executable, *arguments]
 
 
 class _OutputCollector:
@@ -1230,7 +1291,6 @@ class _FileOutputCollector:
         with self._lock:
             if not self._closed:
                 self._handle.flush()
-            written = self.written
             total = self.total
             tail = bytes(self.tail)
         head = self.path.read_bytes()
@@ -1330,8 +1390,9 @@ def _terminate_process_tree(process: subprocess.Popen[bytes], job: _WindowsJob) 
         return
     if os.name == "nt":
         try:
+            taskkill = windows_system_executable("System32", "taskkill.exe")
             subprocess.run(
-                ["taskkill.exe", "/PID", str(process.pid), "/T", "/F"],
+                [str(taskkill), "/PID", str(process.pid), "/T", "/F"],
                 stdin=subprocess.DEVNULL,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
@@ -1425,6 +1486,162 @@ _MANAGED_PROCESS_REGISTRY_GUARD = threading.Lock()
 _MANAGED_PROCESS_REGISTRIES: dict[
     str, tuple[dict[str, _ManagedProcess], threading.RLock]
 ] = {}
+_DEPENDENCY_INSTALL_LOCK_GUARD = threading.Lock()
+
+
+class _DependencyInstallLock:
+    """One same-process and kernel-backed cross-process dependency lock."""
+
+    def __init__(self, config: Config, key: str) -> None:
+        self._thread_lock = threading.Lock()
+        self._key = hashlib.sha256(key.encode("utf-8")).hexdigest()
+        self._kernel_handle: Any = None
+        self._file_descriptor: int | None = None
+        self._lock_path: Path | None = None
+        if os.name != "nt":
+            runtime = Path(config.data_dir).resolve() / "runtime"
+            lock_root = runtime / "dependency-locks"
+            lock_root.mkdir(parents=True, exist_ok=True)
+            resolved_root = lock_root.resolve(strict=True)
+            details = os.lstat(lock_root)
+            attributes = getattr(details, "st_file_attributes", 0)
+            if (
+                resolved_root != lock_root
+                or not stat.S_ISDIR(details.st_mode)
+                or stat.S_ISLNK(details.st_mode)
+                or attributes & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+            ):
+                raise PermissionError(
+                    "Dependency lock storage must be an ordinary private directory"
+                )
+            self._lock_path = lock_root / f"{self._key}.lock"
+
+    def acquire(self, blocking: bool = True, timeout: float = -1) -> bool:
+        started = time.monotonic()
+        if not blocking:
+            thread_acquired = self._thread_lock.acquire(blocking=False)
+        elif timeout is None or timeout < 0:
+            thread_acquired = self._thread_lock.acquire()
+        else:
+            thread_acquired = self._thread_lock.acquire(timeout=float(timeout))
+        if not thread_acquired:
+            return False
+        try:
+            remaining = timeout
+            if blocking and timeout is not None and timeout >= 0:
+                remaining = max(0.0, float(timeout) - (time.monotonic() - started))
+            acquired = (
+                self._acquire_windows(blocking, remaining)
+                if os.name == "nt"
+                else self._acquire_posix(blocking, remaining)
+            )
+            if not acquired:
+                self._thread_lock.release()
+            return acquired
+        except Exception:
+            self._thread_lock.release()
+            raise
+
+    def _acquire_windows(self, blocking: bool, timeout: float) -> bool:
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.CreateMutexW.argtypes = [ctypes.c_void_p, wintypes.BOOL, wintypes.LPCWSTR]
+        kernel32.CreateMutexW.restype = wintypes.HANDLE
+        kernel32.WaitForSingleObject.argtypes = [wintypes.HANDLE, wintypes.DWORD]
+        kernel32.WaitForSingleObject.restype = wintypes.DWORD
+        kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+        kernel32.CloseHandle.restype = wintypes.BOOL
+        handle = kernel32.CreateMutexW(
+            None, False, f"Global\\JarvisDependencyInstall-{self._key}"
+        )
+        if not handle:
+            raise OSError(ctypes.get_last_error(), "Could not create dependency mutex")
+        milliseconds = (
+            0
+            if not blocking
+            else 0xFFFFFFFF
+            if timeout is None or timeout < 0
+            else min(0xFFFFFFFE, max(0, int(float(timeout) * 1000)))
+        )
+        status = int(kernel32.WaitForSingleObject(handle, milliseconds))
+        if status in (0x00000000, 0x00000080):
+            self._kernel_handle = (kernel32, handle)
+            return True
+        kernel32.CloseHandle(handle)
+        if status == 0x00000102:
+            return False
+        raise OSError(ctypes.get_last_error(), "Could not acquire dependency mutex")
+
+    def _acquire_posix(self, blocking: bool, timeout: float) -> bool:
+        import fcntl
+
+        if self._lock_path is None:
+            raise RuntimeError("Dependency lock path is unavailable")
+        flags = os.O_RDWR | os.O_CREAT
+        flags |= getattr(os, "O_NOFOLLOW", 0)
+        descriptor = os.open(self._lock_path, flags, 0o600)
+        try:
+            opened = os.fstat(descriptor)
+            path_details = os.lstat(self._lock_path)
+            if (
+                not stat.S_ISREG(opened.st_mode)
+                or opened.st_nlink != 1
+                or (opened.st_dev, opened.st_ino) != (
+                    path_details.st_dev,
+                    path_details.st_ino,
+                )
+                or stat.S_ISLNK(path_details.st_mode)
+            ):
+                raise PermissionError("Dependency lock file is not one ordinary file")
+            deadline = (
+                None
+                if blocking and (timeout is None or timeout < 0)
+                else time.monotonic() + (max(0.0, timeout) if blocking else 0.0)
+            )
+            while True:
+                try:
+                    fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    self._file_descriptor = descriptor
+                    return True
+                except BlockingIOError:
+                    if deadline is not None and time.monotonic() >= deadline:
+                        return False
+                    time.sleep(0.01)
+        finally:
+            if self._file_descriptor != descriptor:
+                os.close(descriptor)
+
+    def release(self) -> None:
+        try:
+            if os.name == "nt":
+                if self._kernel_handle is None:
+                    raise RuntimeError("Dependency mutex is not acquired")
+                kernel32, handle = self._kernel_handle
+                self._kernel_handle = None
+                kernel32.ReleaseMutex.argtypes = [wintypes.HANDLE]
+                kernel32.ReleaseMutex.restype = wintypes.BOOL
+                try:
+                    if not kernel32.ReleaseMutex(handle):
+                        raise OSError(
+                            ctypes.get_last_error(), "Could not release dependency mutex"
+                        )
+                finally:
+                    kernel32.CloseHandle(handle)
+            else:
+                if self._file_descriptor is None:
+                    raise RuntimeError("Dependency file lock is not acquired")
+                import fcntl
+
+                descriptor = self._file_descriptor
+                self._file_descriptor = None
+                try:
+                    fcntl.flock(descriptor, fcntl.LOCK_UN)
+                finally:
+                    os.close(descriptor)
+        finally:
+            self._thread_lock.release()
+
+
+_DEPENDENCY_INSTALL_LOCKS: dict[str, _DependencyInstallLock] = {}
 
 
 def _shared_managed_process_registry(
@@ -1439,6 +1656,20 @@ def _shared_managed_process_registry(
     key = os.path.normcase(str(Path(config.data_dir).resolve()))
     with _MANAGED_PROCESS_REGISTRY_GUARD:
         return _MANAGED_PROCESS_REGISTRIES.setdefault(key, ({}, threading.RLock()))
+
+
+def _shared_dependency_install_lock(config: Config) -> _DependencyInstallLock:
+    """Serialize dependency mutation across short-lived ToolBox instances."""
+    key = "\0".join((
+        os.path.normcase(str(Path(config.data_dir).resolve())),
+        os.path.normcase(str(Path(config.workspace).resolve())),
+    ))
+    with _DEPENDENCY_INSTALL_LOCK_GUARD:
+        lock = _DEPENDENCY_INSTALL_LOCKS.get(key)
+        if lock is None:
+            lock = _DependencyInstallLock(config, key)
+            _DEPENDENCY_INSTALL_LOCKS[key] = lock
+        return lock
 
 
 class ToolBox:
@@ -1523,7 +1754,7 @@ class ToolBox:
         )
         self._processes, self._process_lock = _shared_managed_process_registry(config)
         self._execution_backend = build_execution_backend(config)
-        self._dependency_install_lock = threading.Lock()
+        self._dependency_install_lock = _shared_dependency_install_lock(config)
         self._approval_execution_context: ContextVar[
             tuple[str, int | None] | None
         ] = ContextVar(
@@ -1605,6 +1836,7 @@ class ToolBox:
             "computer_write_file": {"expected_sha256": None},
             "computer_search_files": {"path": "."},
             "computer_storage_report": {"path": ".", "limit": 50},
+            "install_project_dependencies": {"cwd": ".", "timeout": None},
             "photoshop_remove_background": {"overwrite": False},
             "windows_app_repair": {"symptom": "blank_or_unrendered"},
             "github_create_repository": {
@@ -1647,6 +1879,11 @@ class ToolBox:
             # records the caller asks to receive. Approve the bounded maximum
             # once so a model cannot create an approval loop by varying 30/50.
             effective["limit"] = 100
+
+        if name == "install_project_dependencies" and isinstance(
+            effective.get("cwd"), str
+        ):
+            effective.update(self._dependency_install_snapshot(effective["cwd"]))
 
         if name == "windows_launch_app" and isinstance(
             effective.get("application"), str
@@ -1778,6 +2015,15 @@ class ToolBox:
                     drive_name=effective["drive_name"],
                     mime_type=effective["mime_type"],
                 ))
+            else:
+                if self.google_drive is None:
+                    raise PermissionError(
+                        "Google Drive is disabled for this workspace/data layout"
+                    )
+                effective.update(self.google_drive.download_approval_snapshot(
+                    str(effective.get("file_id") or ""),
+                    export_mime_type=effective.get("export_mime_type"),
+                ))
 
         if name == "google_drive_create_folder" and isinstance(
             effective.get("name"), str
@@ -1868,12 +2114,16 @@ class ToolBox:
                 approval_scope, task_id = execution_context
                 approval_arguments = self._effective_approval_arguments(name, arguments)
                 exact_resource = approval_resource(name, approval_arguments)
+                display_resource = approval_display_resource(
+                    name, approval_arguments, exact_resource
+                )
                 authorized, approval_id = self.memory.authorize_or_request(
                     approval_action,
                     exact_resource,
                     approval_reason,
                     approval_scope=approval_scope,
                     task_id=task_id,
+                    display_resource=display_resource,
                 )
                 if not authorized:
                     return json.dumps({
@@ -1898,7 +2148,10 @@ class ToolBox:
             succeeded = True
             return _serialize_tool_response(True, "result", result)
         except Exception as exc:
-            return _serialize_tool_response(False, "error", f"{type(exc).__name__}: {exc}")
+            safe_error = redact_secrets(
+                f"{type(exc).__name__}: {exc}", "[REDACTED]"
+            )
+            return _serialize_tool_response(False, "error", safe_error)
         finally:
             if approved_arguments_token is not None:
                 self._approved_sensitive_arguments.reset(approved_arguments_token)
@@ -1921,7 +2174,9 @@ class ToolBox:
                         },
                     )
                 except Exception:
-                    pass
+                    # Do not convert a completed side effect into a retryable
+                    # failure, but never make loss of its audit row invisible.
+                    _LOGGER.error("Tool activity audit write failed for %s", name)
 
     def _approved_arguments_for(self, name: str) -> dict[str, Any]:
         approved = self._approved_sensitive_arguments.get()
@@ -1933,37 +2188,127 @@ class ToolBox:
     def _validate_arguments(tool: Tool, arguments: dict[str, Any]) -> None:
         if not isinstance(arguments, dict):
             raise TypeError("Tool arguments must be a JSON object")
-        schema = tool.parameters
-        properties = schema.get("properties", {})
-        missing = [name for name in schema.get("required", []) if name not in arguments]
-        if missing:
-            raise ValueError(f"Missing required argument(s): {', '.join(missing)}")
-        unknown = set(arguments) - set(properties)
-        if unknown:
-            raise ValueError(f"Unknown argument(s): {', '.join(sorted(unknown))}")
-        python_types = {
-            "array": list,
-            "boolean": bool,
-            "integer": int,
-            "object": dict,
-            "string": str,
-        }
-        for key, value in arguments.items():
-            expected = properties[key].get("type")
-            expected_type = python_types.get(expected)
-            if expected_type and (not isinstance(value, expected_type) or expected == "integer" and isinstance(value, bool)):
-                raise TypeError(f"{key} must be {expected}")
-            if expected == "integer":
-                minimum = properties[key].get("minimum")
-                maximum = properties[key].get("maximum")
-                if minimum is not None and value < minimum or maximum is not None and value > maximum:
-                    raise ValueError(f"{key} is outside the allowed range")
+
+        def label(path: str) -> str:
+            return path or "arguments"
+
+        def validate(
+            value: Any,
+            schema: dict[str, Any],
+            path: str = "",
+            *,
+            strict_object: bool = False,
+        ) -> None:
+            expected = schema.get("type")
+            valid_type = True
             if expected == "array":
-                maximum = properties[key].get("maxItems")
+                valid_type = isinstance(value, list)
+            elif expected == "boolean":
+                valid_type = isinstance(value, bool)
+            elif expected == "integer":
+                valid_type = isinstance(value, int) and not isinstance(value, bool)
+            elif expected == "number":
+                valid_type = isinstance(value, (int, float)) and not isinstance(value, bool)
+            elif expected == "object":
+                valid_type = isinstance(value, dict)
+            elif expected == "string":
+                valid_type = isinstance(value, str)
+            if not valid_type:
+                raise TypeError(f"{label(path)} must be {expected}")
+
+            if "enum" in schema and value not in schema["enum"]:
+                raise ValueError(f"{label(path)} is not an allowed value")
+
+            if expected in {"integer", "number"}:
+                if expected == "number" and not math.isfinite(float(value)):
+                    raise ValueError(f"{label(path)} must be finite")
+                minimum = schema.get("minimum")
+                maximum = schema.get("maximum")
+                if (
+                    minimum is not None and value < minimum
+                    or maximum is not None and value > maximum
+                ):
+                    raise ValueError(f"{label(path)} is outside the allowed range")
+
+            if expected == "string":
+                minimum = schema.get("minLength")
+                maximum = schema.get("maxLength")
+                if minimum is not None and len(value) < minimum:
+                    raise ValueError(f"{label(path)} is too short")
                 if maximum is not None and len(value) > maximum:
-                    raise ValueError(f"{key} has too many items")
-                if properties[key].get("items", {}).get("type") == "string" and not all(isinstance(item, str) for item in value):
-                    raise TypeError(f"Every {key} item must be a string")
+                    raise ValueError(f"{label(path)} is too long")
+                pattern = schema.get("pattern")
+                if pattern is not None and re.search(str(pattern), value) is None:
+                    raise ValueError(f"{label(path)} does not match the required pattern")
+
+            if expected == "array":
+                minimum = schema.get("minItems")
+                maximum = schema.get("maxItems")
+                if minimum is not None and len(value) < minimum:
+                    raise ValueError(f"{label(path)} has too few items")
+                if maximum is not None and len(value) > maximum:
+                    raise ValueError(f"{label(path)} has too many items")
+                item_schema = schema.get("items")
+                if isinstance(item_schema, dict):
+                    for index, item in enumerate(value):
+                        validate(item, item_schema, f"{path}[{index}]")
+
+            if expected == "object" or isinstance(value, dict) and (
+                "properties" in schema or "required" in schema
+            ):
+                required = schema.get("required", [])
+                missing = [name for name in required if name not in value]
+                if missing:
+                    if path:
+                        raise ValueError(
+                            f"{path} is missing required argument(s): {', '.join(missing)}"
+                        )
+                    raise ValueError(
+                        f"Missing required argument(s): {', '.join(missing)}"
+                    )
+                properties = schema.get("properties", {})
+                unknown = set(value) - set(properties)
+                additional = schema.get("additionalProperties", True)
+                if unknown and (strict_object or additional is False):
+                    if path:
+                        raise ValueError(
+                            f"Unknown argument(s) in {path}: {', '.join(sorted(unknown))}"
+                        )
+                    raise ValueError(
+                        f"Unknown argument(s): {', '.join(sorted(unknown))}"
+                    )
+                if unknown and isinstance(additional, dict):
+                    for name in sorted(unknown):
+                        child = f"{path}.{name}" if path else name
+                        validate(value[name], additional, child)
+                for name, property_schema in properties.items():
+                    if name not in value or not isinstance(property_schema, dict):
+                        continue
+                    child = f"{path}.{name}" if path else name
+                    validate(value[name], property_schema, child)
+
+            alternatives = schema.get("anyOf")
+            if alternatives is not None:
+                matched = False
+                if isinstance(alternatives, list):
+                    for alternative in alternatives:
+                        if not isinstance(alternative, dict):
+                            continue
+                        try:
+                            validate(value, alternative, path)
+                        except (TypeError, ValueError):
+                            continue
+                        matched = True
+                        break
+                if not matched:
+                    raise ValueError(
+                        f"{label(path)} must match at least one allowed schema"
+                    )
+
+        # Historically Jarvis rejected every undeclared top-level tool argument,
+        # even when a schema omitted ``additionalProperties: false``. Preserve
+        # that fail-closed contract while honoring nested schema declarations.
+        validate(arguments, tool.parameters, strict_object=True)
 
     def _build_tools(self) -> list[Tool]:
         tools = [
@@ -2147,6 +2492,7 @@ class ToolBox:
                         "maxItems": 5,
                         "items": {
                             "type": "object",
+                            "additionalProperties": False,
                             "properties": {
                                 "file_id": {"type": "string"},
                                 "new_name": {"type": "string"},
@@ -2267,7 +2613,7 @@ class ToolBox:
             Tool("detect_project", "Inspect a workspace directory for project manifests, entry points, package scripts, and likely structured build/test/start commands.", {
                 "type": "object", "properties": {"path": {"type": "string"}}
             }, self.detect_project),
-            Tool("install_project_dependencies", "Detect Python and Node manifests in a workspace directory and install their declared dependencies with fixed manager commands. Package names and URLs cannot be supplied directly.", {
+            Tool("install_project_dependencies", "Detect safe Python requirements and Node manifests in a workspace directory and install their exact SHA-bound dependency declarations with fixed manager commands. This trusted-host network action requires one-shot approval; Node lifecycle scripts are disabled, Python installs require binary distributions, and executable local pyproject builds are refused. Package names and URLs cannot be supplied directly.", {
                 "type": "object",
                 "properties": {
                     "cwd": {"type": "string"},
@@ -2618,7 +2964,7 @@ class ToolBox:
                 },
                 "required": ["application", "plan_id"]
             }, self.windows_app_repair_apply),
-            Tool("windows_open_url", "Open one exact public HTTP(S) URL in the user's default browser. Private networks, credential-bearing URLs, unsafe redirects, and non-web schemes are blocked. Requires one-shot approval.", {
+            Tool("windows_open_url", "Open one exact public HTTP(S) URL in the user's default browser. The initial URL is checked; private-network and credential-bearing initial URLs plus non-web schemes are blocked. The external browser, not Jarvis, controls any later redirect. Requires one-shot approval.", {
                 "type": "object", "properties": {"url": {"type": "string"}}, "required": ["url"]
             }, self.windows_open_url),
             Tool("desktop_active_window", "Inspect the exact active Windows application, title, window bounds, and context digest before a requested keyboard or mouse action. It does not capture pixels and requires private-screen approval.", {
@@ -2635,8 +2981,8 @@ class ToolBox:
             Tool("photoshop_remove_background", "Use installed Adobe Photoshop to remove an image background and export a verified PNG. The source remains unchanged; overwrite creates a backup. Requires one-shot approval for the exact app, source hash, and output path.", {
                 "type": "object", "properties": {"input_path": {"type": "string"}, "output_path": {"type": "string"}, "overwrite": {"type": "boolean"}}, "required": ["input_path", "output_path"]
             }, self.photoshop_remove_background),
-            Tool("launch_artifact", "Open or launch a verified artifact built inside the JARVIS workspace. Executable artifacts are limited to .exe, .py, and .pyw; .html opens in the default browser; .pptx, .docx, .xlsx, .pdf, .txt, .md, and .csv open in their registered desktop application. No shell is used.", {
-                "type": "object", "properties": {"path": {"type": "string"}, "arguments": {"type": "array", "items": {"type": "string"}, "maxItems": 32}}, "required": ["path"]
+            Tool("launch_artifact", "Open or launch one ordinary artifact inside the JARVIS workspace after computing and rechecking its current SHA-256 identity. Callers may bind the launch to an expected SHA-256. Executable artifacts are limited to .exe, .py, and .pyw; .html opens in the default browser; .pptx, .docx, .xlsx, .pdf, .txt, .md, and .csv open in their registered desktop application. Links and hard links are rejected and no shell is used.", {
+                "type": "object", "properties": {"path": {"type": "string"}, "arguments": {"type": "array", "items": {"type": "string"}, "maxItems": 32}, "expected_sha256": {"type": "string", "pattern": "^[0-9a-fA-F]{64}$", "minLength": 64, "maxLength": 64}}, "required": ["path"]
             }, self.launch_artifact),
         ]
         if getattr(self.config, "computer_access", "disabled") != "trusted-desktop":
@@ -2884,8 +3230,22 @@ class ToolBox:
     ) -> dict[str, Any]:
         if self.google_drive is None:
             raise PermissionError("Google Drive is disabled for this workspace/data layout")
+        approved = self._approved_arguments_for("google_drive_download_file")
+        expected = {
+            "drive_account_permission_id": approved.get(
+                "drive_account_permission_id"
+            ),
+            "download_item": approved.get("download_item"),
+            "resolved_export_mime_type": approved.get(
+                "resolved_export_mime_type"
+            ),
+        }
         return self.google_drive.download_file(
-            file_id, local_path, overwrite=overwrite, export_mime_type=export_mime_type
+            file_id,
+            local_path,
+            overwrite=overwrite,
+            export_mime_type=export_mime_type,
+            expected_approval_snapshot=expected,
         )
 
     def google_drive_organize_files(
@@ -3266,6 +3626,8 @@ class ToolBox:
         matches.sort(key=lambda item: (-item[0], item[1]))
 
         def risk_for(name: str) -> str:
+            if name == "screen_companion_control":
+                return "mixed-read-control"
             if name in SENSITIVE_ACTIONS:
                 return "approval-gated"
             if name in EXECUTION_TOOLS:
@@ -4509,8 +4871,7 @@ class ToolBox:
         ):
             # A venv adds Scripts/site-packages paths below its root. Shorten the
             # internal directory name when a custom JARVIS_DATA directory is
-            # deeply nested, rather than failing later with WinError 206. Keep
-            # project source installed by `pip install .` inside JARVIS_DATA.
+            # deeply nested, rather than failing later with WinError 206.
             base = data_dir / "v"
             environment = base / key
             if len(str(self._venv_python(environment))) > 245:
@@ -4581,11 +4942,681 @@ class ToolBox:
             stat.S_ISLNK(details.st_mode)
             or attributes & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
             or not stat.S_ISREG(details.st_mode)
+            or details.st_nlink > 1
         ):
             raise PermissionError(f"Dependency manifest must be an ordinary file: {name}")
         if details.st_size > 64 * 1024 * 1024:
             raise ValueError(f"Dependency manifest is unreasonably large: {name}")
+        try:
+            raw_manifest = candidate.read_bytes()
+            manifest_text = raw_manifest.decode("utf-8")
+        except (OSError, UnicodeDecodeError):
+            raise ValueError(
+                f"Dependency manifest must be readable UTF-8 text: {name}"
+            ) from None
+        if "\x00" in manifest_text:
+            raise ValueError(f"Dependency manifest contains invalid control data: {name}")
+        if contains_secret(manifest_text) or re.search(
+            r"(?i)https?://[^\s/:@]+:[^\s/@]+@", manifest_text
+        ):
+            raise PermissionError(
+                f"Dependency manifests may not embed credentials: {name}"
+            )
+        if name in {"requirements.lock", "requirements.txt"}:
+            self._validate_requirements_manifest(name, manifest_text)
+        elif name in {"package.json", "package-lock.json", "npm-shrinkwrap.json"}:
+            self._validate_node_dependency_manifest(name, manifest_text)
         return candidate
+
+    @staticmethod
+    def _validate_requirements_manifest(name: str, manifest_text: str) -> None:
+        """Allow only index-hosted declarations whose exact bytes are approved."""
+        allowed_hash = re.compile(r"--hash=sha256:[0-9a-fA-F]{64}\b")
+        for line_number, raw_line in enumerate(manifest_text.splitlines(), start=1):
+            line = raw_line.strip()
+            if not line or line.startswith("#"):
+                continue
+            if "\\" in line:
+                if (
+                    name == "requirements.lock"
+                    and line.endswith("\\")
+                    and "\\" not in line[:-1]
+                ):
+                    line = line[:-1].rstrip()
+                else:
+                    raise PermissionError(
+                        f"Requirements local paths are not supported: {name}:{line_number}"
+                    )
+            without_hashes = allowed_hash.sub("", line) if name == "requirements.lock" else line
+            normalized_declaration = without_hashes.strip()
+            if (
+                normalized_declaration.startswith("-")
+                or re.search(r"(?:^|\s)--?[A-Za-z]", normalized_declaration)
+                or "@" in normalized_declaration
+                or "/" in normalized_declaration
+                or "\\" in normalized_declaration
+                or "://" in normalized_declaration
+                or re.search(r"(?i)\.(?:whl|zip|tar|tar\.gz|tgz|bz2|gz)(?:\s|$)", normalized_declaration)
+                or re.match(r"^(?:\.|~|[A-Za-z]:)", normalized_declaration)
+            ):
+                raise PermissionError(
+                    "Requirements directives, includes, direct URLs, and local paths are "
+                    f"not supported: {name}:{line_number}"
+                )
+            if "--hash=" in without_hashes:
+                raise PermissionError(
+                    f"Only SHA-256 lock hashes are supported: {name}:{line_number}"
+                )
+
+    @staticmethod
+    def _validate_node_dependency_manifest(name: str, manifest_text: str) -> None:
+        """Reject local or VCS dependency sources that escape the approved bytes."""
+        try:
+            payload = json.loads(manifest_text)
+        except json.JSONDecodeError:
+            raise ValueError(f"Dependency manifest must be valid JSON: {name}") from None
+        if not isinstance(payload, dict):
+            raise ValueError(f"Dependency manifest root must be an object: {name}")
+
+        def unsafe_source(value: Any) -> bool:
+            if not isinstance(value, str):
+                return False
+            normalized = value.strip().casefold()
+            if normalized.startswith("npm:"):
+                return re.fullmatch(
+                    r"npm:(?:@[a-z0-9._~-]+/[a-z0-9._~-]+|[a-z0-9._~-]+)"
+                    r"@[a-z0-9*^~<>=| ._-]+",
+                    normalized,
+                ) is None
+            return bool(
+                normalized.startswith((
+                    "file:", "link:", "workspace:", "git:", "git+", "http:",
+                    "https:", "github:", "gitlab:", "bitbucket:", "./", "../",
+                    "/", "\\", "~\\", "~/",
+                ))
+                or re.match(r"^[a-z]:[/\\]", normalized)
+                or "/" in normalized
+                or "\\" in normalized
+            )
+
+        def unsafe_locked_source(value: Any) -> bool:
+            if not isinstance(value, str):
+                return False
+            normalized = value.strip().casefold()
+            return bool(
+                normalized.startswith((
+                    "file:", "link:", "workspace:", "git:", "git+", "ssh:",
+                    "github:", "gitlab:", "bitbucket:", "./", "../", "/", "\\",
+                    "~\\", "~/",
+                ))
+                or (
+                    re.match(r"^[a-z][a-z0-9+.-]*:", normalized)
+                    and not normalized.startswith(("http:", "https:"))
+                )
+                or re.match(r"^[a-z]:[/\\]", normalized)
+            )
+
+        def validate_locked_registry_url(value: Any, integrity: Any) -> None:
+            if not isinstance(value, str):
+                raise PermissionError(
+                    f"Node lockfile contains an invalid remote dependency: {name}"
+                )
+            if any(ord(character) < 32 for character in value):
+                raise PermissionError(
+                    f"Node lockfile contains an invalid remote dependency: {name}"
+                )
+            try:
+                parsed = urllib.parse.urlsplit(value)
+                port = parsed.port
+            except ValueError:
+                raise PermissionError(
+                    f"Node lockfile contains an invalid remote dependency: {name}"
+                ) from None
+            host = (parsed.hostname or "").casefold()
+            decoded_path = urllib.parse.unquote(parsed.path)
+            if (
+                parsed.scheme.casefold() != "https"
+                or host != "registry.npmjs.org"
+                or port not in (None, 443)
+                or parsed.username is not None
+                or parsed.password is not None
+                or parsed.query
+                or parsed.fragment
+                or not decoded_path.startswith("/")
+                or not decoded_path.casefold().endswith(".tgz")
+                or "\\" in decoded_path
+                or ".." in PurePosixPath(decoded_path).parts
+                or any(ord(character) < 32 for character in decoded_path)
+            ):
+                raise PermissionError(
+                    "Node lockfile remote packages must use exact HTTPS "
+                    f"registry.npmjs.org tarball URLs: {name}"
+                )
+            if not isinstance(integrity, str) or re.fullmatch(
+                r"sha(?:256|384|512)-[A-Za-z0-9+/]{40,}={0,2}"
+                r"(?:\s+sha(?:256|384|512)-[A-Za-z0-9+/]{40,}={0,2})*",
+                integrity.strip(),
+            ) is None:
+                raise PermissionError(
+                    f"Node lockfile remote packages require a strong integrity digest: {name}"
+                )
+
+        if name == "package.json":
+            if payload.get("workspaces") not in (None, [], {}):
+                raise PermissionError(
+                    "Node workspaces are not supported for approved dependency installs"
+                )
+            for field in (
+                "dependencies", "devDependencies", "optionalDependencies",
+                "peerDependencies",
+            ):
+                dependencies = payload.get(field, {})
+                if not isinstance(dependencies, dict):
+                    raise ValueError(f"package.json {field} must be an object")
+                for package_name, source in dependencies.items():
+                    if (
+                        not isinstance(package_name, str)
+                        or len(package_name) > 214
+                        or not re.fullmatch(
+                            r"(?:@[A-Za-z0-9._~-]+/[A-Za-z0-9._~-]+|[A-Za-z0-9._~-]+)",
+                            package_name,
+                        )
+                    ):
+                        raise ValueError(
+                            f"package.json {field} contains an invalid package name"
+                        )
+                    if (
+                        not isinstance(source, str)
+                        or not source
+                        or len(source) > 500
+                        or any(ord(character) < 32 for character in source)
+                    ):
+                        raise ValueError(
+                            f"Node dependency {package_name!r} has an invalid version specifier"
+                        )
+                    if unsafe_source(source):
+                        raise PermissionError(
+                            f"Node dependency {package_name!s} uses an unsupported local, "
+                            "VCS, or direct-URL source"
+                        )
+            for field in ("overrides", "resolutions"):
+                stack: list[Any] = [payload.get(field, {})]
+                while stack:
+                    value = stack.pop()
+                    if isinstance(value, dict):
+                        stack.extend(value.values())
+                    elif isinstance(value, list):
+                        stack.extend(value)
+                    elif unsafe_source(value):
+                        raise PermissionError(
+                            f"package.json {field} contains an unsupported dependency source"
+                        )
+        else:
+            stack: list[Any] = [payload]
+            while stack:
+                value = stack.pop()
+                if isinstance(value, dict):
+                    resolved = value.get("resolved")
+                    if resolved is not None:
+                        if not isinstance(resolved, str) or not resolved.strip().casefold().startswith(
+                            ("http:", "https:")
+                        ):
+                            raise PermissionError(
+                                f"Node lockfile resolved entries must be exact registry URLs: {name}"
+                            )
+                        validate_locked_registry_url(resolved, value.get("integrity"))
+                    for key, item in value.items():
+                        normalized_key = str(key).strip().casefold()
+                        if normalized_key == "version" and isinstance(item, str) and (
+                            not item
+                            or len(item) > 500
+                            or any(ord(character) < 32 for character in item)
+                            or "/" in item
+                            or "\\" in item
+                            or re.match(r"^[a-z][a-z0-9+.-]*:", item.strip().casefold())
+                        ):
+                            raise PermissionError(
+                                f"Node lockfile version entries may not name alternate sources: {name}"
+                            )
+                        if normalized_key in {"resolved", "link", "version"} and (
+                            item is True or unsafe_locked_source(item)
+                        ):
+                            raise PermissionError(
+                                f"Node lockfile contains an unsupported local dependency: {name}"
+                            )
+                        key_parts = PurePosixPath(
+                            normalized_key.replace("\\", "/")
+                        ).parts
+                        if (
+                            normalized_key.startswith(("../", "..\\", "/", "\\"))
+                            or ".." in key_parts
+                            or re.match(r"^[a-z]:[/\\]", normalized_key)
+                        ):
+                            raise PermissionError(
+                                f"Node lockfile contains an outside-workspace package path: {name}"
+                            )
+                        stack.append(item)
+                elif isinstance(value, list):
+                    stack.extend(value)
+
+    def _reject_project_dependency_config(self, working_directory: Path) -> None:
+        """Prevent project-controlled npm configuration from changing the command."""
+        workspace = self.config.workspace.resolve(strict=True)
+        current = working_directory.resolve(strict=True)
+        while True:
+            npmrc = current / ".npmrc"
+            if os.path.lexists(npmrc):
+                raise PermissionError(
+                    "Project .npmrc files are not supported for approved dependency installs"
+                )
+            if current == workspace:
+                return
+            if not current.is_relative_to(workspace) or current.parent == current:
+                raise PermissionError("Dependency project escaped the configured workspace")
+            current = current.parent
+
+    @staticmethod
+    def _dependency_executor_fingerprint(path: Path, label: str) -> dict[str, Any]:
+        """Bind one already-trusted dependency executor to stable bytes."""
+        candidate = Path(path).resolve(strict=True)
+        before = os.lstat(candidate)
+        attributes = getattr(before, "st_file_attributes", 0)
+        if (
+            not stat.S_ISREG(before.st_mode)
+            or stat.S_ISLNK(before.st_mode)
+            or attributes & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+            or before.st_size > 512 * 1024 * 1024
+        ):
+            raise PermissionError(f"{label} must be one bounded ordinary file")
+        digest = hashlib.sha256()
+        try:
+            with candidate.open("rb") as stream:
+                opened = os.fstat(stream.fileno())
+                if (
+                    opened.st_dev,
+                    opened.st_ino,
+                    opened.st_size,
+                    opened.st_mtime_ns,
+                ) != (
+                    before.st_dev,
+                    before.st_ino,
+                    before.st_size,
+                    before.st_mtime_ns,
+                ):
+                    raise PermissionError(f"{label} changed before it was opened")
+                for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+                    digest.update(chunk)
+                after = os.fstat(stream.fileno())
+        except PermissionError:
+            raise
+        except OSError:
+            raise PermissionError(f"{label} could not be fingerprinted safely") from None
+        if (
+            after.st_dev,
+            after.st_ino,
+            after.st_size,
+            after.st_mtime_ns,
+        ) != (
+            before.st_dev,
+            before.st_ino,
+            before.st_size,
+            before.st_mtime_ns,
+        ):
+            raise PermissionError(f"{label} changed while it was fingerprinted")
+        return {
+            "path": str(candidate),
+            "bytes": int(before.st_size),
+            "sha256": digest.hexdigest(),
+        }
+
+    def _dependency_declaration_summary(
+        self,
+        working_directory: Path,
+    ) -> tuple[list[str], int]:
+        """Return bounded human-readable direct declarations plus their total count."""
+        declarations: list[str] = []
+        requirement = next((
+            item for item in (
+                self._dependency_manifest(working_directory, "requirements.lock"),
+                self._dependency_manifest(working_directory, "requirements.txt"),
+            ) if item is not None
+        ), None)
+        if requirement is not None:
+            allowed_hash = re.compile(r"--hash=sha256:[0-9a-fA-F]{64}\b")
+            for raw_line in requirement.read_text(encoding="utf-8").splitlines():
+                line = raw_line.strip()
+                if not line or line.startswith("#"):
+                    continue
+                if line.endswith("\\"):
+                    line = line[:-1].rstrip()
+                declaration = allowed_hash.sub("", line).strip()
+                if declaration:
+                    declarations.append(f"python: {declaration}")
+
+        package = self._dependency_manifest(working_directory, "package.json")
+        if package is not None:
+            payload = json.loads(package.read_text(encoding="utf-8"))
+            for field in (
+                "dependencies", "devDependencies", "optionalDependencies",
+                "peerDependencies",
+            ):
+                values = payload.get(field, {})
+                for package_name, specifier in sorted(values.items()):
+                    declarations.append(f"node/{field}: {package_name}@{specifier}")
+        return declarations[:8], len(declarations)
+
+    def _stable_dependency_manifest(
+        self,
+        working_directory: Path,
+        name: str,
+    ) -> tuple[Path, bytes, dict[str, Any]] | None:
+        """Read and validate one manifest through a stable ordinary-file handle."""
+        candidate = self._dependency_manifest(working_directory, name)
+        if candidate is None:
+            return None
+        before = os.lstat(candidate)
+        identity = (
+            before.st_dev,
+            before.st_ino,
+            before.st_size,
+            before.st_mtime_ns,
+            before.st_nlink,
+        )
+        try:
+            with candidate.open("rb") as stream:
+                opened = os.fstat(stream.fileno())
+                if (
+                    opened.st_dev,
+                    opened.st_ino,
+                    opened.st_size,
+                    opened.st_mtime_ns,
+                    opened.st_nlink,
+                ) != identity:
+                    raise PermissionError(
+                        f"Dependency manifest changed before it was opened: {name}"
+                    )
+                raw = stream.read(64 * 1024 * 1024 + 1)
+                after = os.fstat(stream.fileno())
+        except PermissionError:
+            raise
+        except OSError:
+            raise PermissionError(
+                f"Dependency manifest could not be read safely: {name}"
+            ) from None
+        if len(raw) > 64 * 1024 * 1024 or (
+            after.st_dev,
+            after.st_ino,
+            after.st_size,
+            after.st_mtime_ns,
+            after.st_nlink,
+        ) != identity:
+            raise PermissionError(f"Dependency manifest changed while it was read: {name}")
+        try:
+            text = raw.decode("utf-8")
+        except UnicodeDecodeError:
+            raise ValueError(
+                f"Dependency manifest must be readable UTF-8 text: {name}"
+            ) from None
+        if name in {"requirements.lock", "requirements.txt"}:
+            self._validate_requirements_manifest(name, text)
+        else:
+            self._validate_node_dependency_manifest(name, text)
+        return candidate, raw, {
+            "name": name,
+            "bytes": len(raw),
+            "sha256": hashlib.sha256(raw).hexdigest(),
+        }
+
+    def _create_dependency_staging_snapshot(
+        self,
+        working_directory: Path,
+    ) -> tuple[Path, dict[str, dict[str, Any]]]:
+        """Copy only validated manifests into a private immutable-input directory."""
+        runtime = self.config.data_dir.resolve() / "runtime"
+        stage_root = runtime / "dependency-staging"
+        stage_root.mkdir(parents=True, exist_ok=True)
+        workspace = self.config.workspace.resolve(strict=True)
+        resolved_root = stage_root.resolve(strict=True)
+        if resolved_root != stage_root:
+            raise PermissionError("Dependency staging may not traverse links or reparse points")
+        if resolved_root.is_relative_to(workspace):
+            raise PermissionError(
+                "Dependency staging must be outside the model-writable workspace"
+            )
+        details = os.lstat(resolved_root)
+        attributes = getattr(details, "st_file_attributes", 0)
+        if (
+            not stat.S_ISDIR(details.st_mode)
+            or stat.S_ISLNK(details.st_mode)
+            or attributes & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+        ):
+            raise PermissionError("Dependency staging must be an ordinary directory")
+        stage = Path(tempfile.mkdtemp(prefix="install-", dir=resolved_root))
+        try:
+            if os.stat(stage).st_dev != os.stat(working_directory).st_dev:
+                raise PermissionError(
+                    "Dependency staging and workspace must share one filesystem"
+                )
+            expected: dict[str, dict[str, Any]] = {}
+            for name in (
+                "requirements.lock", "requirements.txt",
+                "npm-shrinkwrap.json", "package-lock.json", "package.json",
+            ):
+                record = self._stable_dependency_manifest(working_directory, name)
+                if record is None:
+                    continue
+                _, raw, metadata = record
+                destination = stage / name
+                with destination.open("xb") as output:
+                    output.write(raw)
+                    output.flush()
+                    os.fsync(output.fileno())
+                expected[name] = metadata
+            npmrc = stage / ".npmrc"
+            with npmrc.open("xb"):
+                pass
+            expected[".npmrc"] = {
+                "name": ".npmrc",
+                "bytes": 0,
+                "sha256": hashlib.sha256(b"").hexdigest(),
+            }
+            self._assert_dependency_staging_snapshot(stage, expected)
+            return stage, expected
+        except Exception:
+            shutil.rmtree(stage, ignore_errors=True)
+            raise
+
+    @staticmethod
+    def _assert_dependency_staging_snapshot(
+        stage: Path,
+        expected: dict[str, dict[str, Any]],
+    ) -> None:
+        """Recheck every staged input immediately before a package manager runs."""
+        for name, record in expected.items():
+            candidate = stage / name
+            details = os.lstat(candidate)
+            attributes = getattr(details, "st_file_attributes", 0)
+            if (
+                not stat.S_ISREG(details.st_mode)
+                or stat.S_ISLNK(details.st_mode)
+                or attributes & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+                or details.st_nlink > 1
+                or details.st_size != record["bytes"]
+            ):
+                raise PermissionError("A staged dependency input changed before execution")
+            digest = hashlib.sha256(candidate.read_bytes()).hexdigest()
+            if digest != record["sha256"]:
+                raise PermissionError("A staged dependency input changed before execution")
+
+    def _assert_dependency_staging_matches_approval(
+        self,
+        expected: dict[str, dict[str, Any]],
+    ) -> None:
+        """Bind immutable staged bytes directly to the operator-approved tree."""
+        approved = self._approved_arguments_for("install_project_dependencies")
+        if not approved:
+            return
+        records = [
+            expected[name]
+            for name in (
+                "requirements.lock", "requirements.txt", "npm-shrinkwrap.json",
+                "package-lock.json", "package.json",
+            )
+            if name in expected
+        ]
+        if approved.get("dependency_manifest_count") != len(records):
+            raise PermissionError("Staged dependency inputs do not match approval")
+        for index, record in enumerate(records, start=1):
+            descriptor = (
+                f"{record['name']} | {record['bytes']} bytes | "
+                f"sha256:{record['sha256']}"
+            )
+            if approved.get(f"dependency_manifest_{index:02d}") != descriptor:
+                raise PermissionError("Staged dependency inputs do not match approval")
+        canonical = json.dumps(
+            records, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+        ).encode("utf-8")
+        if approved.get("dependency_tree_sha256") != hashlib.sha256(
+            canonical
+        ).hexdigest():
+            raise PermissionError("Staged dependency inputs do not match approval")
+
+    def _assert_dependency_source_matches_staging(
+        self,
+        working_directory: Path,
+        expected: dict[str, dict[str, Any]],
+    ) -> None:
+        """Reject workspace manifest/config drift without letting managers consume it."""
+        self._reject_project_dependency_config(working_directory)
+        manifest_names = {
+            "requirements.lock", "requirements.txt", "npm-shrinkwrap.json",
+            "package-lock.json", "package.json",
+        }
+        expected_names = set(expected) & manifest_names
+        current_names: set[str] = set()
+        for name in manifest_names:
+            record = self._stable_dependency_manifest(working_directory, name)
+            if record is None:
+                continue
+            current_names.add(name)
+            if name not in expected_names or record[2] != expected[name]:
+                raise PermissionError("A dependency manifest changed after approval")
+        if current_names != expected_names:
+            raise PermissionError("A dependency manifest changed after approval")
+
+    @staticmethod
+    def _publish_staged_node_modules(stage: Path, working_directory: Path) -> None:
+        """Atomically replace workspace node_modules with the verified manager output."""
+        source = stage / "node_modules"
+        target = working_directory / "node_modules"
+        backup = stage / "previous-node_modules"
+        if os.path.lexists(source):
+            source_details = os.lstat(source)
+            source_attributes = getattr(source_details, "st_file_attributes", 0)
+            if (
+                not stat.S_ISDIR(source_details.st_mode)
+                or stat.S_ISLNK(source_details.st_mode)
+                or source_attributes & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+            ):
+                raise PermissionError("npm produced an unsafe node_modules root")
+        if os.path.lexists(target):
+            target_details = os.lstat(target)
+            target_attributes = getattr(target_details, "st_file_attributes", 0)
+            if (
+                not stat.S_ISDIR(target_details.st_mode)
+                or stat.S_ISLNK(target_details.st_mode)
+                or target_attributes & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+            ):
+                raise PermissionError("Existing node_modules is not an ordinary directory")
+            os.replace(target, backup)
+        try:
+            if os.path.lexists(source):
+                os.replace(source, target)
+        except Exception:
+            if os.path.lexists(backup) and not os.path.lexists(target):
+                os.replace(backup, target)
+            raise
+        if os.path.lexists(backup):
+            shutil.rmtree(backup)
+
+    def _dependency_install_snapshot(self, cwd: str) -> dict[str, Any]:
+        working_directory = _safe_target(self.config.workspace, cwd)
+        if not working_directory.is_dir():
+            raise NotADirectoryError(cwd)
+        self._reject_project_dependency_config(working_directory)
+        records: list[dict[str, Any]] = []
+        for name in (
+            "requirements.lock", "requirements.txt",
+            "npm-shrinkwrap.json", "package-lock.json", "package.json",
+        ):
+            manifest = self._stable_dependency_manifest(working_directory, name)
+            if manifest is None:
+                continue
+            records.append(manifest[2])
+        if not records:
+            raise FileNotFoundError(
+                "No safe dependency manifest found "
+                "(requirements.lock, requirements.txt, or package.json)"
+            )
+        canonical = json.dumps(
+            records, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+        ).encode("utf-8")
+        snapshot: dict[str, Any] = {
+            "resolved_cwd": str(working_directory),
+            "dependency_manifest_count": len(records),
+            "dependency_tree_sha256": hashlib.sha256(canonical).hexdigest(),
+            "dependency_network_access": True,
+            "dependency_host_authority": True,
+            "node_lifecycle_scripts": "disabled",
+        }
+        for index, record in enumerate(records, start=1):
+            snapshot[f"dependency_manifest_{index:02d}"] = (
+                f"{record['name']} | {record['bytes']} bytes | sha256:{record['sha256']}"
+            )
+        summaries, declaration_count = self._dependency_declaration_summary(
+            working_directory
+        )
+        snapshot["dependency_declaration_count"] = declaration_count
+        snapshot["dependency_summary_omitted_count"] = max(
+            0, declaration_count - len(summaries)
+        )
+        for index, declaration in enumerate(summaries, start=1):
+            snapshot[f"dependency_{index:02d}"] = declaration
+
+        if any(record["name"] == "package.json" for record in records):
+            npm_command = _program_command("npm", [], self.config.workspace)
+            if len(npm_command) != 2:
+                raise PermissionError("The trusted npm executor shape is invalid")
+            node = self._dependency_executor_fingerprint(
+                Path(npm_command[0]), "Node.js executable"
+            )
+            npm_cli = self._dependency_executor_fingerprint(
+                Path(npm_command[1]), "npm entry point"
+            )
+            for prefix, fingerprint in (("node", node), ("npm_cli", npm_cli)):
+                snapshot[f"dependency_{prefix}_path"] = fingerprint["path"]
+                snapshot[f"dependency_{prefix}_bytes"] = fingerprint["bytes"]
+                snapshot[f"dependency_{prefix}_sha256"] = fingerprint["sha256"]
+        return snapshot
+
+    def _assert_approved_dependency_snapshot(
+        self,
+        working_directory: Path,
+    ) -> None:
+        """Rebind approved manifest/executor bytes immediately before execution."""
+        approved = self._approved_arguments_for("install_project_dependencies")
+        if not approved:
+            return
+        relative = working_directory.resolve(strict=True).relative_to(
+            self.config.workspace.resolve(strict=True)
+        )
+        current = self._dependency_install_snapshot(
+            relative.as_posix() if relative.parts else "."
+        )
+        if any(approved.get(key) != value for key, value in current.items()):
+            raise PermissionError(
+                "A dependency manifest or executor changed after approval"
+            )
 
     def _run_dependency_command(
         self,
@@ -4598,7 +5629,10 @@ class ToolBox:
             "CI": "true",
             "NPM_CONFIG_AUDIT": "false",
             "NPM_CONFIG_FUND": "false",
+            "NPM_CONFIG_GLOBAL": "false",
+            "NPM_CONFIG_IGNORE_SCRIPTS": "true",
             "NPM_CONFIG_UPDATE_NOTIFIER": "false",
+            "PIP_CONFIG_FILE": os.devnull,
             "PIP_DISABLE_PIP_VERSION_CHECK": "1",
             "PIP_NO_INPUT": "1",
         })
@@ -4656,8 +5690,12 @@ class ToolBox:
             "exit_code": process.returncode,
             "timed_out": timed_out,
             "duration_seconds": round(time.perf_counter() - started, 3),
-            "stdout": _trim(stdout.finish(), MAX_DEPENDENCY_STEP_OUTPUT),
-            "stderr": _trim(stderr.finish(), MAX_DEPENDENCY_STEP_OUTPUT),
+            "stdout": redact_secrets(
+                _trim(stdout.finish(), MAX_DEPENDENCY_STEP_OUTPUT)
+            ),
+            "stderr": redact_secrets(
+                _trim(stderr.finish(), MAX_DEPENDENCY_STEP_OUTPUT)
+            ),
         }
         if timed_out:
             result["error"] = "Dependency command exceeded the shared wall-clock limit"
@@ -4669,6 +5707,8 @@ class ToolBox:
         timeout: int | None = None,
     ) -> dict[str, Any]:
         self._require_process_execution()
+        if self.config.external_access != "trusted-external":
+            raise PermissionError("Dependency network access is disabled")
         if not isinstance(self._execution_backend, HostBackend):
             raise PermissionError(
                 "Dependency installation is not available in the ephemeral Docker backend"
@@ -4681,32 +5721,48 @@ class ToolBox:
         working_directory = _safe_target(self.config.workspace, cwd)
         if not working_directory.is_dir():
             raise NotADirectoryError(cwd)
-        if not self._dependency_install_lock.acquire(blocking=False):
+        self._reject_project_dependency_config(working_directory)
+        if not self._dependency_install_lock.acquire(
+            timeout=min(1.0, float(limit))
+        ):
             raise RuntimeError("Another project dependency installation is already running")
+        staging_directory: Path | None = None
         try:
+            self._assert_approved_dependency_snapshot(working_directory)
+            staging_directory, staged_inputs = self._create_dependency_staging_snapshot(
+                working_directory
+            )
+            self._assert_dependency_staging_matches_approval(staged_inputs)
+            self._assert_dependency_source_matches_staging(
+                working_directory, staged_inputs
+            )
             requirement = next((
                 item for item in (
-                    self._dependency_manifest(working_directory, "requirements.lock"),
-                    self._dependency_manifest(working_directory, "requirements.txt"),
-                ) if item is not None
+                    staging_directory / "requirements.lock",
+                    staging_directory / "requirements.txt",
+                ) if item.name in staged_inputs
             ), None)
-            pyproject = self._dependency_manifest(working_directory, "pyproject.toml")
-            package = self._dependency_manifest(working_directory, "package.json")
+            package = (
+                staging_directory / "package.json"
+                if "package.json" in staged_inputs
+                else None
+            )
             npm_lock = next((
                 item for item in (
-                    self._dependency_manifest(working_directory, "npm-shrinkwrap.json"),
-                    self._dependency_manifest(working_directory, "package-lock.json"),
-                ) if item is not None
+                    staging_directory / "npm-shrinkwrap.json",
+                    staging_directory / "package-lock.json",
+                ) if item.name in staged_inputs
             ), None)
             manifests = [
-                item.name for item in (requirement, pyproject, package, npm_lock)
+                item.name for item in (requirement, package, npm_lock)
                 if item is not None
             ]
-            has_python = requirement is not None or pyproject is not None
+            has_python = requirement is not None
             has_node = package is not None
             if not has_python and not has_node:
                 raise FileNotFoundError(
-                    "No supported dependency manifest found (requirements, pyproject.toml, or package.json)"
+                    "No safe dependency manifest found "
+                    "(requirements.lock, requirements.txt, or package.json)"
                 )
 
             deadline = time.monotonic() + limit
@@ -4725,8 +5781,27 @@ class ToolBox:
                         "error": "Dependency setup exhausted its shared wall-clock limit",
                     })
                     return False
+                self._assert_approved_dependency_snapshot(working_directory)
+                self._assert_dependency_source_matches_staging(
+                    working_directory, staged_inputs
+                )
+                self._assert_dependency_staging_snapshot(
+                    staging_directory, staged_inputs
+                )
+                self._assert_dependency_staging_matches_approval(staged_inputs)
                 result = self._run_dependency_command(
-                    command, working_directory, max(1, min(600, int(remaining + 0.999)))
+                    command,
+                    staging_directory,
+                    max(1, min(600, int(remaining + 0.999))),
+                )
+                # Package managers never consume the mutable workspace inputs.
+                # If those inputs drifted while a manager ran, fail before a
+                # ready marker or staged node_modules can be published.
+                self._assert_dependency_source_matches_staging(
+                    working_directory, staged_inputs
+                )
+                self._assert_dependency_staging_snapshot(
+                    staging_directory, staged_inputs
                 )
                 result["phase"] = phase
                 steps.append(result)
@@ -4762,12 +5837,11 @@ class ToolBox:
                 pip_arguments = [
                     "-m", "pip", "install", "--disable-pip-version-check", "--no-input",
                 ]
-                if requirement is not None:
-                    if requirement.name == "requirements.lock":
-                        pip_arguments.append("--require-hashes")
-                    pip_arguments.extend(["-r", requirement.name])
-                else:
-                    pip_arguments.append(".")
+                pip_arguments.append("--only-binary=:all:")
+                if requirement.name == "requirements.lock":
+                    pip_arguments.append("--require-hashes")
+                pip_arguments.extend(["-r", requirement.name])
+                self._assert_approved_dependency_snapshot(working_directory)
                 if not run_step("python-dependencies", [str(interpreter.resolve()), *pip_arguments]):
                     return self._dependency_install_result(
                         working_directory, manifests, steps, environment_path, requirement, npm_lock
@@ -4776,9 +5850,37 @@ class ToolBox:
                     marker.write("ready\n")
 
             if has_node:
-                npm_arguments = ["ci" if npm_lock is not None else "install", "--no-audit", "--no-fund"]
+                npm_arguments = [
+                    "ci" if npm_lock is not None else "install",
+                    "--ignore-scripts", "--no-audit", "--no-fund",
+                ]
                 try:
+                    self._assert_approved_dependency_snapshot(working_directory)
                     npm_command = _program_command("npm", npm_arguments, self.config.workspace)
+                    approved = self._approved_arguments_for(
+                        "install_project_dependencies"
+                    )
+                    if approved:
+                        if len(npm_command) < 2:
+                            raise PermissionError(
+                                "The approved npm executor shape changed"
+                            )
+                        for prefix, current_path, label in (
+                            ("node", npm_command[0], "Node.js executable"),
+                            ("npm_cli", npm_command[1], "npm entry point"),
+                        ):
+                            current = self._dependency_executor_fingerprint(
+                                Path(current_path), label
+                            )
+                            expected = {
+                                "path": approved.get(f"dependency_{prefix}_path"),
+                                "bytes": approved.get(f"dependency_{prefix}_bytes"),
+                                "sha256": approved.get(f"dependency_{prefix}_sha256"),
+                            }
+                            if current != expected:
+                                raise PermissionError(
+                                    "The dependency executor changed after approval"
+                                )
                 except Exception as exc:
                     steps.append({
                         "phase": "node-dependencies",
@@ -4791,12 +5893,17 @@ class ToolBox:
                     return self._dependency_install_result(
                         working_directory, manifests, steps, environment_path, requirement, npm_lock
                     )
-                run_step("node-dependencies", npm_command)
+                if run_step("node-dependencies", npm_command):
+                    self._publish_staged_node_modules(
+                        staging_directory, working_directory
+                    )
 
             return self._dependency_install_result(
                 working_directory, manifests, steps, environment_path, requirement, npm_lock
             )
         finally:
+            if staging_directory is not None:
+                shutil.rmtree(staging_directory, ignore_errors=True)
             self._dependency_install_lock.release()
 
     def _dependency_install_result(
@@ -5711,6 +6818,13 @@ class ToolBox:
         mode: str | None = None,
     ) -> dict[str, Any]:
         """Apply one explicit bounded control and return an exact database readback."""
+        normalized_action = str(action).strip().casefold()
+        if self.config.autonomy == "readonly" and normalized_action not in {
+            "off", "pause",
+        }:
+            raise PermissionError(
+                "Readonly mode may only pause or turn off Screen Companion"
+            )
         state = self.memory.control_screen_companion_state(action=action, mode=mode)
         state["learning"] = self.memory.screen_companion_learning_stats()
         return public_screen_companion_state(state)
@@ -5837,7 +6951,71 @@ class ToolBox:
             approved=approved,
         )
 
-    def launch_artifact(self, path: str, arguments: list[str] | None = None) -> dict[str, Any]:
+    def _launch_artifact_snapshot(self, path: str) -> dict[str, Any]:
+        target = _safe_target(self.config.workspace, path)
+        if not os.path.lexists(target):
+            raise FileNotFoundError(path)
+        before = os.lstat(target)
+        attributes = getattr(before, "st_file_attributes", 0)
+        if (
+            stat.S_ISLNK(before.st_mode)
+            or attributes & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+            or not stat.S_ISREG(before.st_mode)
+            or before.st_nlink > 1
+        ):
+            raise PermissionError("Launch artifacts must be ordinary, non-linked files")
+        if before.st_size > MAX_LAUNCH_ARTIFACT_BYTES:
+            raise ValueError("Launch artifact exceeds the 512 MiB limit")
+        digest = hashlib.sha256()
+        read_bytes = 0
+        with target.open("rb") as stream:
+            opened = os.fstat(stream.fileno())
+            if (
+                opened.st_dev,
+                opened.st_ino,
+                opened.st_size,
+                opened.st_mtime_ns,
+                opened.st_nlink,
+            ) != (
+                before.st_dev,
+                before.st_ino,
+                before.st_size,
+                before.st_mtime_ns,
+                before.st_nlink,
+            ):
+                raise PermissionError("Launch artifact changed while it was opened")
+            for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+                read_bytes += len(chunk)
+                digest.update(chunk)
+        after = os.lstat(target)
+        if (
+            after.st_dev,
+            after.st_ino,
+            after.st_size,
+            after.st_mtime_ns,
+            after.st_nlink,
+        ) != (
+            before.st_dev,
+            before.st_ino,
+            before.st_size,
+            before.st_mtime_ns,
+            before.st_nlink,
+        ) or read_bytes != before.st_size:
+            raise PermissionError("Launch artifact changed while its identity was verified")
+        return {
+            "path": str(target.relative_to(self.config.workspace)),
+            "resolved_path": str(target),
+            "bytes": read_bytes,
+            "sha256": digest.hexdigest(),
+            "suffix": target.suffix.casefold(),
+        }
+
+    def launch_artifact(
+        self,
+        path: str,
+        arguments: list[str] | None = None,
+        expected_sha256: str | None = None,
+    ) -> dict[str, Any]:
         if self.config.execution_mode != "trusted-host":
             raise PermissionError("Host process execution is disabled")
         if self.config.autonomy == "readonly":
@@ -5847,10 +7025,14 @@ class ToolBox:
             raise ValueError("Launch arguments must be plain strings without control characters")
         if sum(map(len, arguments)) > 8000:
             raise ValueError("Launch argument limit exceeded")
-        target = _safe_target(self.config.workspace, path)
-        if not target.is_file():
-            raise FileNotFoundError(path)
-        suffix = target.suffix.casefold()
+        snapshot = self._launch_artifact_snapshot(path)
+        target = Path(snapshot["resolved_path"])
+        suffix = str(snapshot["suffix"])
+        if expected_sha256 is not None and (
+            not re.fullmatch(r"[0-9a-fA-F]{64}", expected_sha256)
+            or expected_sha256.casefold() != snapshot["sha256"]
+        ):
+            raise PermissionError("Launch artifact differs from the expected SHA-256")
         default_application_suffixes = {
             ".html", ".pptx", ".docx", ".xlsx", ".pdf", ".txt", ".md", ".csv",
         }
@@ -5889,6 +7071,8 @@ class ToolBox:
                     )
                     return {
                         "path": str(target.relative_to(self.config.workspace)),
+                        "bytes": snapshot["bytes"],
+                        "sha256": snapshot["sha256"],
                         "launched": True,
                         "pid": process.pid,
                         "viewer": office_app.name,
@@ -5898,6 +7082,8 @@ class ToolBox:
             os.startfile(str(target))
             return {
                 "path": str(target.relative_to(self.config.workspace)),
+                "bytes": snapshot["bytes"],
+                "sha256": snapshot["sha256"],
                 "launched": True,
                 "pid": None,
                 "viewer": "default_application",
@@ -5924,6 +7110,8 @@ class ToolBox:
         )
         return {
             "path": str(target.relative_to(self.config.workspace)),
+            "bytes": snapshot["bytes"],
+            "sha256": snapshot["sha256"],
             "launched": True,
             "pid": process.pid,
         }

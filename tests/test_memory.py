@@ -482,6 +482,7 @@ class MemoryTests(unittest.TestCase):
                     "provider": "codex-cli",
                     "model": "codex-cli:gpt-5.6-luna",
                     "profile": "fast",
+                    "task_contract_status": "resolved",
                     "streamed": True,
                 },
             ))
@@ -491,6 +492,7 @@ class MemoryTests(unittest.TestCase):
             self.assertEqual(metrics["queue_ms"], 4)
             self.assertEqual(metrics["time_to_first_token_ms"], 650)
             self.assertEqual(metrics["model"], "codex-cli:gpt-5.6-luna")
+            self.assertEqual(metrics["task_contract_status"], "resolved")
             self.assertNotIn("private user prompt", row["metrics_json"])
             with self.assertRaisesRegex(ValueError, "Unsupported Presence metric"):
                 memory.finish_presence_job(

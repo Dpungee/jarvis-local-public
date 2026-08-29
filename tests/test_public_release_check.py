@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import os
+import shutil
 import subprocess
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from scripts.check_public_release import check_release
 
@@ -82,6 +84,34 @@ class PublicReleaseCheckTests(unittest.TestCase):
         )
         self.assertEqual(check_release(self.repo), [])
 
+    def test_dependabot_public_signoff_address_is_allowed_narrowly(self) -> None:
+        email = "12345+release-tester@users.noreply.github.com"
+        self._commit(
+            email,
+            message=(
+                "Update one dependency\n\n"
+                "Signed-off-by: dependabot[bot] <support@github.com>"
+            ),
+        )
+
+        self.assertEqual(check_release(self.repo), [])
+
+        ordinary_github_address = "person" + "@github.com"
+        self._commit(
+            email,
+            message=(
+                "Unsafe signoff fixture\n\n"
+                f"Signed-off-by: Example Person <{ordinary_github_address}>"
+            ),
+        )
+        self.assertTrue(
+            any(
+                "commit " in finding
+                and "message: non-example email address" in finding
+                for finding in check_release(self.repo)
+            )
+        )
+
     def test_ci_can_scan_pr_head_without_trusting_synthetic_merge_identity(self) -> None:
         safe_email = "12345+release-tester@users.noreply.github.com"
         self._commit(safe_email, message="reviewed candidate")
@@ -105,6 +135,40 @@ class PublicReleaseCheckTests(unittest.TestCase):
         self._commit("12345+release-tester@users.noreply.github.com")
         with self.assertRaisesRegex(ValueError, "full 40-character"):
             check_release(self.repo, history_ref="refs/heads/main")
+
+    def test_poisoned_path_git_is_rejected_without_execution(self) -> None:
+        self._commit("12345+release-tester@users.noreply.github.com")
+        poison = self.repo / ("git.exe" if os.name == "nt" else "git")
+        poison.write_bytes(b"not a trusted executable")
+        if os.name != "nt":
+            poison.chmod(0o755)
+        with (
+            mock.patch.dict(os.environ, {"PATH": str(self.repo)}, clear=False),
+            mock.patch("scripts.check_public_release.subprocess.run") as run,
+            self.assertRaisesRegex(RuntimeError, "trusted OS-administered Git"),
+        ):
+            check_release(self.repo)
+        run.assert_not_called()
+
+    def test_all_release_inspection_uses_one_absolute_trusted_git(self) -> None:
+        self._commit("12345+release-tester@users.noreply.github.com")
+        trusted_git = Path(shutil.which("git") or shutil.which("git.exe") or "").resolve()
+        real_run = subprocess.run
+        with (
+            mock.patch(
+                "scripts.check_public_release._resolve_trusted_git",
+                return_value=trusted_git,
+            ),
+            mock.patch(
+                "scripts.check_public_release.subprocess.run", wraps=real_run
+            ) as run,
+        ):
+            self.assertEqual(check_release(self.repo), [])
+        self.assertTrue(run.call_args_list)
+        for call in run.call_args_list:
+            command = call.args[0]
+            self.assertEqual(Path(command[0]), trusted_git)
+            self.assertTrue(Path(command[0]).is_absolute())
 
     def test_workflow_passes_the_pr_head_to_the_history_scan(self) -> None:
         workflow = (

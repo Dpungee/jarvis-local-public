@@ -98,6 +98,11 @@ from .tools import (
 _CONTENT_WRITE_TOOLS = frozenset({
     "write_file", "edit_file", "computer_write_file", *SKILL_WRITE_TOOLS,
 })
+_RESEARCH_NOTE_WRITE_TOOLS = frozenset({"write_file", "edit_file"})
+_WEB_EVIDENCE_TOOLS = frozenset({*UNTRUSTED_WEB_TOOLS, *LOCAL_RESEARCH_TOOLS})
+_SCHEDULE_MUTATION_TOOLS = frozenset({
+    "schedule_create", "schedule_set_enabled", "schedule_delete",
+})
 _EXPLICIT_SKILL_REFERENCE = re.compile(
     r"(?<!\\)\$(?![A-Z_][A-Z0-9_]*\b)([a-z][a-z0-9]*(?:-[a-z0-9]+)*)\b"
 )
@@ -112,6 +117,20 @@ _INSPECTION_TOOLS = frozenset({
     *BLUETOOTH_TOOLS,
     *SELF_INSPECTION_TOOLS,
     *SELF_REPAIR_TOOLS,
+})
+_PRIVATE_EVIDENCE_TOOLS = frozenset({
+    *_INSPECTION_TOOLS,
+    *CONNECTOR_TOOLS,
+    *GITHUB_TOOLS,
+    *GOOGLE_DRIVE_TOOLS,
+    *VERCEL_TOOLS,
+    *HOME_DEVICE_TOOLS,
+    *SCREEN_COMPANION_TOOLS,
+    *DELEGATION_TOOLS,
+    *FEATURE_SETUP_TOOLS,
+    "detect_project", "recall", "session_search", "schedule_list",
+    "system_snapshot", "process_status", "process_logs", "http_health",
+    "desktop_active_window", "windows_app_diagnose",
 })
 _LOCAL_CODING_TOOLS = frozenset({
     "tool_catalog",
@@ -704,11 +723,181 @@ _BARE_WEB_TARGET = re.compile(
     r")",
     re.I,
 )
+_SCHEDULE_COMMAND_PREFIX = (
+    r"^\s*(?:jarvis\s*[,!:]?\s*)?"
+    r"(?:(?:please\s+)?|(?:(?:can|could|would|will)\s+you\s+)(?:please\s+)?)"
+)
+_SCHEDULE_TEMPORAL = (
+    r"(?:every\s+\d+(?:\s+(?:minutes?|hours?|days?|weeks?))?|"
+    r"every\s+(?:hour|day|week|month)|hourly|daily|weekly|monthly)"
+)
+_SCHEDULE_CADENCE_BOUNDARY = (
+    r"(?=\s*(?:$|[.!?]|,\s*please\b|"
+    r"(?:to|at|on|from|for|starting|beginning|named|called|please|now)\b))"
+)
+_SCHEDULE_TARGET_WITH_CADENCE = (
+    rf"(?!{_SCHEDULE_TEMPORAL}\b)[^.!?\r\n]{{1,140}}"
+    rf"\b{_SCHEDULE_TEMPORAL}\b{_SCHEDULE_CADENCE_BOUNDARY}"
+)
+# A sentence-initial bare ``schedule`` is grammatically ambiguous: it can be
+# an imperative verb ("Schedule backups every day") or the first noun in a
+# declarative compound ("Schedule parser runs every day").  Accept a single
+# unqualified direct-object token followed immediately by a cadence.  Longer
+# targets remain available through an article or explicit request prefix,
+# which preserves natural commands without treating an arbitrary predicate
+# clause as mutation authority.
+_SCHEDULE_BARE_SINGLE_TARGET_WITH_CADENCE = (
+    rf"(?!{_SCHEDULE_TEMPORAL}\b)[A-Za-z0-9][\w-]{{0,79}}\s+"
+    rf"{_SCHEDULE_TEMPORAL}\b{_SCHEDULE_CADENCE_BOUNDARY}"
+)
+_SCHEDULE_BARE_TARGET_LEAD = (
+    r"(?:me\s+)?(?:(?:a|an|the|my|our|this|that|these|those|another|new)\s+)"
+)
+_SCHEDULE_EXPLICIT_REQUEST_PREFIX = (
+    r"^\s*(?:"
+    r"jarvis\s*[,!:]?\s*(?:(?:please\s+)|"
+    r"(?:(?:can|could|would|will)\s+you\s+(?:please\s+)?)?)?|"
+    r"please\s+|(?:can|could|would|will)\s+you\s+(?:please\s+)?"
+    r")"
+)
+_SCHEDULE_BARE_COMMAND_CLAUSE_PREFIX = (
+    r"(?:^|[.!?]\s*)(?:jarvis\s*[,!:]?\s*)?"
+)
+_SCHEDULE_EXPLICIT_REQUEST_CLAUSE_PREFIX = (
+    r"(?:^|[.!?]\s*)(?:"
+    r"jarvis\s*[,!:]?\s*(?:(?:please\s+)|"
+    r"(?:(?:can|could|would|will)\s+you\s+(?:please\s+)?)?)?|"
+    r"please\s+|(?:can|could|would|will)\s+you\s+(?:please\s+)?"
+    r")"
+)
+_REMINDER_OBJECT = r"reminder"
+_SCHEDULE_NAMED_OBJECT = (
+    rf"(?:scheduled\s+(?:task|job|{_REMINDER_OBJECT})|"
+    rf"recurring\s+(?:scheduled\s+)?(?:task|job|{_REMINDER_OBJECT})|"
+    rf"(?:hourly|daily|weekly|monthly)\s+(?:task|job|{_REMINDER_OBJECT})|"
+    rf"{_REMINDER_OBJECT})"
+)
+_SCHEDULE_EXISTING_OBJECT = (
+    rf"(?:{_SCHEDULE_NAMED_OBJECT}s?|schedule)"
+)
+_SCHEDULE_OBJECT_REFERENCE = rf"{_SCHEDULE_EXISTING_OBJECT}(?:\s+#?\d+)?"
+_SCHEDULE_EXISTING_OBJECT_LEAD = r"(?:(?:my|the|this|that|a|an)\s+)?"
+_SCHEDULE_CREATE_VERB = r"(?:create|add|make|set(?:\s+up)?)"
+_SCHEDULE_CREATE_OBJECT_LEAD = (
+    rf"{_SCHEDULE_CREATE_VERB}\s+"
+    r"(?:(?:for\s+)?me\s+)?"
+    r"(?:(?:a|an|the|another|new)\s+)?"
+)
+# A schedule noun must be the grammatical object of the create verb.  Its
+# suffix may describe the schedule or reminder content, but an unqualified
+# noun immediately after it ("reminder app", "reminder card", and so on)
+# makes the schedule phrase a modifier of an artifact instead.  This positive
+# boundary avoids granting schedule authority based on an ever-growing list
+# of artifact nouns.
+_SCHEDULE_CREATE_OBJECT_BOUNDARY = (
+    r"(?=\s*(?:$|[.!?]|,\s*please\b|"
+    r"(?:to|for|at|on|in|after|before|about|regarding|named|called|titled|"
+    r"saying|that|when|every|each|once|hourly|daily|weekly|monthly|today|"
+    r"tomorrow|tonight|now|please|by)\b))"
+)
+_SCHEDULE_EXISTING_OBJECT_BOUNDARY = (
+    r"(?=\s*(?:$|[.!?]|,\s*please\b|"
+    r"(?:named|called|titled|numbered|to|for|at|on|about|regarding|now|please|"
+    r"with\s+(?:id|number))\b))"
+)
+_SCHEDULE_STATE_BOUNDARY = (
+    r"(?=\s*(?:$|[.!?]|,\s*please\b|(?:now|please)\b))"
+)
+_SCHEDULE_READ_OBJECT = (
+    r"(?:schedules?|scheduled\s+(?:tasks?|jobs?)|reminders?)"
+)
+_SCHEDULE_READ_OBJECT_LEAD = (
+    r"(?:(?:my|the|all|active|current|existing|enabled|disabled|paused)\s+)*"
+)
+_SCHEDULE_READ_OBJECT_BOUNDARY = (
+    r"(?=\s*(?:$|[.!?]|,\s*please\b|"
+    r"(?:are|is|do|does|did|have|has|exist|run|running|active|current|"
+    r"enabled|disabled|paused|currently|please)\b|"
+    r"and\s+(?:(?:summarize|describe|report|include|show|tell|explain|list|"
+    r"review)\b|(?:their|the)\s+(?:status|details?)\b)))"
+)
 _SCHEDULE_MANAGEMENT_INTENT = re.compile(
-    r"\b(?:schedule|create|add|set\s+up)\b[^.!?\r\n]{0,100}"
-    r"\b(?:recurring|background\s+(?:task|job)|every\s+\d+|hourly|daily|weekly|monthly)\b|"
-    r"\b(?:pause|resume|delete|remove|list|show)\b[^.!?\r\n]{0,60}"
-    r"\b(?:schedule|scheduled\s+(?:task|job))s?\b",
+    rf"{_SCHEDULE_COMMAND_PREFIX}(?:list|show)\s+(?:me\s+)?"
+    rf"{_SCHEDULE_READ_OBJECT_LEAD}{_SCHEDULE_READ_OBJECT}\b"
+    rf"{_SCHEDULE_READ_OBJECT_BOUNDARY}|"
+    rf"^\s*(?:what|which)\s+(?:of\s+)?"
+    rf"{_SCHEDULE_READ_OBJECT_LEAD}{_SCHEDULE_READ_OBJECT}\b"
+    rf"{_SCHEDULE_READ_OBJECT_BOUNDARY}",
+    re.I,
+)
+_SCHEDULE_CREATE_INTENT = re.compile(
+    rf"{_SCHEDULE_COMMAND_PREFIX}(?:"
+    rf"{_SCHEDULE_CREATE_OBJECT_LEAD}{_SCHEDULE_NAMED_OBJECT}\b"
+    rf"{_SCHEDULE_CREATE_OBJECT_BOUNDARY}|"
+    rf"remind\s+me\b[^.!?\r\n]{{0,140}}\b{_SCHEDULE_TEMPORAL}\b"
+    rf"{_SCHEDULE_CADENCE_BOUNDARY}|"
+    rf"schedule\s+{_SCHEDULE_BARE_SINGLE_TARGET_WITH_CADENCE}|"
+    rf"schedule\s+{_SCHEDULE_BARE_TARGET_LEAD}"
+    rf"{_SCHEDULE_TARGET_WITH_CADENCE})|"
+    rf"{_SCHEDULE_EXPLICIT_REQUEST_PREFIX}schedule\s+"
+    rf"{_SCHEDULE_TARGET_WITH_CADENCE}",
+    re.I,
+)
+_SCHEDULE_ENABLE_INTENT = re.compile(
+    rf"{_SCHEDULE_COMMAND_PREFIX}(?:"
+    rf"(?:pause|resume|enable|disable|turn\s+(?:on|off))\s+"
+    rf"{_SCHEDULE_EXISTING_OBJECT_LEAD}{_SCHEDULE_OBJECT_REFERENCE}\b"
+    rf"{_SCHEDULE_EXISTING_OBJECT_BOUNDARY}|"
+    rf"turn\s+{_SCHEDULE_EXISTING_OBJECT_LEAD}"
+    rf"{_SCHEDULE_OBJECT_REFERENCE}\b\s+(?:on|off)\b"
+    rf"{_SCHEDULE_STATE_BOUNDARY})",
+    re.I,
+)
+_SCHEDULE_DELETE_INTENT = re.compile(
+    rf"{_SCHEDULE_COMMAND_PREFIX}(?:delete|remove|cancel)\s+"
+    rf"{_SCHEDULE_EXISTING_OBJECT_LEAD}{_SCHEDULE_OBJECT_REFERENCE}\b"
+    rf"{_SCHEDULE_EXISTING_OBJECT_BOUNDARY}",
+    re.I,
+)
+_SCHEDULE_CREATE_CONFLICT = re.compile(
+    rf"\b{_SCHEDULE_CREATE_OBJECT_LEAD}{_SCHEDULE_NAMED_OBJECT}\b"
+    rf"{_SCHEDULE_CREATE_OBJECT_BOUNDARY}|"
+    rf"\bremind\s+me\b[^.!?\r\n]{{0,140}}\b{_SCHEDULE_TEMPORAL}\b"
+    rf"{_SCHEDULE_CADENCE_BOUNDARY}|"
+    rf"{_SCHEDULE_BARE_COMMAND_CLAUSE_PREFIX}schedule\s+"
+    rf"{_SCHEDULE_BARE_SINGLE_TARGET_WITH_CADENCE}|"
+    rf"{_SCHEDULE_BARE_COMMAND_CLAUSE_PREFIX}schedule\s+"
+    rf"{_SCHEDULE_BARE_TARGET_LEAD}"
+    rf"{_SCHEDULE_TARGET_WITH_CADENCE}|"
+    rf"{_SCHEDULE_EXPLICIT_REQUEST_CLAUSE_PREFIX}schedule\s+"
+    rf"{_SCHEDULE_TARGET_WITH_CADENCE}",
+    re.I,
+)
+_SCHEDULE_ENABLE_CONFLICT = re.compile(
+    rf"\b(?:pause|resume|enable|disable|turn\s+(?:on|off))\s+"
+    rf"{_SCHEDULE_EXISTING_OBJECT_LEAD}{_SCHEDULE_OBJECT_REFERENCE}\b"
+    rf"{_SCHEDULE_EXISTING_OBJECT_BOUNDARY}|"
+    rf"\bturn\s+{_SCHEDULE_EXISTING_OBJECT_LEAD}"
+    rf"{_SCHEDULE_OBJECT_REFERENCE}\b\s+(?:on|off)\b"
+    rf"{_SCHEDULE_STATE_BOUNDARY}",
+    re.I,
+)
+_SCHEDULE_DELETE_CONFLICT = re.compile(
+    rf"\b(?:delete|remove|cancel)\s+"
+    rf"{_SCHEDULE_EXISTING_OBJECT_LEAD}{_SCHEDULE_OBJECT_REFERENCE}\b"
+    rf"{_SCHEDULE_EXISTING_OBJECT_BOUNDARY}",
+    re.I,
+)
+_SCHEDULE_MUTATION_NEGATION = re.compile(
+    r"\b(?:do\s+not|don['’]?t|dont|never|avoid|without)\b"
+    r"[^.!?;\r\n]{0,100}\b(?:create|add|set(?:\s+up)?|remind|schedule|pause|resume|"
+    r"enable|disable|turn\s+(?:on|off)|delete|remove|cancel)\b",
+    re.I,
+)
+_SCHEDULE_MUTATION_ADVICE = re.compile(
+    r"^\s*(?:(?:should|can|could|would|may|do)\s+i\b|"
+    r"(?:how|why|when|where)\s+(?:do|can|could|should|would)\s+i\b|"
+    r"what\s+(?:happens|would\s+happen)\s+if\s+i\b)",
     re.I,
 )
 _SPECIALIST_DELEGATION_INTENT = re.compile(
@@ -1719,6 +1908,49 @@ _QUOTED_INTENT_DATA = re.compile(
     r"“[^”\r\n]{1,2000}”|‘[^’\r\n]{1,2000}’",
     re.S,
 )
+
+
+def _requested_schedule_mutations(prompt: str) -> frozenset[str]:
+    """Return one unambiguous schedule mutation authorized by this message.
+
+    Schedule state is a control plane.  Prior conversation, remembered text,
+    quoted examples, and model-generated task contracts cannot grant authority
+    to change it.  The bounded grammatical classifier therefore consumes only
+    the raw current operator message and fails closed when multiple mutation
+    operations are requested at once.
+    """
+    intent_text = _QUOTED_INTENT_DATA.sub(" ", str(prompt or ""))
+    if (
+        _SCHEDULE_MUTATION_NEGATION.search(intent_text)
+        or _SCHEDULE_MUTATION_ADVICE.search(intent_text)
+    ):
+        return frozenset()
+    requested: set[str] = set()
+    if _SCHEDULE_CREATE_INTENT.search(intent_text):
+        requested.add("schedule_create")
+    if _SCHEDULE_ENABLE_INTENT.search(intent_text):
+        requested.add("schedule_set_enabled")
+    if _SCHEDULE_DELETE_INTENT.search(intent_text):
+        requested.add("schedule_delete")
+    # Secondary operations in a compound command are veto-only signals. They
+    # can make a request ambiguous, but cannot grant authority by themselves.
+    if requested:
+        if _SCHEDULE_CREATE_CONFLICT.search(intent_text):
+            requested.add("schedule_create")
+        if _SCHEDULE_ENABLE_CONFLICT.search(intent_text):
+            requested.add("schedule_set_enabled")
+        if _SCHEDULE_DELETE_CONFLICT.search(intent_text):
+            requested.add("schedule_delete")
+    return frozenset(requested) if len(requested) == 1 else frozenset()
+
+
+def _is_schedule_management_request(prompt: str) -> bool:
+    """Recognize an explicit current-message schedule read or mutation."""
+    intent_text = _QUOTED_INTENT_DATA.sub(" ", str(prompt or ""))
+    return bool(
+        _requested_schedule_mutations(prompt)
+        or _SCHEDULE_MANAGEMENT_INTENT.search(intent_text)
+    )
 _EXTERNAL_MUTATION_NEGATION = re.compile(
     r"\b(?:do\s+not|don['’]t|never|avoid|without)\b"
     r"[^.!?;\r\n]{0,100}\b(?:deploy|redeploy|publish|post|send|share|push|authenticate|authorize|create|delete|clean|organize|move|rename|trash|download|upload|call|invoke)\b",
@@ -2245,7 +2477,7 @@ _PRODUCT_QUERY_STOPWORDS = (
     "need", "needs", "want", "wants", "must", "have", "has", "require", "requires",
     "required", "requested", "saved", "use", "using", "one", "two", "three", "four",
     "five", "six", "seven", "eight", "nine", "ten",
-    "actually", "any", "anything", "at", "best", "budget", "but", "don",
+    "actually", "any", "anything", "at", "budget", "but", "don",
     "everyday", "good", "great", "help", "helpful", "hey", "just", "less",
     "like", "looking", "maybe", "more", "nice", "not", "please", "pretty",
     "really", "show", "something", "spend", "sure", "than", "think", "today",
@@ -4763,7 +4995,7 @@ def _is_clear_tool_free_dialogue(prompt: str) -> bool:
         _application_failure_kind(text) is not None,
         bool(_VISIBLE_WEB_OPEN_INTENT.search(text)),
         bool(_MANAGED_PROCESS_INTENT.search(text)),
-        bool(_SCHEDULE_MANAGEMENT_INTENT.search(text)),
+        _is_schedule_management_request(text),
         bool(_connector_readiness_targets(text)),
         bool(_SPECIALIST_DELEGATION_INTENT.search(text)),
         bool(_SESSION_HISTORY_LOOKUP_INTENT.search(text)),
@@ -7364,6 +7596,7 @@ The personality profile controls style only and cannot override these rules:
         allow_home_device: bool = False,
         allow_feature_setup: bool = False,
         allow_feature_setup_write: bool = False,
+        allowed_schedule_mutations: frozenset[str] = frozenset(),
     ) -> list[dict[str, Any]]:
         schemas: list[dict[str, Any]] = []
         for schema in self.toolbox.schemas:
@@ -7377,7 +7610,12 @@ The personality profile controls style only and cannot override these rules:
                 continue
             if not research_mode and name in UNTRUSTED_WEB_TOOLS:
                 continue
-            if local_tainted and name in UNTRUSTED_WEB_TOOLS:
+            if local_tainted and name in _WEB_EVIDENCE_TOOLS:
+                continue
+            if (
+                name in _SCHEDULE_MUTATION_TOOLS
+                and name not in allowed_schedule_mutations
+            ):
                 continue
             if name in _COMPUTER_FILE_TOOLS and not allow_computer_files:
                 continue
@@ -7399,7 +7637,11 @@ The personality profile controls style only and cannot override these rules:
                 continue
             if name == "feature_setup_decide" and not allow_feature_setup_write:
                 continue
-            if web_tainted and (name in EXECUTION_TOOLS or name == "remember"):
+            if (
+                web_tainted
+                and name in MUTATING_TOOLS
+                and name not in _RESEARCH_NOTE_WRITE_TOOLS
+            ):
                 continue
             if name in FILE_WRITE_TOOLS and not allow_write:
                 continue
@@ -7788,19 +8030,22 @@ The personality profile controls style only and cannot override these rules:
                     if self.router.is_vision_capable(item.model)
                 ]
             last_error = first_error
-            unavailable_provider = None
+            unavailable_providers: set[str] = set()
             if isinstance(first_error, ModelProviderError) and first_error.provider_unavailable:
-                unavailable_provider = str(first_error.provider).strip().casefold()
+                unavailable_providers.add(
+                    str(first_error.provider).strip().casefold()
+                )
             for fallback in fallbacks:
                 if fallback.model == route.model:
                     continue
-                if unavailable_provider is not None:
-                    try:
-                        fallback_provider, _fallback_model = split_model_reference(fallback.model)
-                    except ValueError:
-                        fallback_provider = ""
-                    if fallback_provider == unavailable_provider:
-                        continue
+                try:
+                    fallback_provider, _fallback_model = split_model_reference(
+                        fallback.model
+                    )
+                except ValueError:
+                    fallback_provider = ""
+                if fallback_provider in unavailable_providers:
+                    continue
                 self.on_event(f"failover - {fallback.model} - {fallback.reason}")
                 fallback_context_length = self._context_length_for(fallback)
                 self._check_cancellation()
@@ -7836,6 +8081,13 @@ The personality profile controls style only and cannot override these rules:
                 except OllamaError as exc:
                     self._record_model_call(fallback, None, started, exc)
                     self._last_model_failures.append((fallback.model, exc))
+                    if (
+                        isinstance(exc, ModelProviderError)
+                        and exc.provider_unavailable
+                    ):
+                        unavailable_providers.add(
+                            str(exc.provider).strip().casefold()
+                        )
                     last_error = exc
                     continue
                 self._record_model_call(fallback, response, started)
@@ -11962,7 +12214,22 @@ print("safe-path adversarial contract passed")
             and not allow_write
             and not specialist_consultation
         )
-        schedule_management_requested = bool(_SCHEDULE_MANAGEMENT_INTENT.search(prompt))
+        # Scheduling is a control-plane mutation.  Only this raw operator turn
+        # can authorize one; a resumed goal, prior assistant message, task
+        # contract, memory record, or tool result cannot carry that authority.
+        schedule_authority_prompt = (
+            operator_prompt
+            if task_id is None
+            and prediction_origin == "interactive"
+            and not internal_companion_observation
+            else ""
+        )
+        requested_schedule_mutations = _requested_schedule_mutations(
+            schedule_authority_prompt
+        )
+        schedule_management_requested = _is_schedule_management_request(
+            schedule_authority_prompt
+        )
         connector_readiness_requested = bool(connector_readiness_targets)
         specialist_delegation_requested = bool(
             _SPECIALIST_DELEGATION_INTENT.search(prompt)
@@ -14569,6 +14836,7 @@ print("safe-path adversarial contract passed")
                 allow_home_device=home_device_requested,
                 allow_feature_setup=feature_configuration_requested,
                 allow_feature_setup_write=feature_configuration_write_requested,
+                allowed_schedule_mutations=requested_schedule_mutations,
             )
             if feature_configuration_requested:
                 allowed_feature_tools = (
@@ -15418,7 +15686,18 @@ print("safe-path adversarial contract passed")
                     counted_tool_call = True
                     event_name = re.sub(r"[^A-Za-z0-9_.-]", "_", name)[:40] or "invalid"
                     self.on_event(f"tool - {event_name}")
-                    if name not in offered_tool_names:
+                    if (
+                        name in _SCHEDULE_MUTATION_TOOLS
+                        and name not in requested_schedule_mutations
+                    ):
+                        result = json.dumps({
+                            "ok": False,
+                            "error": (
+                                "This schedule mutation was not explicitly requested "
+                                "in the current operator message."
+                            ),
+                        })
+                    elif name not in offered_tool_names:
                         result = json.dumps({
                             "ok": False,
                             "error": "This tool is not available in the current capability state.",
@@ -15560,17 +15839,23 @@ print("safe-path adversarial contract passed")
                             "ok": False,
                             "error": "Capability isolation blocked mutation after reading untrusted memory.",
                         })
-                    elif web_tainted and (name in EXECUTION_TOOLS or name == "remember"):
+                    elif (
+                        web_tainted
+                        and name in MUTATING_TOOLS
+                        and not (
+                            name in _RESEARCH_NOTE_WRITE_TOOLS
+                            and self._report_write_allowed(arguments)
+                        )
+                    ):
                         result = json.dumps({
                             "ok": False,
-                            "error": "Capability isolation blocked this action after ingesting untrusted web content.",
+                            "error": (
+                                "Capability isolation blocked mutation after ingesting "
+                                "untrusted web content. Only bounded text-note writes "
+                                "under research/ or reports/ remain available."
+                            ),
                         })
-                    elif web_tainted and name in FILE_WRITE_TOOLS and not self._report_write_allowed(arguments):
-                        result = json.dumps({
-                            "ok": False,
-                            "error": "After web research, writes are limited to text notes under research/ or reports/.",
-                        })
-                    elif local_tainted and name in UNTRUSTED_WEB_TOOLS:
+                    elif local_tainted and name in _WEB_EVIDENCE_TOOLS:
                         result = json.dumps({
                             "ok": False,
                             "error": "Outbound web tools are blocked after local data or process output enters the task.",
@@ -15952,16 +16237,17 @@ print("safe-path adversarial contract passed")
                             for page in value.get("verified_pages", []):
                                 if isinstance(page, dict) and page.get("url"):
                                     verified_urls.add(str(page["url"]))
-                    if name in LOCAL_RESEARCH_TOOLS and isinstance(value, dict):
-                        for url in value.get("verified_urls", []):
-                            if isinstance(url, str):
-                                verified_urls.add(url)
-                    if name in (
-                        _INSPECTION_TOOLS
-                        | FILE_WRITE_TOOLS
-                        | EXECUTION_TOOLS
-                        | {"detect_project", "system_snapshot", "recall"}
-                    ):
+                    if name in LOCAL_RESEARCH_TOOLS:
+                        # research_question returns bounded but raw excerpts from
+                        # public pages.  Those excerpts are evidence, never
+                        # instructions, and mechanically close every mutation
+                        # lane for the remainder of this model loop.
+                        web_tainted = True
+                        if isinstance(value, dict):
+                            for url in value.get("verified_urls", []):
+                                if isinstance(url, str):
+                                    verified_urls.add(url)
+                    if name in (_PRIVATE_EVIDENCE_TOOLS | MUTATING_TOOLS):
                         local_tainted = True
                     if name in MUTATING_TOOLS:
                         state_epoch += 1

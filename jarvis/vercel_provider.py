@@ -31,6 +31,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
 
+from .redaction import is_sensitive_key, redact_secrets
 from .subprocess_env import trusted_cli_environment
 
 
@@ -64,6 +65,47 @@ MAX_DEPLOY_SNAPSHOT_FILE_BYTES = MAX_DEPLOY_SNAPSHOT_BYTES
 
 class VercelProviderError(RuntimeError):
     """Base error for invalid provider setup or requests."""
+
+
+def _redact_output_value(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {
+            redact_secrets(str(key)): (
+                "[REDACTED]" if is_sensitive_key(str(key))
+                else _redact_output_value(item)
+            )
+            for key, item in value.items()
+        }
+    if isinstance(value, list):
+        return [_redact_output_value(item) for item in value]
+    if isinstance(value, str):
+        return redact_secrets(value)
+    return value
+
+
+def _redact_output_text(value: str) -> str:
+    """Redact CLI output while keeping JSON and JSON Lines parseable."""
+    stripped = value.strip()
+    if not stripped:
+        return value
+    try:
+        parsed = json.loads(value)
+    except json.JSONDecodeError:
+        lines = value.splitlines()
+        parsed_lines: list[Any] = []
+        try:
+            for line in lines:
+                if line.strip():
+                    parsed_lines.append(json.loads(line))
+        except json.JSONDecodeError:
+            return redact_secrets(value)
+        if parsed_lines and len(parsed_lines) == len([line for line in lines if line.strip()]):
+            return "\n".join(
+                json.dumps(_redact_output_value(item), ensure_ascii=False)
+                for item in parsed_lines
+            )
+        return redact_secrets(value)
+    return json.dumps(_redact_output_value(parsed), ensure_ascii=False)
 
 
 class VercelCLIUnavailableError(VercelProviderError):
@@ -215,7 +257,7 @@ class VercelProvider:
         return str(value)
 
     def _bounded(self, value: str | bytes | None) -> tuple[str, bool]:
-        text = self._text(value).replace("\x00", "")
+        text = _redact_output_text(self._text(value).replace("\x00", ""))
         if len(text) <= self.max_output_chars:
             return text, False
         keep = max(0, self.max_output_chars - len(_TRUNCATION_MARKER))
@@ -315,7 +357,10 @@ class VercelProvider:
                     command=tuple(command),
                     cwd=str(cwd),
                     returncode=None,
-                    error=f"Vercel CLI could not be started: {exc}",
+                    error=(
+                        "Vercel CLI could not be started: "
+                        f"{redact_secrets(str(exc))}"
+                    ),
                     duration_seconds=round(time.monotonic() - started, 6),
                 )
 

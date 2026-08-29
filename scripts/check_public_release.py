@@ -15,6 +15,12 @@ import subprocess
 import sys
 from pathlib import Path, PurePosixPath
 
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+from jarvis.trusted_executables import trusted_path_executable
+
 
 MAX_TRACKED_FILE_BYTES = 5 * 1024 * 1024
 
@@ -93,13 +99,35 @@ _ALLOWED_EMAIL_DOMAINS = {
     "example.org",
     "users.noreply.github.com",
 }
-_ALLOWED_EMAIL_ADDRESSES = {"git@github.com", "noreply@github.com"}
+_ALLOWED_EMAIL_ADDRESSES = {
+    "git@github.com",
+    "noreply@github.com",
+    # Dependabot adds this exact public GitHub-managed signoff to its commits.
+    # Keep the exception address-specific so ordinary github.com mailboxes are
+    # still rejected by the public-release privacy boundary.
+    "support@github.com",
+}
 _HISTORY_REF_RE = re.compile(r"(?:HEAD|[0-9a-fA-F]{40})\Z")
 
 
-def _git(repo: Path, *args: str, input_bytes: bytes | None = None) -> bytes:
+def _resolve_trusted_git(repo: Path) -> Path:
+    executable = trusted_path_executable(
+        "git.exe" if sys.platform == "win32" else "git",
+        prohibited_roots=(repo,),
+    )
+    if executable is None:
+        raise RuntimeError("a trusted OS-administered Git executable is unavailable")
+    return executable
+
+
+def _git(
+    git_executable: Path,
+    repo: Path,
+    *args: str,
+    input_bytes: bytes | None = None,
+) -> bytes:
     completed = subprocess.run(
-        ["git", *args],
+        [str(git_executable), *args],
         cwd=repo,
         input=input_bytes,
         stdout=subprocess.PIPE,
@@ -112,8 +140,8 @@ def _git(repo: Path, *args: str, input_bytes: bytes | None = None) -> bytes:
     return completed.stdout
 
 
-def _indexed_files(repo: Path) -> list[tuple[str, str, str]]:
-    records = _git(repo, "ls-files", "--stage", "-z").split(b"\0")
+def _indexed_files(git_executable: Path, repo: Path) -> list[tuple[str, str, str]]:
+    records = _git(git_executable, repo, "ls-files", "--stage", "-z").split(b"\0")
     files: list[tuple[str, str, str]] = []
     for record in records:
         if not record:
@@ -204,15 +232,19 @@ def _content_findings(text: str) -> list[str]:
     return sorted(set(findings))
 
 
-def _validated_history_commit(repo: Path, history_ref: str) -> str:
+def _validated_history_commit(
+    git_executable: Path, repo: Path, history_ref: str
+) -> str:
     candidate = str(history_ref).strip()
     if _HISTORY_REF_RE.fullmatch(candidate) is None:
         raise ValueError("history ref must be HEAD or a full 40-character commit ID")
-    commit_id = _git(repo, "rev-parse", "--verify", f"{candidate}^{{commit}}").decode(
+    commit_id = _git(
+        git_executable, repo, "rev-parse", "--verify", f"{candidate}^{{commit}}"
+    ).decode(
         "ascii", errors="strict"
     ).strip()
     ancestor = subprocess.run(
-        ["git", "merge-base", "--is-ancestor", commit_id, "HEAD"],
+        [str(git_executable), "merge-base", "--is-ancestor", commit_id, "HEAD"],
         cwd=repo,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.PIPE,
@@ -223,10 +255,13 @@ def _validated_history_commit(repo: Path, history_ref: str) -> str:
     return commit_id
 
 
-def _history_identity_findings(repo: Path, history_ref: str = "HEAD") -> list[str]:
+def _history_identity_findings(
+    git_executable: Path, repo: Path, history_ref: str = "HEAD"
+) -> list[str]:
     findings: list[str] = []
-    history_commit = _validated_history_commit(repo, history_ref)
+    history_commit = _validated_history_commit(git_executable, repo, history_ref)
     history = _git(
+        git_executable,
         repo,
         "log",
         history_commit,
@@ -248,13 +283,16 @@ def _history_identity_findings(repo: Path, history_ref: str = "HEAD") -> list[st
                 findings.append(
                     f"commit {commit_id} {role} identity: {reason}"
                 )
-        message = _git(repo, "show", "-s", "--format=%B", commit_id).decode(
+        message = _git(
+            git_executable, repo, "show", "-s", "--format=%B", commit_id
+        ).decode(
             "utf-8", errors="replace"
         )
         for reason in _content_findings(message):
             findings.append(f"commit {commit_id} message: {reason}")
 
     tags = _git(
+        git_executable,
         repo,
         "tag",
         "--merged",
@@ -269,7 +307,9 @@ def _history_identity_findings(repo: Path, history_ref: str = "HEAD") -> list[st
         if tagger_email:
             for reason in _content_findings(f"{tagger_name} {tagger_email}"):
                 findings.append(f"{refname} tagger identity: {reason}")
-        message = _git(repo, "for-each-ref", "--format=%(contents)", refname).decode(
+        message = _git(
+            git_executable, repo, "for-each-ref", "--format=%(contents)", refname
+        ).decode(
             "utf-8", errors="replace"
         )
         for reason in _content_findings(message):
@@ -278,8 +318,11 @@ def _history_identity_findings(repo: Path, history_ref: str = "HEAD") -> list[st
 
 
 def check_release(repo: Path, *, history_ref: str = "HEAD") -> list[str]:
-    findings: list[str] = _history_identity_findings(repo, history_ref)
-    for path, object_id, mode in _indexed_files(repo):
+    git_executable = _resolve_trusted_git(repo)
+    findings: list[str] = _history_identity_findings(
+        git_executable, repo, history_ref
+    )
+    for path, object_id, mode in _indexed_files(git_executable, repo):
         for reason in _path_findings(path):
             findings.append(f"{path}: {reason}")
 
@@ -290,7 +333,7 @@ def check_release(repo: Path, *, history_ref: str = "HEAD") -> list[str]:
             )
             continue
 
-        indexed = _git(repo, "cat-file", "blob", object_id)
+        indexed = _git(git_executable, repo, "cat-file", "blob", object_id)
         if len(indexed) > MAX_TRACKED_FILE_BYTES:
             findings.append(
                 f"{path}: tracked file is {len(indexed)} bytes; limit is "

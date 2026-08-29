@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import io
 import importlib.util
+import os
+import shutil
 import subprocess
 import tempfile
 import unittest
@@ -82,7 +84,7 @@ class PublicPublishSourceTests(unittest.TestCase):
             head = self.git(repository, "rev-parse", "HEAD")
             original_git = PUBLISH._git
 
-            def fake_git(repo, *arguments, allow_missing=False):
+            def fake_git(git_executable, repo, *arguments, allow_missing=False):
                 if arguments == (
                     "ls-remote",
                     "--exit-code",
@@ -90,7 +92,9 @@ class PublicPublishSourceTests(unittest.TestCase):
                     "refs/heads/main",
                 ):
                     return f"{root}\trefs/heads/main"
-                return original_git(repo, *arguments, allow_missing=allow_missing)
+                return original_git(
+                    git_executable, repo, *arguments, allow_missing=allow_missing
+                )
 
             with mock.patch.object(PUBLISH, "_git", side_effect=fake_git):
                 self.check(repository, head, root=root, mode="promotion")
@@ -108,7 +112,7 @@ class PublicPublishSourceTests(unittest.TestCase):
             ).stdout.strip()
             original_git = PUBLISH._git
 
-            def fake_git(repo, *arguments, allow_missing=False):
+            def fake_git(git_executable, repo, *arguments, allow_missing=False):
                 if arguments == (
                     "ls-remote",
                     "--exit-code",
@@ -116,11 +120,50 @@ class PublicPublishSourceTests(unittest.TestCase):
                     "refs/heads/main",
                 ):
                     return f"{alternate}\trefs/heads/main"
-                return original_git(repo, *arguments, allow_missing=allow_missing)
+                return original_git(
+                    git_executable, repo, *arguments, allow_missing=allow_missing
+                )
 
             with mock.patch.object(PUBLISH, "_git", side_effect=fake_git):
                 with self.assertRaisesRegex(PUBLISH.PublishSourceError, "not an ancestor"):
                     self.check(repository, head, mode="promotion")
+
+    def test_poisoned_repository_path_git_is_rejected_without_execution(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            repository, head = self.safe_repository(Path(temporary))
+            poison = repository / ("git.exe" if os.name == "nt" else "git")
+            poison.write_bytes(b"not a trusted executable")
+            if os.name != "nt":
+                poison.chmod(0o755)
+            with (
+                mock.patch.dict(os.environ, {"PATH": str(repository)}, clear=False),
+                mock.patch.object(PUBLISH.subprocess, "run") as run,
+                self.assertRaisesRegex(
+                    PUBLISH.PublishSourceError, "trusted OS-administered Git"
+                ),
+            ):
+                self.check(repository, head)
+            run.assert_not_called()
+
+    def test_all_publish_inspection_uses_one_absolute_trusted_git(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            repository, head = self.safe_repository(Path(temporary))
+            trusted_git = Path(
+                shutil.which("git") or shutil.which("git.exe") or ""
+            ).resolve()
+            real_run = subprocess.run
+            with (
+                mock.patch.object(
+                    PUBLISH, "_resolve_trusted_git", return_value=trusted_git
+                ),
+                mock.patch.object(PUBLISH.subprocess, "run", wraps=real_run) as run,
+            ):
+                self.check(repository, head)
+            self.assertTrue(run.call_args_list)
+            for call in run.call_args_list:
+                command = call.args[0]
+                self.assertEqual(Path(command[0]), trusted_git)
+                self.assertTrue(Path(command[0]).is_absolute())
 
     def test_promotion_cli_prints_only_exact_fast_forward_command(self) -> None:
         arguments = SimpleNamespace(

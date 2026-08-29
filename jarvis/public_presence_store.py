@@ -117,6 +117,12 @@ def _digest(value: Any, label: str) -> str:
     return value.strip().casefold()
 
 
+def _required_row(value: Any, label: str) -> Any:
+    if value is None:
+        raise PublicPresenceStoreError(f"{label} was not persisted")
+    return value
+
+
 class PublicPresenceStore:
     """Restart-safe storage for the isolated, non-live public control plane."""
 
@@ -441,7 +447,8 @@ class PublicPresenceStore:
                 )
         if blocked:
             raise PublicPresenceStopped("clear the emergency stop before enabling Public Presence")
-        assert result is not None
+        if result is None:
+            raise PublicPresenceStoreError("public control state was not persisted")
         return result
 
     def set_paused(self, paused: bool, *, actor: str = "operator") -> dict[str, Any]:
@@ -485,7 +492,8 @@ class PublicPresenceStore:
                 )
         if blocked:
             raise PublicPresenceStopped("Public Presence must be enabled and not stopped before resume")
-        assert result is not None
+        if result is None:
+            raise PublicPresenceStoreError("public pause state was not persisted")
         return result
 
     def emergency_stop(self, *, actor: str = "operator") -> dict[str, Any]:
@@ -612,8 +620,7 @@ class PublicPresenceStore:
                 "SELECT * FROM public_bridge_authorizations WHERE authorization_id=?",
                 (authorization_id,),
             ).fetchone()
-            assert row is not None
-            return dict(row)
+            return dict(_required_row(row, "bridge authorization"))
 
     def decide_bridge_authorization(
         self,
@@ -662,17 +669,19 @@ class PublicPresenceStore:
                     details={"actor": safe_actor},
                     created_at=moment,
                 )
-                result = dict(db.execute(
+                decided = db.execute(
                     "SELECT * FROM public_bridge_authorizations WHERE authorization_id=?",
                     (safe_id,),
-                ).fetchone())
+                ).fetchone()
+                result = dict(_required_row(decided, "bridge authorization decision"))
                 if expired:
                     terminal_error = ApprovalExpired(
                         "bridge authorization expired before decision"
                     )
         if terminal_error is not None:
             raise terminal_error
-        assert result is not None
+        if result is None:
+            raise PublicPresenceStoreError("bridge authorization decision was not persisted")
         return result
 
     def accept_bridge_object(
@@ -834,7 +843,8 @@ class PublicPresenceStore:
                 )
         if terminal_error is not None:
             raise terminal_error
-        assert result is not None
+        if result is None:
+            raise PublicPresenceStoreError("accepted bridge object was not persisted")
         return result
 
     def get_bridge_object(
@@ -1240,11 +1250,11 @@ class PublicPresenceStore:
                             "SELECT * FROM public_action_reservations WHERE reservation_id=?",
                             (reservation_id,),
                         ).fetchone()
-                        assert row is not None
-                        result = dict(row)
+                        result = dict(_required_row(row, "public action reservation"))
         if terminal_error is not None:
             raise terminal_error
-        assert result is not None
+        if result is None:
+            raise PublicPresenceStoreError("public action reservation was not persisted")
         return result
 
     def record_simulation_outcome(
@@ -1300,8 +1310,7 @@ class PublicPresenceStore:
                 "SELECT * FROM public_action_reservations WHERE reservation_id=?",
                 (safe_id,),
             ).fetchone()
-            assert result is not None
-            return dict(result)
+            return dict(_required_row(result, "public simulation outcome"))
 
     def list_audit_receipts(self, *, limit: int = 100) -> list[dict[str, Any]]:
         bounded = max(1, min(int(limit), 1_000))

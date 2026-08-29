@@ -13,6 +13,12 @@ import sys
 from pathlib import Path
 from urllib.parse import urlsplit
 
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+from jarvis.trusted_executables import trusted_path_executable
+
 
 class PublishSourceError(RuntimeError):
     """Raised when a repository is unsafe to use as a public push source."""
@@ -22,9 +28,26 @@ FORBIDDEN_PUSH_OPTIONS = frozenset({"--all", "--tags", "--mirror"})
 PUBLISH_MODES = frozenset({"candidate", "promotion", "tag"})
 
 
-def _git(repository: Path, *arguments: str, allow_missing: bool = False) -> str:
+def _resolve_trusted_git(repository: Path) -> Path:
+    executable = trusted_path_executable(
+        "git.exe" if sys.platform == "win32" else "git",
+        prohibited_roots=(repository,),
+    )
+    if executable is None:
+        raise PublishSourceError(
+            "a trusted OS-administered Git executable is unavailable"
+        )
+    return executable
+
+
+def _git(
+    git_executable: Path,
+    repository: Path,
+    *arguments: str,
+    allow_missing: bool = False,
+) -> str:
     completed = subprocess.run(
-        ["git", "-C", str(repository), *arguments],
+        [str(git_executable), "-C", str(repository), *arguments],
         check=False,
         capture_output=True,
         text=True,
@@ -95,10 +118,13 @@ def validate_push_arguments(arguments: list[str], mode: str, version_tag: str) -
         )
 
 
-def _check_promotion_is_fast_forward(repository: Path, head: str) -> None:
+def _check_promotion_is_fast_forward(
+    git_executable: Path, repository: Path, head: str
+) -> None:
     """Require the live public main tip to be present and ancestral to HEAD."""
 
     remote_output = _git(
+        git_executable,
         repository,
         "ls-remote",
         "--exit-code",
@@ -115,14 +141,24 @@ def _check_promotion_is_fast_forward(repository: Path, head: str) -> None:
     ):
         raise PublishSourceError("public main did not resolve to a full commit SHA-1")
     try:
-        _git(repository, "cat-file", "-e", f"{remote_main}^{{commit}}")
+        _git(
+            git_executable, repository, "cat-file", "-e", f"{remote_main}^{{commit}}"
+        )
     except PublishSourceError as error:
         raise PublishSourceError(
             "public main is not present in the exact checked local history"
         ) from error
 
     completed = subprocess.run(
-        ["git", "-C", str(repository), "merge-base", "--is-ancestor", remote_main, head],
+        [
+            str(git_executable),
+            "-C",
+            str(repository),
+            "merge-base",
+            "--is-ancestor",
+            remote_main,
+            head,
+        ],
         check=False,
         capture_output=True,
         text=True,
@@ -148,6 +184,7 @@ def check_public_publish_source(
     """Validate a disposable clone before an explicit-ref public push."""
 
     repository = repository.resolve()
+    git_executable = _resolve_trusted_git(repository)
     if mode not in PUBLISH_MODES:
         raise PublishSourceError("publish mode must be candidate, promotion, or tag")
     if not version_tag.startswith("v") or any(
@@ -155,7 +192,7 @@ def check_public_publish_source(
     ):
         raise PublishSourceError("version tag must be a compact v-prefixed name")
     completed = subprocess.run(
-        ["git", "check-ref-format", f"refs/tags/{version_tag}"],
+        [str(git_executable), "check-ref-format", f"refs/tags/{version_tag}"],
         check=False,
         capture_output=True,
     )
@@ -173,32 +210,44 @@ def check_public_publish_source(
     ):
         raise PublishSourceError("expected root must be a full 40-character SHA-1")
 
-    inside = _git(repository, "rev-parse", "--is-inside-work-tree")
+    inside = _git(git_executable, repository, "rev-parse", "--is-inside-work-tree")
     if inside != "true":
         raise PublishSourceError("repository is not a Git working tree")
-    if _git(repository, "status", "--porcelain=v1", "--untracked-files=all"):
+    if _git(
+        git_executable, repository, "status", "--porcelain=v1", "--untracked-files=all"
+    ):
         raise PublishSourceError("public publishing source must have a clean worktree")
 
-    head = _git(repository, "rev-parse", "HEAD").casefold()
+    head = _git(git_executable, repository, "rev-parse", "HEAD").casefold()
     if head != expected_commit:
         raise PublishSourceError("HEAD does not match the approved release commit")
-    if _git(repository, "branch", "--show-current") != "main":
+    if _git(git_executable, repository, "branch", "--show-current") != "main":
         raise PublishSourceError("the only local branch must be main")
     roots = list(
-        filter(None, _git(repository, "rev-list", "--max-parents=0", "HEAD").splitlines())
+        filter(
+            None,
+            _git(
+                git_executable, repository, "rev-list", "--max-parents=0", "HEAD"
+            ).splitlines(),
+        )
     )
     if [root.casefold() for root in roots] != [expected_root]:
         raise PublishSourceError(
             "public history must descend from the single approved sanitized root"
         )
-    if _git(repository, "rev-list", "--merges", "HEAD"):
+    if _git(git_executable, repository, "rev-list", "--merges", "HEAD"):
         raise PublishSourceError("public release history must remain linear")
 
     expected_refs = {"refs/heads/main"}
     if mode == "tag":
         expected_refs.add(f"refs/tags/{version_tag}")
     actual_refs = set(
-        filter(None, _git(repository, "for-each-ref", "--format=%(refname)").splitlines())
+        filter(
+            None,
+            _git(
+                git_executable, repository, "for-each-ref", "--format=%(refname)"
+            ).splitlines(),
+        )
     )
     if actual_refs != expected_refs:
         extra = sorted(actual_refs - expected_refs)
@@ -211,26 +260,46 @@ def check_public_publish_source(
         raise PublishSourceError("; ".join(detail))
 
     if mode == "tag":
-        tag_target = _git(repository, "rev-parse", f"{version_tag}^{{commit}}").casefold()
+        tag_target = _git(
+            git_executable, repository, "rev-parse", f"{version_tag}^{{commit}}"
+        ).casefold()
         if tag_target != expected_commit:
             raise PublishSourceError("the intended version tag does not point to HEAD")
-        if _git(repository, "cat-file", "-t", version_tag) != "commit":
+        if _git(git_executable, repository, "cat-file", "-t", version_tag) != "commit":
             raise PublishSourceError(
                 "use a lightweight release tag so no unreviewed tag identity is published"
             )
 
-    remotes = list(filter(None, _git(repository, "remote").splitlines()))
+    remotes = list(filter(None, _git(git_executable, repository, "remote").splitlines()))
     if remotes != ["public"]:
         raise PublishSourceError("the disposable clone must have exactly one remote: public")
 
     expected_remote = _normalized_https_github_url(remote_url)
     fetch_urls = list(
-        filter(None, _git(repository, "remote", "get-url", "--all", "public").splitlines())
+        filter(
+            None,
+            _git(
+                git_executable,
+                repository,
+                "remote",
+                "get-url",
+                "--all",
+                "public",
+            ).splitlines(),
+        )
     )
     push_urls = list(
         filter(
             None,
-            _git(repository, "remote", "get-url", "--push", "--all", "public").splitlines(),
+            _git(
+                git_executable,
+                repository,
+                "remote",
+                "get-url",
+                "--push",
+                "--all",
+                "public",
+            ).splitlines(),
         )
     )
     if len(fetch_urls) != 1 or len(push_urls) != 1:
@@ -241,17 +310,35 @@ def check_public_publish_source(
         raise PublishSourceError("public push URL does not match the approved repository")
 
     if mode == "promotion":
-        _check_promotion_is_fast_forward(repository, head)
+        _check_promotion_is_fast_forward(git_executable, repository, head)
 
-    if _git(repository, "config", "--get", "remote.public.mirror", allow_missing=True):
+    if _git(
+        git_executable,
+        repository,
+        "config",
+        "--get",
+        "remote.public.mirror",
+        allow_missing=True,
+    ):
         raise PublishSourceError("mirror remotes are forbidden for public publishing")
-    if _git(repository, "config", "--get-all", "remote.public.push", allow_missing=True):
+    if _git(
+        git_executable,
+        repository,
+        "config",
+        "--get-all",
+        "remote.public.push",
+        allow_missing=True,
+    ):
         raise PublishSourceError("configured push refspecs are forbidden; use explicit refs")
 
-    git_dir = Path(_git(repository, "rev-parse", "--absolute-git-dir"))
+    git_dir = Path(
+        _git(git_executable, repository, "rev-parse", "--absolute-git-dir")
+    )
     if (git_dir / "objects" / "info" / "alternates").exists():
         raise PublishSourceError("alternate object databases are forbidden")
-    unreachable = _git(repository, "fsck", "--full", "--no-reflogs", "--unreachable")
+    unreachable = _git(
+        git_executable, repository, "fsck", "--full", "--no-reflogs", "--unreachable"
+    )
     if unreachable:
         raise PublishSourceError("the disposable clone contains unreachable Git objects")
 

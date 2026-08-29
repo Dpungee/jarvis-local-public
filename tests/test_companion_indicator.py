@@ -6,6 +6,7 @@ from unittest import mock
 
 from jarvis.companion_indicator import (
     CompanionIndicatorClient,
+    _NoRedirectHandler,
     _show_windows_no_activate,
     _tk_geometry,
     indicator_presentation,
@@ -65,17 +66,16 @@ class CompanionIndicatorTests(unittest.TestCase):
             with self.subTest(state=state):
                 self.assertEqual(indicator_presentation(state).label, expected)
 
-    def test_indicator_stays_visible_for_operator_controllable_states(self):
-        self.assertFalse(indicator_should_be_visible(None))
-
-        visible_states = [
+    def test_indicator_is_visible_only_during_active_screen_observation(self):
+        hidden_states = [
+            None,
             {"mode": "disabled", "paused": True, "available": True},
             {"mode": "observe", "paused": True, "available": True},
             {"mode": "observe", "paused": False, "available": False},
         ]
-        for state in visible_states:
+        for state in hidden_states:
             with self.subTest(state=state):
-                self.assertTrue(indicator_should_be_visible(state))
+                self.assertFalse(indicator_should_be_visible(state))
 
         for mode in ("observe", "suggest", "collaborate"):
             with self.subTest(mode=mode):
@@ -139,6 +139,12 @@ class CompanionIndicatorTests(unittest.TestCase):
             })
         with self.assertRaises(ValueError):
             client.action_status("not-an-id")
+
+    def test_loopback_client_never_follows_redirects(self):
+        handler = _NoRedirectHandler()
+        self.assertIsNone(handler.redirect_request(
+            object(), None, 302, "Found", {}, "https://example.com/"
+        ))
 
 
 if __name__ == "__main__":

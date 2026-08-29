@@ -25,6 +25,7 @@ from .network_defense import (
     assess_network_defense,
     verify_assessment_receipt,
 )
+from .trusted_executables import windows_system_executable
 
 
 MAX_SCAN_HOSTS = 512
@@ -131,11 +132,11 @@ def _host_in_scope(value: Any, network: ipaddress.IPv4Network) -> ipaddress.IPv4
 def _powershell_json(script: str, *, timeout: float = 12.0) -> Any:
     if os.name != "nt":
         raise NetworkInventoryError("Private-LAN discovery currently requires Windows")
-    system_root = Path(os.environ.get("SystemRoot", r"C:\Windows"))
-    executable = (
-        system_root / "System32" / "WindowsPowerShell" / "v1.0" / "powershell.exe"
-    )
-    if not executable.is_file():
+    try:
+        executable = windows_system_executable(
+            "System32", "WindowsPowerShell", "v1.0", "powershell.exe"
+        )
+    except (OSError, PermissionError, ValueError):
         raise NetworkInventoryError("Windows PowerShell is unavailable")
     flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
     try:
@@ -901,7 +902,8 @@ class NetworkInventory:
             row = connection.execute(
                 "SELECT * FROM network_scopes WHERE scope_id=?", (scope_id,)
             ).fetchone()
-        assert row is not None
+        if row is None:
+            raise NetworkInventoryError("Paired network scope could not be persisted")
         return self._render_scope(row)
 
     def unpair_scope(self, scope_id: str) -> bool:
@@ -2462,7 +2464,10 @@ class NetworkInventory:
                 "SELECT * FROM network_incident_alerts WHERE incident_id=?",
                 (incident,),
             ).fetchone()
-        assert updated is not None
+        if updated is None:
+            raise NetworkInventoryError(
+                "Network incident diagnostic receipt could not be persisted"
+            )
         return self._verified_incident_alert(updated)
 
     def acknowledge_incident(
@@ -2552,7 +2557,8 @@ class NetworkInventory:
             updated = connection.execute(
                 "SELECT * FROM network_devices WHERE device_uuid=?", (normalized,)
             ).fetchone()
-        assert updated is not None
+        if updated is None:
+            raise NetworkInventoryError("Network device profile could not be persisted")
         rendered = self._render_rows(
             [updated], active=set(), cached=set(), new=set(),
             now=self.clock().astimezone(timezone.utc), include_identifiers=False,

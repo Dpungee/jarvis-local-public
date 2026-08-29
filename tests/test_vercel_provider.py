@@ -356,6 +356,29 @@ class VercelProviderTests(unittest.TestCase):
         self.assertNotIn("--follow", command)
         self.assert_safe_call(runner.calls[0], cwd=self.project, timeout_at_most=30)
 
+    def test_runtime_logs_and_errors_redact_secrets_without_breaking_json_lines(self) -> None:
+        token = "sk-proj-" + "R" * 24
+        lines = [
+            {"level": "error", "message": f"upstream leaked {token}"},
+            {"level": "info", "api_key": "ordinary-secret-value"},
+        ]
+        runner = FakeRunner({"stdout": "\n".join(json.dumps(line) for line in lines)})
+        provider = self.provider(runner)
+
+        result = provider.logs("dpl_abc123", project_path="site")
+
+        self.assertTrue(result.ok)
+        self.assertNotIn(token, result.stdout)
+        self.assertNotIn("ordinary-secret-value", result.stdout)
+        self.assertEqual(result.data["entries"][0]["message"], "upstream leaked [REDACTED]")
+        self.assertEqual(result.data["entries"][1]["api_key"], "[REDACTED]")
+
+        failed = self.provider(
+            FakeRunner(OSError(f"cannot start {token}"))
+        ).auth_status()
+        self.assertFalse(failed.ok)
+        self.assertNotIn(token, str(failed.error))
+
     def test_timeout_and_output_are_bounded(self) -> None:
         timeout = subprocess.TimeoutExpired(
             cmd=[self.cli, "inspect"],

@@ -878,7 +878,8 @@ class GoogleDriveProvider:
             if page_token is not None:
                 arguments["pageToken"] = page_token
             request = self._prepare(
-                "inventory preparation", lambda: service.files().list(**arguments)
+                "inventory preparation",
+                lambda arguments=arguments: service.files().list(**arguments),
             )
             response = self._execute(request, "inventory")
             raw_items = response.get("files", [])
@@ -1355,6 +1356,60 @@ class GoogleDriveProvider:
             **destination,
         }
 
+    def _download_approval_snapshot_with_service(
+        self,
+        service: Any,
+        file_id: str,
+        export_mime_type: str | None,
+    ) -> dict[str, Any]:
+        file_id = _validate_drive_id(file_id, label="File ID", allow_root=False)
+        current = self._item_snapshot_with_service(service, file_id)
+        if current["id"] != file_id:
+            raise GoogleDriveAPIError("Google Drive returned mismatched item metadata")
+        if current.get("trashed"):
+            raise GoogleDriveValidationError("A trashed Drive item cannot be downloaded")
+        if current.get("is_folder"):
+            raise GoogleDriveValidationError("Google Drive folders cannot be downloaded as files")
+        declared_size = current.get("size")
+        if declared_size is not None and declared_size > self.max_transfer_bytes:
+            raise GoogleDriveTransferLimitError(
+                f"Download exceeds the configured {self.max_transfer_bytes}-byte limit"
+            )
+        native_document = current["mime_type"].startswith(DRIVE_NATIVE_MIME_PREFIX)
+        normalized_export: str | None = None
+        if native_document:
+            if not export_mime_type:
+                raise GoogleDriveValidationError(
+                    "Google-native files require an explicit supported export MIME type"
+                )
+            normalized_export = _validate_mime_type(export_mime_type)
+            allowed_exports = _NATIVE_EXPORT_MIME_TYPES.get(current["mime_type"])
+            if allowed_exports is None or normalized_export not in allowed_exports:
+                raise GoogleDriveValidationError(
+                    "Requested Google-native export type is not supported"
+                )
+        elif export_mime_type is not None:
+            raise GoogleDriveValidationError(
+                "Export MIME type applies only to Google-native files"
+            )
+        return {
+            "drive_account_permission_id": self._account_permission_id_with_service(service),
+            "download_item": current,
+            "resolved_export_mime_type": normalized_export,
+        }
+
+    def download_approval_snapshot(
+        self,
+        file_id: str,
+        *,
+        export_mime_type: str | None = None,
+    ) -> dict[str, Any]:
+        """Bind a download approval to the exact account and remote item metadata."""
+        service, _ = self._service_client()
+        return self._download_approval_snapshot_with_service(
+            service, file_id, export_mime_type
+        )
+
     def download_file(
         self,
         file_id: str,
@@ -1362,6 +1417,7 @@ class GoogleDriveProvider:
         *,
         overwrite: bool = False,
         export_mime_type: str | None = None,
+        expected_approval_snapshot: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         file_id = _validate_drive_id(file_id, label="File ID", allow_root=False)
         destination = _workspace_local_path(
@@ -1378,20 +1434,31 @@ class GoogleDriveProvider:
                 "Download destination directory could not be created"
             ) from None
         service, dependencies = self._service_client()
-        metadata_request = self._prepare(
-            "metadata request preparation",
-            lambda: service.files().get(
-                fileId=file_id,
-                fields="id,name,mimeType,size,modifiedTime,parents",
-                supportsAllDrives=True,
-            ),
-        )
-        metadata = _normalize_item(self._execute(
-            metadata_request,
-            "metadata lookup",
-        ))
-        if metadata["id"] != file_id:
-            raise GoogleDriveAPIError("Google Drive returned mismatched item metadata")
+        if expected_approval_snapshot is not None:
+            if not isinstance(expected_approval_snapshot, dict):
+                raise PermissionError("Exact approved Google Drive download snapshot is required")
+            current_snapshot = self._download_approval_snapshot_with_service(
+                service, file_id, export_mime_type
+            )
+            if current_snapshot != expected_approval_snapshot:
+                raise PermissionError("Google Drive download target changed after approval")
+            metadata = current_snapshot["download_item"]
+            export_mime_type = current_snapshot["resolved_export_mime_type"]
+        else:
+            metadata_request = self._prepare(
+                "metadata request preparation",
+                lambda: service.files().get(
+                    fileId=file_id,
+                    fields="id,name,mimeType,size,modifiedTime,parents,trashed",
+                    supportsAllDrives=True,
+                ),
+            )
+            metadata = _normalize_item(self._execute(
+                metadata_request,
+                "metadata lookup",
+            ))
+            if metadata["id"] != file_id:
+                raise GoogleDriveAPIError("Google Drive returned mismatched item metadata")
         declared_size = metadata.get("size")
         if declared_size is not None and declared_size > self.max_transfer_bytes:
             raise GoogleDriveTransferLimitError(

@@ -15,6 +15,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from jarvis.agent import AgentRunCancelled
+from jarvis.approvals import approval_resource
 from jarvis.config import Config
 from jarvis.memory import Memory
 from jarvis.ollama_client import OllamaError
@@ -24,6 +25,7 @@ from jarvis.presence import (
     NetworkInventoryScanBusy,
     PresenceHTTPServer,
     PresenceRuntime,
+    _safe_approval,
     _interactive_approval_retry,
     normalize_presence_host,
     normalize_presence_port,
@@ -527,6 +529,57 @@ class _FakeRuntime:
 
 
 class PresenceHelpersTests(unittest.TestCase):
+    def test_large_desktop_approval_survives_persistence_and_presence_rendering(self):
+        actions = [
+            {
+                "type": "type_text",
+                "text": f"action-{index:02d}-" + ("x" * 1_800),
+            }
+            for index in range(1, 13)
+        ]
+        resource = approval_resource(
+            "desktop_interact",
+            {
+                "actions": actions,
+                "expected_context_sha256": "a" * 64,
+                "foreground": {
+                    "application": "notepad.exe",
+                    "title": "Reviewable draft",
+                    "left": 0,
+                    "top": 0,
+                    "right": 1200,
+                    "bottom": 800,
+                    "width": 1200,
+                    "height": 800,
+                    "context_sha256": "a" * 64,
+                },
+            },
+        )
+        self.assertGreater(len(resource), 2_000)
+        self.assertLessEqual(len(resource), 32_000)
+
+        with tempfile.TemporaryDirectory() as directory:
+            with Memory(Path(directory) / "jarvis.db") as memory:
+                _allowed, approval_id = memory.authorize_or_request(
+                    "control_desktop_application",
+                    resource,
+                    "This sends the exact bounded action batch shown.",
+                    approval_scope="conversation:1",
+                )
+                stored = memory.get_approval(approval_id)
+
+        rendered = _safe_approval(stored)
+        self.assertEqual(json.loads(rendered["resource"]), json.loads(resource))
+        parsed = json.loads(rendered["resource"])
+        self.assertIn("action-12-", parsed["arguments"]["action_12"])
+
+    def test_approval_view_preserves_complete_bounded_desktop_resource(self):
+        resource = "x" * 25_000
+
+        safe = _safe_approval({"id": 1, "resource": resource})
+
+        self.assertEqual(safe["resource"], resource)
+
     def test_project_creation_builds_a_typed_isolated_workspace(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -2335,6 +2388,21 @@ class PresenceHTTPTests(unittest.TestCase):
             self.assertIn("function isHistoricalConversationEvent", script)
             self.assertIn("if (isHistoricalConversationEvent(event)) continue", script)
             self.assertIn("createdAt < state.pageStartedAt - 2", script)
+            self.assertIn("function isCurrentConversationJob", script)
+            self.assertIn(
+                "state.activeJobs.get(payload.conversation_id) === payload.job_id",
+                script,
+            )
+            correlation = script[
+                script.index("function isCurrentConversationJob"):
+                script.index("async function pollEvents")
+            ]
+            self.assertIn("state.progressNodes.has(payload.job_id)", correlation)
+            self.assertIn("state.streamNodes.has(payload.job_id)", correlation)
+            self.assertIn(
+                "if (requiresCurrentJob && !isCurrentConversationJob(payload)) continue",
+                script,
+            )
             self.assertIn("function providerLabel", script)
             self.assertIn("OpenAI configured · unverified", script)
             self.assertIn("OpenAI circuit open", script)

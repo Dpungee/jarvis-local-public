@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import os
 import shutil
 import unittest
@@ -151,13 +152,48 @@ class TrustedDesktopTests(unittest.TestCase):
         process = Mock(pid=4242)
         with patch("jarvis.tools.subprocess.Popen", return_value=process) as popen:
             launched = json.loads(self.toolbox.execute(
-                "launch_artifact", {"path": "monitor.py"}
+                "launch_artifact", {
+                    "path": "monitor.py",
+                    "expected_sha256": hashlib.sha256(script.read_bytes()).hexdigest(),
+                }
             ))
         self.assertTrue(launched["ok"])
         self.assertEqual(launched["result"]["pid"], 4242)
+        self.assertEqual(
+            launched["result"]["sha256"],
+            hashlib.sha256(script.read_bytes()).hexdigest(),
+        )
         positional, keyword = popen.call_args
         self.assertIsInstance(positional[0], list)
         self.assertNotIn("shell", keyword)
+
+    def test_artifact_launch_rejects_stale_digest_and_hard_links(self):
+        script = self.workspace / "bounded.py"
+        script.write_text("print('approved')\n", encoding="utf-8")
+        approved = hashlib.sha256(script.read_bytes()).hexdigest()
+        script.write_text("print('changed')\n", encoding="utf-8")
+
+        with patch("jarvis.tools.subprocess.Popen") as popen:
+            stale = json.loads(self.toolbox.execute("launch_artifact", {
+                "path": "bounded.py",
+                "expected_sha256": approved,
+            }))
+        self.assertFalse(stale["ok"])
+        self.assertIn("differs from the expected", stale["error"])
+        popen.assert_not_called()
+
+        hard_link = self.workspace / "linked.py"
+        try:
+            os.link(script, hard_link)
+        except OSError:
+            self.skipTest("hard links are unavailable")
+        with patch("jarvis.tools.subprocess.Popen") as popen:
+            linked = json.loads(self.toolbox.execute(
+                "launch_artifact", {"path": "linked.py"}
+            ))
+        self.assertFalse(linked["ok"])
+        self.assertIn("non-linked", linked["error"])
+        popen.assert_not_called()
 
     def test_verified_powerpoint_opens_in_registered_desktop_application(self):
         deck = self.workspace / "research_deck.pptx"
@@ -311,6 +347,47 @@ class TrustedDesktopTests(unittest.TestCase):
             expected_context_sha256="a" * 64,
             actions=actions,
         )
+
+    def test_desktop_approval_shows_every_action_in_the_bounded_batch(self):
+        foreground = {
+            "application": "notepad.exe",
+            "title": "Notes",
+            "left": 0,
+            "top": 0,
+            "right": 800,
+            "bottom": 600,
+            "width": 800,
+            "height": 600,
+            "context_sha256": "c" * 64,
+            "excluded": False,
+            "exclusion_reason": None,
+        }
+        controller = Mock()
+        controller.snapshot.return_value = foreground
+        self.toolbox.desktop = controller
+        actions = [
+            {"type": "type_text", "text": f"Visible approval step {index}"}
+            for index in range(1, 13)
+        ]
+
+        with self.toolbox.approval_context("conversation:1"):
+            blocked = json.loads(self.toolbox.execute(
+                "desktop_interact", {"actions": actions}
+            ))
+
+        self.assertTrue(blocked["approval_required"])
+        approval = self.memory.get_approval(blocked["approval_id"])
+        resource = json.loads(approval["resource"])
+        visible = resource["arguments"]
+        self.assertEqual(visible["action_count"], 12)
+        self.assertEqual(visible["foreground_application"], "notepad.exe")
+        self.assertEqual(visible["foreground_title"], "Notes")
+        for index, action in enumerate(actions, start=1):
+            self.assertEqual(
+                json.loads(visible[f"action_{index:02d}"]),
+                action,
+            )
+        self.assertNotIn("preview", json.dumps(visible))
 
     def test_desktop_batch_fails_if_foreground_changes_after_authorization(self):
         first = {

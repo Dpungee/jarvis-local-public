@@ -6,18 +6,22 @@ import tempfile
 import unittest
 from dataclasses import replace
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import Mock, patch
 
+from jarvis import execution
 from jarvis.config import Config
 from jarvis.execution import (
     DOCKER_IMAGE,
     DockerBackend,
+    ExecutionHandle,
     HostBackend,
     build_execution_backend,
     docker_available,
+    docker_executable,
 )
 from jarvis.memory import Memory
 from jarvis.tools import ToolBox
-
 
 TEMP_ROOT = Path(__file__).resolve().parent / ".tmp"
 TEMP_ROOT.mkdir(exist_ok=True)
@@ -45,6 +49,141 @@ class ExecutionBackendTests(unittest.TestCase):
     def tearDown(self) -> None:
         shutil.rmtree(self.root)
 
+    def _trusted_docker(self) -> tuple[Path, Path]:
+        install_root = self.root / "machine-install"
+        executable = install_root / ("docker.exe" if os.name == "nt" else "docker")
+        executable.parent.mkdir()
+        executable.write_bytes(b"synthetic trusted docker")
+        return install_root, executable
+
+    def test_docker_resolution_ignores_poisoned_cwd_path_and_environment(self) -> None:
+        poison = self.root / "poison"
+        path_bin = poison / "path-bin"
+        local_app_data = poison / "LocalAppData"
+        program_files = poison / "ProgramFiles"
+        path_bin.mkdir(parents=True)
+        fake_name = "docker.exe" if os.name == "nt" else "docker"
+        fake_paths = (
+            poison / fake_name,
+            path_bin / fake_name,
+            local_app_data / "Docker" / "resources" / "bin" / fake_name,
+            program_files / "Docker" / "Docker" / "resources" / "bin" / fake_name,
+        )
+        for fake in fake_paths:
+            fake.parent.mkdir(parents=True, exist_ok=True)
+            fake.write_bytes(b"attacker controlled")
+        considered: list[Path] = []
+
+        def reject(candidate: Path) -> None:
+            considered.append(Path(candidate))
+
+        previous = Path.cwd()
+        try:
+            os.chdir(poison)
+            with (
+                patch.dict(
+                    os.environ,
+                    {
+                        "PATH": str(path_bin),
+                        "LOCALAPPDATA": str(local_app_data),
+                        "ProgramFiles": str(program_files),
+                    },
+                    clear=False,
+                ),
+                patch.object(
+                    execution,
+                    "trusted_install_file",
+                    side_effect=reject,
+                ),
+                patch.object(execution.subprocess, "run") as run,
+            ):
+                self.assertIsNone(docker_executable())
+                self.assertFalse(docker_available())
+                run.assert_not_called()
+        finally:
+            os.chdir(previous)
+        considered_paths = {
+            str(Path(os.path.abspath(candidate))).casefold()
+            for candidate in considered
+        }
+        for fake in fake_paths:
+            self.assertNotIn(str(fake.resolve()).casefold(), considered_paths)
+
+    def test_docker_resolution_requires_an_absolute_trusted_install_file(self) -> None:
+        trusted_root, trusted = self._trusted_docker()
+        untrusted = self.root / "user-writable" / trusted.name
+        untrusted.parent.mkdir()
+        untrusted.write_bytes(b"attacker controlled")
+        with (
+            patch.object(
+                execution,
+                "_docker_install_candidates",
+                return_value=(trusted,),
+            ),
+            patch(
+                "jarvis.trusted_executables._trusted_install_roots",
+                return_value=(trusted_root.resolve(),),
+            ),
+        ):
+            self.assertEqual(docker_executable(), str(trusted.resolve()))
+            self.assertEqual(
+                docker_executable(str(trusted.resolve())),
+                str(trusted.resolve()),
+            )
+            self.assertIsNone(docker_executable(trusted.name))
+            self.assertIsNone(docker_executable(untrusted.resolve()))
+
+    def test_one_trusted_docker_path_is_bound_to_verify_run_and_removal(self) -> None:
+        trusted_root, trusted = self._trusted_docker()
+        trusted = trusted.resolve()
+        completed = SimpleNamespace(returncode=0, stdout="27.0.1\n")
+        with (
+            patch(
+                "jarvis.trusted_executables._trusted_install_roots",
+                return_value=(trusted_root.resolve(),),
+            ),
+            patch.object(execution.subprocess, "run", return_value=completed) as run,
+        ):
+            self.assertTrue(docker_available(executable=trusted))
+        availability = run.call_args
+        self.assertEqual(availability.args[0][0], str(trusted))
+        self.assertEqual(availability.kwargs["cwd"], trusted.parent)
+        self.assertEqual(availability.kwargs["env"]["PATH"], str(trusted.parent))
+
+        with (
+            patch(
+                "jarvis.trusted_executables._trusted_install_roots",
+                return_value=(trusted_root.resolve(),),
+            ),
+            patch.object(execution, "docker_available", return_value=True) as available,
+        ):
+            backend = DockerBackend(self.workspace, executable=str(trusted))
+        available.assert_called_once_with(executable=str(trusted))
+        command = backend.command_for(
+            "python", ["script.py"], cwd=self.workspace, process_name="unit-test"
+        )
+        self.assertEqual(command[0], str(trusted))
+
+        handle = ExecutionHandle(
+            process=Mock(),
+            job=Mock(),
+            backend="docker",
+            container_name="jarvis-unit-test",
+            docker=str(trusted),
+        )
+        with (
+            patch.object(execution, "_terminate_process_tree"),
+            patch.object(execution.subprocess, "run") as remove,
+        ):
+            handle.terminate()
+        removal = remove.call_args
+        self.assertEqual(
+            removal.args[0],
+            [str(trusted), "rm", "--force", "jarvis-unit-test"],
+        )
+        self.assertEqual(removal.kwargs["cwd"], trusted.parent)
+        self.assertEqual(removal.kwargs["env"]["PATH"], str(trusted.parent))
+
     def test_backend_selection_preserves_host_default(self) -> None:
         config = replace(
             Config.load(), workspace=self.workspace, data_dir=self.data_dir,
@@ -53,7 +192,14 @@ class ExecutionBackendTests(unittest.TestCase):
         self.assertIsInstance(build_execution_backend(config), HostBackend)
 
     def test_docker_command_is_ephemeral_networkless_and_resource_bounded(self) -> None:
-        backend = DockerBackend(self.workspace, executable="docker", verify=False)
+        trusted_root, trusted = self._trusted_docker()
+        with patch(
+            "jarvis.trusted_executables._trusted_install_roots",
+            return_value=(trusted_root.resolve(),),
+        ):
+            backend = DockerBackend(
+                self.workspace, executable=str(trusted), verify=False
+            )
         command = backend.command_for(
             "python", ["script.py"], cwd=self.workspace, process_name="unit-test"
         )
@@ -75,7 +221,14 @@ class ExecutionBackendTests(unittest.TestCase):
         self.assertNotIn(str(self.data_dir.resolve()), rendered)
 
     def test_docker_refuses_secret_bearing_or_linked_workspaces(self) -> None:
-        backend = DockerBackend(self.workspace, executable="docker", verify=False)
+        trusted_root, trusted = self._trusted_docker()
+        with patch(
+            "jarvis.trusted_executables._trusted_install_roots",
+            return_value=(trusted_root.resolve(),),
+        ):
+            backend = DockerBackend(
+                self.workspace, executable=str(trusted), verify=False
+            )
         (self.workspace / ".env").write_text("TOKEN=secret\n", encoding="utf-8")
         with self.assertRaisesRegex(PermissionError, "protected workspace file"):
             backend.command_for("python", ["script.py"], cwd=self.workspace, process_name="x")

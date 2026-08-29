@@ -1090,6 +1090,7 @@ const utilityCopy = {
   artifacts: ["Project workspace", "Project files", "Code, research, documents, images, datasets, and exports from the active project only."],
   scheduled: ["Automation", "Scheduled", "Queued tasks, recurring learning, and approved proactive work."],
   dispatch: ["Agent system", "Dispatch", "Live specialist assignments and model routing managed by Jarvis."],
+  performance: ["Prompt-free telemetry", "Performance", "See how quickly and reliably Jarvis has completed recent work. This view never reads prompts, messages, or tool arguments."],
   devices: ["Private devices", "Devices", "Review devices Jarvis has observed on paired private networks and endpoints Windows already reports as paired over Bluetooth."],
   companion: ["Opt-in assistance", "Screen Companion", "Let Jarvis observe the active window, suggest help, or run operator-authored routines with existing approvals."],
   "public-presence": ["Separate security domain", "Public Presence", "Inspect the disconnected public identity foundation and independently pause or emergency-stop all social activity."],
@@ -1135,6 +1136,7 @@ async function openUtility(view) {
   if (view === "artifacts") await renderArtifacts(generation);
   if (view === "scheduled") await renderSchedule(generation);
   if (view === "dispatch") renderDispatch();
+  if (view === "performance") await renderPerformance(generation);
   if (view === "devices") await renderNetworkInventory(generation);
   if (view === "companion") await renderCompanion(generation);
   if (view === "public-presence") await renderPublicPresence(generation);
@@ -1499,6 +1501,120 @@ function renderDispatch() {
     grid.append(card);
   }
   content.append(grid);
+}
+
+function formatMetricMilliseconds(summary) {
+  if (
+    !summary
+    || summary.p95 === null
+    || summary.p95 === undefined
+    || !Number.isFinite(Number(summary.p95))
+  ) return "Not enough data";
+  const milliseconds = Number(summary.p95);
+  return milliseconds >= 1000
+    ? `${(milliseconds / 1000).toFixed(milliseconds >= 10000 ? 1 : 2)} sec p95`
+    : `${Math.round(milliseconds)} ms p95`;
+}
+
+function performanceCard(titleText, summary, target, detail) {
+  const card = document.createElement("article");
+  card.className = "utility-card performance-card";
+  const head = document.createElement("div");
+  head.className = "utility-card-head";
+  const title = document.createElement("h3");
+  title.textContent = titleText;
+  const measured = Number(summary?.p95);
+  const hasMeasurement = Boolean(
+    summary
+    && summary.p95 !== null
+    && summary.p95 !== undefined
+    && Number.isFinite(measured)
+  );
+  head.append(title, makePill(
+    !hasMeasurement ? "learning" : measured <= target ? "on target" : "review",
+  ));
+  const value = document.createElement("strong");
+  value.className = "performance-value";
+  value.textContent = formatMetricMilliseconds(summary);
+  const copy = document.createElement("p");
+  copy.textContent = detail;
+  const samples = document.createElement("small");
+  samples.textContent = summary?.samples
+    ? `${summary.samples} measured requests · target under ${target >= 1000 ? `${target / 1000} sec` : `${target} ms`}`
+    : "Jarvis will show a measured percentile after completed requests are available.";
+  card.append(head, value, copy, samples);
+  return card;
+}
+
+async function renderPerformance(generation = null) {
+  const render = beginUtilityRender("performance", generation);
+  if (!render) return;
+  const {content} = render;
+  content.replaceChildren(emptyUtility("Loading prompt-free performance measurements…"));
+  const result = await api("/api/performance?limit=200");
+  if (!isUtilityRenderCurrent(render)) return;
+  content.replaceChildren();
+
+  const summary = document.createElement("section");
+  summary.className = "utility-card performance-summary";
+  const summaryHead = document.createElement("div");
+  const heading = document.createElement("h3");
+  heading.textContent = result.records
+    ? `${result.records} measured recent requests`
+    : "Performance measurements are ready";
+  const description = document.createElement("p");
+  description.textContent = result.records
+    ? `Measured through ${formatTimestamp(result.window?.newest_finished_at)}. Percentiles show the slower edge of normal recent work, not a promise for every provider or task.`
+    : "Use Jarvis normally and this page will fill with real queue, response, model, and tool measurements.";
+  summaryHead.append(heading, description);
+  const privacy = makePill("prompt-free");
+  summary.append(summaryHead, privacy);
+  content.append(summary);
+
+  const grid = document.createElement("div");
+  grid.className = "utility-grid performance-grid";
+  grid.append(
+    performanceCard(
+      "Queue wait",
+      result.latency?.queue_ms,
+      Number(result.targets?.queue_p95_ms) || 250,
+      "Time spent waiting for an available Jarvis worker.",
+    ),
+    performanceCard(
+      "First visible response",
+      result.latency?.first_visible_ms,
+      Number(result.targets?.first_visible_p95_ms) || 2000,
+      "Time until the first visible assistant output when that measurement is available.",
+    ),
+    performanceCard(
+      "Simple no-tool request",
+      result.latency?.no_tool_total_ms,
+      Number(result.targets?.no_tool_total_p95_ms) || 5000,
+      "End-to-end time for requests that did not need a tool.",
+    ),
+  );
+  content.append(grid);
+
+  const routeSection = document.createElement("section");
+  const routeTitle = document.createElement("h3");
+  routeTitle.className = "utility-section-title";
+  routeTitle.textContent = "Recent routing";
+  routeSection.append(routeTitle);
+  const routes = document.createElement("div");
+  routes.className = "utility-list";
+  const routeRows = [
+    ["Providers", result.routes?.providers || []],
+    ["Models", result.routes?.models || []],
+    ["Profiles", result.routes?.profiles || []],
+  ];
+  for (const [label, values] of routeRows) {
+    const text = values.length
+      ? values.map((item) => `${item.name} (${item.count})`).join(" · ")
+      : "No measured values yet";
+    routes.append(scheduledRow(label, text, values.length ? "measured" : "learning"));
+  }
+  routeSection.append(routes);
+  content.append(routeSection);
 }
 
 function formatObservedDuration(value) {

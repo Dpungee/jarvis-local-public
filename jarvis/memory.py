@@ -25,9 +25,20 @@ from .claim_clock import (
     protected_predicate,
     source_key as claim_source_key,
 )
+from .memory_retrieval import (
+    MAX_MEMORY_QUERY_TERMS,
+    MAX_MEMORY_SEARCH_CANDIDATES,
+    _memory_fts_query,
+    _memory_like_terms,
+    _memory_query_terms,
+    _memory_tokens,
+    _normalize_memory_token,
+    _rank_memory_rows,
+)
 from .redaction import (
     contains_secret, is_redacted_descriptor, is_sensitive_key, redact_secrets,
 )
+from .run_observability import aggregate_run_metrics, sanitize_run_metrics
 from .specialists import (
     SPECIALISTS,
     SPECIALIST_BY_KEY,
@@ -76,8 +87,6 @@ MAX_WORKER_ID_CHARS = 500
 MAX_SEARCH_QUERY_CHARS = 5_000
 MAX_TASK_RESULT_CHARS = 100_000
 MAX_TASK_ERROR_CHARS = 10_000
-MAX_MEMORY_QUERY_TERMS = 8
-MAX_MEMORY_SEARCH_CANDIDATES = 2_000
 MAX_QUERY_EMBEDDING_CACHE = 2_048
 
 
@@ -100,13 +109,6 @@ _EXPLICIT_USER_POSTAL_CODE = re.compile(
     re.I,
 )
 
-_MEMORY_SEARCH_STOPWORDS = frozenset({
-    "about", "after", "also", "been", "before", "could", "does", "explain",
-    "from", "have", "into", "just", "more", "please", "should", "tell", "than",
-    "that", "their", "there", "these", "they", "this", "using", "what", "when",
-    "where", "which", "with", "would", "your",
-})
-_LIKE_LITERAL_EDGE_CHARS = "\"'`.,!?;:()[]{}<>"
 _AMBIGUOUS_LEARNING_REFERENCE = re.compile(
     r"\b(?:all|any|some)\s+of\s+(?:those|these|them)\b|"
     r"\b(?:do|add|install|remove|delete|upload|send|build|fix)\s+(?:it|that|those|these|them)\b",
@@ -213,163 +215,6 @@ def _escape_like(value: str) -> str:
 
 def _bounded_limit(value: int, maximum: int) -> int:
     return max(0, min(int(value), maximum))
-
-
-def _normalize_memory_token(token: str) -> str:
-    """Apply a deliberately small amount of stemming for durable-memory lookup."""
-    token = token.casefold()
-    if len(token) > 4 and token.endswith("ies"):
-        return token[:-3] + "y"
-    if len(token) > 4 and token.endswith("es") and token[-3] in "sxz":
-        return token[:-2]
-    if len(token) > 3 and token.endswith("s") and not token.endswith(("ss", "us", "is")):
-        return token[:-1]
-    return token
-
-
-def _memory_tokens(value: str, *, meaningful_only: bool) -> list[str]:
-    tokens = [
-        _normalize_memory_token(token)
-        for token in re.findall(r"[^\W_]+", str(value).casefold(), flags=re.UNICODE)
-    ]
-    if meaningful_only:
-        tokens = [
-            token
-            for token in tokens
-            if len(token) >= 2 and token not in _MEMORY_SEARCH_STOPWORDS
-        ]
-    return tokens
-
-
-def _memory_query_terms(query: str) -> list[str]:
-    """Return bounded, de-duplicated terms while retaining query order."""
-    terms: list[str] = []
-    for token in _memory_tokens(query, meaningful_only=True):
-        if token not in terms:
-            terms.append(token)
-        if len(terms) >= MAX_MEMORY_QUERY_TERMS:
-            break
-    return terms
-
-
-def _memory_like_terms(query: str, semantic_terms: list[str]) -> list[str]:
-    """Keep SQL wildcard characters literal without weakening semantic ranking."""
-    literal_terms = []
-    for raw in query.casefold().split():
-        raw = raw.strip(_LIKE_LITERAL_EDGE_CHARS)
-        if len(raw) > 2 and ("%" in raw or "_" in raw):
-            literal_terms.append(raw)
-    literal_semantic_terms = set(
-        _memory_tokens(" ".join(literal_terms), meaningful_only=True)
-    )
-    semantic_candidates: list[str] = []
-    for term in semantic_terms:
-        if term in literal_semantic_terms:
-            continue
-        semantic_candidates.append(term)
-        if len(term) > 3 and term.endswith("y") and term[-2] not in "aeiou":
-            # LIKE cannot apply the token normalization used by the final ranker.
-            semantic_candidates.append(term[:-1] + "ies")
-    ordered = [*literal_terms, *semantic_candidates]
-    unique: list[str] = []
-    for term in ordered:
-        if term not in unique:
-            unique.append(term)
-        if len(unique) >= MAX_MEMORY_QUERY_TERMS * 2:
-            break
-    return unique
-
-
-def _memory_fts_query(query: str, query_terms: list[str]) -> str | None:
-    """Build a literal OR query; wildcard-bearing input keeps the LIKE fallback."""
-    if not query_terms or "%" in query or "_" in query:
-        return None
-    quoted = [f'"{term.replace(chr(34), chr(34) * 2)}"' for term in query_terms]
-    return " OR ".join(quoted)
-
-
-def _rank_memory_rows(
-    rows: list[sqlite3.Row],
-    query_terms: list[str],
-    *,
-    keep_id: bool = False,
-) -> list[dict[str, Any]]:
-    """Rank candidates by query coverage, phrase fidelity, then BM25 relevance."""
-    if not rows or not query_terms:
-        return []
-
-    documents = [_memory_tokens(row["content"], meaningful_only=False) for row in rows]
-    document_frequencies = Counter(
-        term
-        for tokens in documents
-        for term in set(tokens).intersection(query_terms)
-    )
-    average_length = sum(len(tokens) for tokens in documents) / max(1, len(documents))
-    normalized_query = " ".join(query_terms)
-    scored: list[tuple[tuple[float, ...], sqlite3.Row]] = []
-
-    for row, tokens in zip(rows, documents, strict=True):
-        row_keys = set(row.keys())
-        frequencies = Counter(tokens)
-        matched = [term for term in query_terms if frequencies[term]]
-        if not matched:
-            # The SQL prefilter is substring-based; discard accidental partial matches.
-            continue
-        coverage = len(matched) / len(query_terms)
-        normalized_document = " ".join(tokens)
-        exact_document = float(normalized_document == normalized_query)
-        phrase_match = float(normalized_query in normalized_document)
-        length_ratio = len(tokens) / max(1.0, average_length)
-        bm25 = 0.0
-        for term in matched:
-            frequency = frequencies[term]
-            frequency_weight = (
-                frequency * 2.2
-                / (frequency + 1.2 * (0.25 + 0.75 * length_ratio))
-            )
-            inverse_frequency = math.log(
-                1.0
-                + (len(rows) - document_frequencies[term] + 0.5)
-                / (document_frequencies[term] + 0.5)
-            )
-            bm25 += inverse_frequency * frequency_weight
-        density = len(matched) / max(1, len(tokens))
-        resolved_uses = (
-            max(0, int(row["utility_resolved"] or 0))
-            if "utility_resolved" in row_keys
-            else 0
-        )
-        successful_uses = (
-            max(0, int(row["utility_successes"] or 0))
-            if "utility_successes" in row_keys
-            else 0
-        )
-        observed_utility = (successful_uses + 2.0) / (resolved_uses + 4.0)
-        learned_utility = 0.5 + (
-            observed_utility - 0.5
-        ) * min(1.0, resolved_uses / 10.0)
-        score = (
-            coverage,
-            exact_document,
-            phrase_match,
-            learned_utility,
-            bm25,
-            density,
-            float(row["id"]),
-        )
-        scored.append((score, row))
-
-    scored.sort(key=lambda item: item[0], reverse=True)
-    results: list[dict[str, Any]] = []
-    for _, row in scored:
-        result = dict(row)
-        result.pop("utility_resolved", None)
-        result.pop("utility_successes", None)
-        memory_id = result.pop("id", None)
-        if keep_id and memory_id is not None:
-            result["memory_id"] = int(memory_id)
-        results.append(result)
-    return results
 
 
 class Memory:
@@ -4114,34 +3959,12 @@ class Memory:
                 redact_secrets(str(error)), MAX_TASK_ERROR_CHARS, "presence error"
             )
         )
-        allowed_counts = {
-            "queue_ms", "total_ms", "agent_total_ms", "time_to_first_token_ms",
-            "model_latency_ms", "model_attempts", "retries", "context_chars",
-            "estimated_prompt_tokens", "tool_calls",
-        }
-        allowed_text = {
-            "provider", "model", "profile", "task_contract_status",
-        }
-        safe_metrics: dict[str, Any] = {}
-        for key, value in dict(metrics or {}).items():
-            if value is None:
-                continue
-            if key in allowed_counts:
-                if isinstance(value, bool) or not isinstance(value, int) or value < 0:
-                    raise ValueError(
-                        f"Presence metric {key} must be a non-negative integer"
-                    )
-                safe_metrics[key] = min(value, 2**63 - 1)
-            elif key in allowed_text:
-                safe_metrics[key] = _validated_nonsecret_metadata(
-                    value, f"Presence metric {key}"
-                )[:200]
-            elif key == "streamed":
-                if not isinstance(value, bool):
-                    raise TypeError("Presence metric streamed must be a boolean")
-                safe_metrics[key] = value
-            else:
-                raise ValueError(f"Unsupported Presence metric: {key}")
+        try:
+            safe_metrics = sanitize_run_metrics(metrics)
+        except ValueError as exc:
+            if str(exc) == "unsupported run metric field":
+                raise ValueError("Unsupported Presence metric") from None
+            raise
         metrics_json = json.dumps(
             safe_metrics,
             ensure_ascii=True,
@@ -4160,6 +3983,51 @@ class Memory:
                 ),
             )
         return updated.rowcount == 1
+
+    def presence_performance_summary(
+        self,
+        *,
+        hours: int = 24,
+        limit: int = 5_000,
+        build_id: str | None = None,
+        cohort: str | None = None,
+    ) -> dict[str, Any]:
+        """Aggregate bounded prompt-free Presence telemetry for operators."""
+
+        if isinstance(hours, bool) or not isinstance(hours, int) or not 1 <= hours <= 720:
+            raise ValueError("hours must be an integer between 1 and 720")
+        if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 20_000:
+            raise ValueError("limit must be an integer between 1 and 20000")
+        cutoff = (_as_utc() - timedelta(hours=hours)).isoformat()
+        rows = self.db.execute(
+            """SELECT status, metrics_json FROM presence_jobs
+               WHERE finished_at IS NOT NULL AND finished_at>=?
+               ORDER BY finished_at DESC LIMIT ?""",
+            (cutoff, limit),
+        ).fetchall()
+        records: list[dict[str, Any]] = []
+        discarded = 0
+        for row in rows:
+            try:
+                decoded = json.loads(str(row["metrics_json"] or "{}"))
+                if not isinstance(decoded, dict):
+                    raise ValueError("metrics row is not an object")
+                decoded.setdefault("status", str(row["status"]))
+                records.append(sanitize_run_metrics(decoded))
+            except (TypeError, ValueError, json.JSONDecodeError):
+                discarded += 1
+        summary = aggregate_run_metrics(
+            records,
+            build_id=build_id,
+            cohort=cohort,
+        )
+        summary.update({
+            "window_hours": hours,
+            "row_limit": limit,
+            "discarded_records": discarded,
+            "truncated": len(rows) == limit,
+        })
+        return summary
 
     @staticmethod
     def _presence_pairing_code(value: Any) -> str:

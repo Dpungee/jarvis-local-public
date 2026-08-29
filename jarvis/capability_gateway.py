@@ -28,10 +28,35 @@ _BLOCKED_HEADERS = frozenset({
     "proxy-connection", "set-cookie", "transfer-encoding",
 })
 _PROPERTY_TYPES = frozenset({"boolean", "integer", "number", "string"})
+_REDACTED = "[REDACTED]"
 
 
 class ConnectorError(ValueError):
     """A connector manifest or invocation failed closed."""
+
+
+def _sanitize_connector_value(value: Any, exact_credential: str | None) -> Any:
+    """Scrub the loaded credential before generic redaction or serialization."""
+    if isinstance(value, str):
+        text = value
+        if exact_credential:
+            text = text.replace(exact_credential, _REDACTED)
+        return redact_secrets(text)
+    if isinstance(value, dict):
+        sanitized: dict[Any, Any] = {}
+        for key, item in value.items():
+            safe_key = (
+                _sanitize_connector_value(key, exact_credential)
+                if isinstance(key, str)
+                else key
+            )
+            sanitized[safe_key] = _sanitize_connector_value(item, exact_credential)
+        return sanitized
+    if isinstance(value, list):
+        return [_sanitize_connector_value(item, exact_credential) for item in value]
+    if isinstance(value, tuple):
+        return tuple(_sanitize_connector_value(item, exact_credential) for item in value)
+    return value
 
 
 def _ordinary_file(path: Path) -> bytes:
@@ -615,33 +640,46 @@ class CapabilityGateway:
         if request["data"] is not None:
             headers["Content-Type"] = "application/json"
         credential = request["credential"]
+        exact_credential: str | None = None
         if credential["kind"] != "none":
-            secret = os.getenv(credential["environment"])
-            if not secret:
+            exact_credential = os.getenv(credential["environment"])
+            if not exact_credential:
                 raise ConnectorError(
                     f"Connector credential is not configured: {credential['environment']}"
                 )
             if credential["kind"] == "bearer_env":
-                headers["Authorization"] = f"Bearer {secret}"
+                headers["Authorization"] = f"Bearer {exact_credential}"
             else:
-                headers[credential["header"]] = secret
-        raw = transport(
-            request["url"],
-            request["data"],
-            headers,
-            allow_redirects=False,
-        )
-        safe = redact_secrets(raw)
+                headers[credential["header"]] = exact_credential
+        transport_error: str | None = None
+        try:
+            raw = transport(
+                request["url"],
+                request["data"],
+                headers,
+                allow_redirects=False,
+            )
+        except Exception as exc:
+            transport_error = _sanitize_connector_value(str(exc), exact_credential)
+            raw = ""
+        if transport_error is not None:
+            # Raise after leaving the except block so the secret-bearing exception
+            # is not retained as __context__ on the public gateway error.
+            raise ConnectorError(f"Connector request failed: {transport_error}")
+        safe = _sanitize_connector_value(str(raw), exact_credential)
         if len(safe) > MAX_RESPONSE_CHARACTERS:
             safe = safe[:12_000] + "\n...[connector response clipped]...\n" + safe[-12_000:]
         try:
             result: Any = json.loads(safe)
         except json.JSONDecodeError:
             result = safe
-        return {
-            "connector": snapshot["connector_id"],
-            "action": snapshot["action"],
-            "method": snapshot["request_method"],
-            "url": snapshot["request_url"],
-            "result": result,
-        }
+        return _sanitize_connector_value(
+            {
+                "connector": snapshot["connector_id"],
+                "action": snapshot["action"],
+                "method": snapshot["request_method"],
+                "url": snapshot["request_url"],
+                "result": result,
+            },
+            exact_credential,
+        )

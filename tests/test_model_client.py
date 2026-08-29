@@ -4,6 +4,7 @@ import io
 import http.client
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -30,6 +31,7 @@ from jarvis.model_client import (
     _anthropic_messages,
     _openai_input,
     _HTTPConnectionCancellation,
+    _claude_cli_launchable,
     _codex_cli_launchable,
     _codex_cli_skill_config_override,
     _CodexAppServerConversation,
@@ -37,6 +39,7 @@ from jarvis.model_client import (
     _CodexAppServerTurn,
     _resolved_winget_link,
     _validated_native_executable,
+    _windows_cli_publisher_matches,
     build_model_client,
     isolated_codex_cli_home,
     model_conversation_scope,
@@ -638,7 +641,9 @@ class CodexCLIProviderTests(unittest.TestCase):
             },
             clear=True,
         ), patch("jarvis.model_client.subprocess.run") as run:
-            run.return_value = subprocess.CompletedProcess([], 0, None, None)
+            run.return_value = subprocess.CompletedProcess(
+                [], 0, "codex-cli 0.146.1\n", ""
+            )
             self.assertTrue(_codex_cli_launchable(Path("codex.exe")))
 
         args, options = run.call_args
@@ -648,8 +653,102 @@ class CodexCLIProviderTests(unittest.TestCase):
         self.assertNotIn("SSH_AUTH_SOCK", options["env"])
         self.assertNotIn("shell", options)
         self.assertIs(options["stdin"], subprocess.DEVNULL)
-        self.assertIs(options["stdout"], subprocess.DEVNULL)
-        self.assertIs(options["stderr"], subprocess.DEVNULL)
+        self.assertTrue(options["capture_output"])
+
+    def test_claude_native_launch_probe_requires_vendor_version_output(self):
+        with patch("jarvis.model_client.subprocess.run") as run:
+            run.return_value = subprocess.CompletedProcess(
+                [], 0, "2.1.56 (Claude Code)\n", ""
+            )
+            self.assertTrue(_claude_cli_launchable(Path("C:/trusted/claude.exe")))
+            run.return_value = subprocess.CompletedProcess([], 0, "Python 3.13.7\n", "")
+            self.assertFalse(_claude_cli_launchable(Path("C:/trusted/claude.exe")))
+
+    def test_windows_cli_publisher_requires_valid_exact_vendor(self):
+        if os.name != "nt":
+            self.skipTest("Windows Authenticode validation")
+        powershell = Path(
+            "C:/Windows/System32/WindowsPowerShell/v1.0/powershell.exe"
+        )
+        outcomes = (
+            ("Valid\nOpenAI OpCo, LLC\n", True),
+            ("NotSigned\n\n", False),
+            ("HashMismatch\nOpenAI OpCo, LLC\n", False),
+            ("Valid\nUnrelated Publisher LLC\n", False),
+        )
+        with patch(
+            "jarvis.model_client.windows_directory", return_value=Path("C:/Windows")
+        ), patch(
+            "jarvis.model_client.windows_system_executable", return_value=powershell
+        ), patch(
+            "jarvis.model_client.subprocess.run"
+        ) as run:
+            for output, accepted in outcomes:
+                with self.subTest(output=output):
+                    run.return_value = subprocess.CompletedProcess([], 0, output, "")
+                    self.assertEqual(
+                        _windows_cli_publisher_matches(
+                            Path("C:/fixed/codex.exe"), "OpenAI OpCo, LLC"
+                        ),
+                        accepted,
+                    )
+        args, options = run.call_args
+        self.assertEqual(args[0][0], str(powershell))
+        self.assertNotIn("C:/fixed/codex.exe", args[0])
+        self.assertEqual(
+            options["env"]["JARVIS_CLI_SIGNATURE_TARGET"],
+            "C:\\fixed\\codex.exe",
+        )
+
+    def test_unsigned_fixed_cli_is_rejected_before_version_probe(self):
+        if os.name != "nt":
+            self.skipTest("Windows Authenticode validation")
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            claude = root / "claude.exe"
+            codex = root / "codex.exe"
+            claude.write_bytes(b"MZ\x00\x00synthetic")
+            codex.write_bytes(b"MZ\x00\x00synthetic")
+            with patch.dict("os.environ", {}, clear=True), patch(
+                "jarvis.model_client._resolved_winget_link",
+                side_effect=lambda name: claude if name == "claude.exe" else codex,
+            ), patch(
+                "jarvis.model_client.trusted_path_executable", return_value=None
+            ), patch(
+                "jarvis.model_client._windows_cli_publisher_matches", return_value=False
+            ), patch(
+                "jarvis.model_client._claude_cli_launchable",
+                side_effect=AssertionError("unsigned Claude binary was executed"),
+            ), patch(
+                "jarvis.model_client._codex_cli_launchable",
+                side_effect=AssertionError("unsigned Codex binary was executed"),
+            ):
+                self.assertIsNone(resolve_claude_cli_executable())
+                self.assertIsNone(resolve_codex_cli_executable())
+
+    def test_cli_resolvers_never_execute_current_directory_or_path_binaries(self):
+        if os.name != "nt":
+            self.skipTest("Windows executable search order")
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            for name in ("claude.exe", "codex.exe"):
+                shutil.copy2(sys.executable, root / name)
+            previous = Path.cwd()
+            os.chdir(root)
+            try:
+                with patch.dict(
+                    "os.environ", {"PATH": str(root)}, clear=True
+                ), patch(
+                    "jarvis.model_client._resolved_winget_link", return_value=None
+                ), patch(
+                    "jarvis.model_client.subprocess.run",
+                    side_effect=AssertionError("poisoned CLI must never execute"),
+                ) as run:
+                    self.assertIsNone(resolve_claude_cli_executable())
+                    self.assertIsNone(resolve_codex_cli_executable())
+                    run.assert_not_called()
+            finally:
+                os.chdir(previous)
 
     def test_winget_link_uses_only_the_fixed_per_user_location(self):
         if os.name != "nt":
@@ -678,7 +777,13 @@ class CodexCLIProviderTests(unittest.TestCase):
             executable.write_bytes(b"MZ\x00\x00synthetic")
             with patch.dict("os.environ", {}, clear=True), patch(
                 "jarvis.model_client._resolved_winget_link", return_value=executable
-            ), patch("jarvis.model_client.shutil.which", return_value=None):
+            ), patch(
+                "jarvis.model_client.trusted_path_executable", return_value=None
+            ), patch(
+                "jarvis.model_client._windows_cli_publisher_matches", return_value=True
+            ), patch(
+                "jarvis.model_client._claude_cli_launchable", return_value=True
+            ):
                 self.assertEqual(
                     resolve_claude_cli_executable(), executable.resolve()
                 )
@@ -700,7 +805,11 @@ class CodexCLIProviderTests(unittest.TestCase):
                 "os.environ",
                 {"USERPROFILE": directory},
                 clear=True,
-            ), patch("jarvis.model_client.shutil.which", return_value=None), patch(
+            ), patch(
+                "jarvis.model_client.trusted_path_executable", return_value=None
+            ), patch(
+                "jarvis.model_client._windows_cli_publisher_matches", return_value=True
+            ), patch(
                 "jarvis.model_client._codex_cli_launchable", return_value=True
             ):
                 self.assertEqual(resolve_codex_cli_executable(), executable.resolve())
@@ -714,7 +823,11 @@ class CodexCLIProviderTests(unittest.TestCase):
             executable.write_bytes(b"MZ\x00\x00synthetic")
             with patch.dict("os.environ", {}, clear=True), patch(
                 "jarvis.model_client._resolved_winget_link", return_value=executable
-            ), patch("jarvis.model_client.shutil.which", return_value=None), patch(
+            ), patch(
+                "jarvis.model_client.trusted_path_executable", return_value=None
+            ), patch(
+                "jarvis.model_client._windows_cli_publisher_matches", return_value=True
+            ), patch(
                 "jarvis.model_client._codex_cli_launchable", return_value=True
             ):
                 self.assertEqual(
@@ -756,7 +869,11 @@ class CodexCLIProviderTests(unittest.TestCase):
                     "USERPROFILE": str(root / "profile"),
                 },
                 clear=True,
-            ), patch("jarvis.model_client.shutil.which", return_value=None), patch(
+            ), patch(
+                "jarvis.model_client.trusted_path_executable", return_value=None
+            ), patch(
+                "jarvis.model_client._windows_cli_publisher_matches", return_value=True
+            ), patch(
                 "jarvis.model_client._codex_cli_launchable", return_value=True
             ):
                 self.assertEqual(
@@ -789,7 +906,11 @@ class CodexCLIProviderTests(unittest.TestCase):
                 {"USERPROFILE": str(root / "profile")},
                 clear=True,
             ), patch(
-                "jarvis.model_client.shutil.which", return_value=str(public_alias)
+                "jarvis.model_client._resolved_winget_link", return_value=public_alias
+            ), patch(
+                "jarvis.model_client.trusted_path_executable", return_value=None
+            ), patch(
+                "jarvis.model_client._windows_cli_publisher_matches", return_value=True
             ), patch(
                 "jarvis.model_client._codex_cli_launchable", side_effect=launchable
             ):
@@ -1173,6 +1294,7 @@ class CodexCLIProviderTests(unittest.TestCase):
         )
         state = _CodexAppServerTurn("thr_test", deltas.append, 1024)
         transport._turns["thr_test"] = state
+        transport._bind_turn(state, "turn_test")
 
         transport._handle_message({
             "method": "item/agentMessage/delta",
@@ -1219,6 +1341,58 @@ class CodexCLIProviderTests(unittest.TestCase):
         self.assertTrue(state.done.is_set())
         self.assertIsNone(state.error)
 
+    def test_app_server_ignores_all_same_turn_events_after_completion(self):
+        deltas: list[str] = []
+        transport = _CodexAppServerTransport(
+            "codex.exe",
+            working_directory=".",
+            environment={},
+            config_overrides=(),
+            skill_override="",
+            generation_timeout=10,
+            max_response_bytes=1024,
+        )
+        state = _CodexAppServerTurn("thr_test", deltas.append, 1024)
+        transport._turns["thr_test"] = state
+        transport._bind_turn(state, "turn_test")
+
+        def notify(method, **params):
+            transport._handle_message({
+                "method": method,
+                "params": {"threadId": "thr_test", **params},
+            })
+
+        notify(
+            "item/completed",
+            turnId="turn_test",
+            item={"type": "agentMessage", "id": "item_test", "text": "ORIGINAL"},
+        )
+        notify(
+            "turn/completed",
+            turn={"id": "turn_test", "status": "completed", "items": []},
+        )
+        original_completion = state.completed
+
+        notify(
+            "item/completed",
+            turnId="turn_test",
+            item={"type": "agentMessage", "id": "item_test", "text": "MUTATED"},
+        )
+        notify(
+            "item/agentMessage/delta",
+            turnId="turn_test",
+            itemId="item_test",
+            delta="LATE",
+        )
+        notify("error", turnId="turn_test", error={"message": "late error"})
+
+        self.assertEqual(state.final_text, "ORIGINAL")
+        self.assertEqual(state.fragments, [])
+        self.assertEqual(deltas, [])
+        self.assertIs(state.completed, original_completion)
+        self.assertEqual(state.terminal_state, "completed")
+        self.assertIsNone(state.error)
+
     def test_app_server_prewarm_initializes_without_starting_a_turn(self):
         transport = _CodexAppServerTransport(
             "codex.exe",
@@ -1253,6 +1427,7 @@ class CodexCLIProviderTests(unittest.TestCase):
         )
         state = _CodexAppServerTurn("thr_test", lambda _text: None, 1024)
         transport._turns["thr_test"] = state
+        transport._bind_turn(state, "turn_test")
 
         transport._handle_message({
             "method": "item/started",
@@ -1343,6 +1518,119 @@ class CodexCLIProviderTests(unittest.TestCase):
         self.assertIn("Follow up naturally", second_input)
         self.assertNotIn("First private prompt", second_input)
         self.assertNotIn("First answer", second_input)
+
+    def test_app_server_discards_delayed_prior_turn_before_new_turn_is_bound(self):
+        transport = _CodexAppServerTransport(
+            "codex.exe",
+            working_directory=".",
+            environment={},
+            config_overrides=(),
+            skill_override="",
+            generation_timeout=10,
+            max_response_bytes=1024,
+        )
+        turn_starts = 0
+        first_deltas: list[str] = []
+        second_deltas: list[str] = []
+
+        def complete_turn(thread_id, turn_id, item_id, answer, *, delta=None):
+            if delta is not None:
+                transport._handle_message({
+                    "method": "item/agentMessage/delta",
+                    "params": {
+                        "threadId": thread_id,
+                        "turnId": turn_id,
+                        "itemId": item_id,
+                        "delta": delta,
+                    },
+                })
+            transport._handle_message({
+                "method": "item/completed",
+                "params": {
+                    "threadId": thread_id,
+                    "turnId": turn_id,
+                    "item": {
+                        "type": "agentMessage",
+                        "id": item_id,
+                        "text": answer,
+                    },
+                },
+            })
+            transport._handle_message({
+                "method": "turn/completed",
+                "params": {
+                    "threadId": thread_id,
+                    "turn": {"id": turn_id, "status": "completed", "items": []},
+                },
+            })
+
+        def request(method, params, **_kwargs):
+            nonlocal turn_starts
+            if method == "thread/start":
+                return {"thread": {"id": "thr_correlated"}}
+            if method != "turn/start":
+                raise AssertionError(f"unexpected request: {method}")
+            turn_starts += 1
+            state = transport._turns[params["threadId"]]
+            self.assertIsNone(state.turn_id)
+            if turn_starts == 1:
+                complete_turn(
+                    params["threadId"],
+                    "turn_old",
+                    "item_old",
+                    "First answer",
+                )
+                return {"turn": {"id": "turn_old"}}
+
+            # The app server may flush delayed events from the preceding turn
+            # after Jarvis installs the new state but before turn/start returns.
+            complete_turn(
+                params["threadId"],
+                "turn_old",
+                "item_old_late",
+                "STALE ANSWER",
+                delta="STALE ",
+            )
+            complete_turn(
+                params["threadId"],
+                "turn_current",
+                "item_current",
+                "Current answer",
+                delta="Current ",
+            )
+            return {"turn": {"id": "turn_current"}}
+
+        first_messages = [
+            {"role": "system", "content": "Stable contract"},
+            {"role": "user", "content": "First prompt"},
+        ]
+        second_messages = [
+            *first_messages,
+            {"role": "assistant", "content": "First answer"},
+            {"role": "user", "content": "Different current prompt"},
+        ]
+        with model_conversation_scope("test:conversation:correlated"), patch.object(
+            transport, "_ensure_started"
+        ), patch.object(transport, "_request", side_effect=request):
+            first = transport.chat_stream(
+                first_messages,
+                "auto",
+                first_deltas.append,
+                think=False,
+                cancellation_guard=None,
+            )
+            second = transport.chat_stream(
+                second_messages,
+                "auto",
+                second_deltas.append,
+                think=False,
+                cancellation_guard=None,
+            )
+
+        self.assertEqual(first["content"], "First answer")
+        self.assertEqual(second["content"], "Current answer")
+        self.assertEqual(first_deltas, [])
+        self.assertEqual(second_deltas, ["Current "])
 
     def test_dialogue_memory_enrichment_does_not_break_exact_history_matching(self):
         transport = _CodexAppServerTransport(
@@ -1696,7 +1984,7 @@ class CodexCLIProviderTests(unittest.TestCase):
             "computer_use",
         ):
             with self.subTest(item_type=item_type):
-                def runner(args, **kwargs):
+                def runner(args, item_type=item_type, **kwargs):
                     del kwargs
                     return self._write_result(
                         args,

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import binascii
 import json
 import hashlib
@@ -13,7 +14,6 @@ import socket
 import ssl
 import stat
 import subprocess
-import shutil
 import tempfile
 import threading
 import time
@@ -29,6 +29,11 @@ from typing import Any, Callable
 from .attachments import ImageAttachment, MAX_IMAGE_ATTACHMENTS
 from .ollama_client import ChatResponse, OllamaClient, OllamaError, TRANSIENT_HTTP_STATUS
 from .subprocess_env import trusted_cli_environment
+from .trusted_executables import (
+    trusted_path_executable,
+    windows_directory,
+    windows_system_executable,
+)
 
 
 OPENAI_RESPONSES_URL = "https://api.openai.com/v1/responses"
@@ -64,6 +69,27 @@ _ACTIVE_MODEL_CONVERSATION: ContextVar[str | None] = ContextVar(
     "jarvis_active_model_conversation",
     default=None,
 )
+_WINDOWS_AUTHENTICODE_SCRIPT = base64.b64encode(
+    """
+$ErrorActionPreference = 'Stop'
+$target = [Environment]::GetEnvironmentVariable(
+    'JARVIS_CLI_SIGNATURE_TARGET', 'Process'
+)
+$signature = Get-AuthenticodeSignature -LiteralPath $target
+[Console]::OutputEncoding = [Text.UTF8Encoding]::new($false)
+[Console]::WriteLine([string]$signature.Status)
+if ($null -eq $signature.SignerCertificate) {
+    [Console]::WriteLine('')
+} else {
+    [Console]::WriteLine(
+        $signature.SignerCertificate.GetNameInfo(
+            [Security.Cryptography.X509Certificates.X509NameType]::SimpleName,
+            $false
+        )
+    )
+}
+""".encode("utf-16-le")
+).decode("ascii")
 
 
 @contextmanager
@@ -1363,31 +1389,24 @@ def resolve_claude_cli_executable() -> Path | None:
         if os.name == "nt" and os.environ.get("APPDATA")
         else None
     )
+    machine_native = trusted_path_executable(
+        "claude.exe" if os.name == "nt" else "claude"
+    )
     candidates = (
         str(winget_native) if winget_native is not None else None,
         str(npm_native) if npm_native is not None else None,
-        shutil.which("claude.exe"),
-        shutil.which("claude") if os.name != "nt" else None,
+        str(machine_native) if machine_native is not None else None,
     )
     for candidate in candidates:
         if not candidate:
             continue
-        try:
-            resolved = Path(candidate).resolve(strict=True)
-            details = os.lstat(resolved)
-        except OSError:
-            continue
-        attributes = getattr(details, "st_file_attributes", 0)
+        resolved = _validated_native_executable(candidate)
         if (
-            not stat.S_ISREG(details.st_mode)
-            or attributes & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+            resolved is not None
+            and _windows_cli_publisher_matches(resolved, "Anthropic, PBC")
+            and _claude_cli_launchable(resolved)
         ):
-            continue
-        if os.name == "nt" and resolved.suffix.casefold() != ".exe":
-            continue
-        if os.name != "nt" and not os.access(resolved, os.X_OK):
-            continue
-        return resolved
+            return resolved
     return None
 
 
@@ -1436,6 +1455,56 @@ def _validated_native_executable(candidate: str | os.PathLike[str]) -> Path | No
     return resolved
 
 
+def _windows_cli_publisher_matches(executable: Path, expected_name: str) -> bool:
+    """Validate one Windows native CLI with trusted PowerShell before executing it."""
+    if os.name != "nt":
+        return True
+    if expected_name not in {"Anthropic, PBC", "OpenAI OpCo, LLC"}:
+        return False
+    try:
+        windows_root = windows_directory()
+        powershell = windows_system_executable(
+            "System32", "WindowsPowerShell", "v1.0", "powershell.exe"
+        )
+        environment = {
+            "SYSTEMROOT": str(windows_root),
+            "WINDIR": str(windows_root),
+            "PATH": str(windows_root / "System32"),
+            "PSModulePath": str(powershell.parent / "Modules"),
+            "JARVIS_CLI_SIGNATURE_TARGET": str(executable),
+        }
+        completed = subprocess.run(
+            [
+                str(powershell),
+                "-NoLogo",
+                "-NoProfile",
+                "-NonInteractive",
+                "-EncodedCommand",
+                _WINDOWS_AUTHENTICODE_SCRIPT,
+            ],
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            env=environment,
+            timeout=10.0,
+            check=False,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+    except (OSError, ValueError, subprocess.TimeoutExpired):
+        return False
+    stdout = completed.stdout if isinstance(completed.stdout, str) else ""
+    stderr = completed.stderr if isinstance(completed.stderr, str) else ""
+    if (
+        completed.returncode != 0
+        or len(stdout.encode("utf-8", errors="replace")) > 4096
+        or len(stderr.encode("utf-8", errors="replace")) > 4096
+    ):
+        return False
+    return stdout.splitlines() == ["Valid", expected_name]
+
+
 def _resolved_winget_link(executable_name: str) -> Path | None:
     """Resolve only WinGet's fixed per-user link location to its package target."""
     localappdata = os.environ.get("LOCALAPPDATA")
@@ -1448,25 +1517,59 @@ def _resolved_winget_link(executable_name: str) -> Path | None:
         return None
 
 
-def _codex_cli_launchable(executable: Path) -> bool:
-    """Probe a candidate without a shell, inherited secrets, or repository context."""
+def _cli_version_output(executable: Path) -> str | None:
+    """Probe one exact native CLI path outside repository context."""
     flags = getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0
     try:
         with tempfile.TemporaryDirectory(prefix="jarvis-codex-probe-") as directory:
             completed = subprocess.run(
                 [str(executable), "--version"],
                 stdin=subprocess.DEVNULL,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
+                capture_output=True,
                 cwd=directory,
                 env=trusted_cli_environment(include_ssh_agent=False),
                 timeout=5.0,
                 check=False,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
                 creationflags=flags,
             )
     except (OSError, ValueError, subprocess.TimeoutExpired):
-        return False
-    return completed.returncode == 0
+        return None
+    stdout = completed.stdout if isinstance(completed.stdout, str) else ""
+    stderr = completed.stderr if isinstance(completed.stderr, str) else ""
+    if (
+        completed.returncode != 0
+        or len(stdout.encode("utf-8", errors="replace")) > 4096
+        or len(stderr.encode("utf-8", errors="replace")) > 4096
+    ):
+        return None
+    return (stdout + "\n" + stderr).strip()
+
+
+def _claude_cli_launchable(executable: Path) -> bool:
+    """Require the exact fixed-root binary to identify as Claude Code."""
+    output = _cli_version_output(executable)
+    return bool(
+        output
+        and re.fullmatch(
+            r"\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?\s+\(Claude Code\)",
+            output,
+        )
+    )
+
+
+def _codex_cli_launchable(executable: Path) -> bool:
+    """Require the exact fixed-root binary to identify as the Codex CLI."""
+    output = _cli_version_output(executable)
+    return bool(
+        output
+        and re.fullmatch(
+            r"codex-cli\s+\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?",
+            output,
+        )
+    )
 
 
 def resolve_codex_cli_executable() -> Path | None:
@@ -1492,11 +1595,33 @@ def resolve_codex_cli_executable() -> Path | None:
         if os.name == "nt" and appdata
         else None
     )
+    localappdata = os.environ.get("LOCALAPPDATA")
+    desktop_native: Path | None = None
+    if os.name == "nt" and localappdata:
+        desktop_bin = Path(localappdata) / "OpenAI" / "Codex" / "bin"
+        try:
+            versions = sorted(
+                (
+                    entry
+                    for entry in desktop_bin.iterdir()
+                    if entry.is_dir()
+                    and re.fullmatch(r"[0-9a-fA-F]{16}", entry.name)
+                ),
+                key=lambda entry: entry.name,
+                reverse=True,
+            )
+        except OSError:
+            versions = []
+        if versions:
+            desktop_native = versions[0] / "codex.exe"
+    machine_native = trusted_path_executable(
+        "codex.exe" if os.name == "nt" else "codex"
+    )
     candidates = (
         str(winget_native) if winget_native is not None else None,
         str(npm_native) if npm_native is not None else None,
-        shutil.which("codex.exe") if os.name == "nt" else None,
-        shutil.which("codex") if os.name != "nt" else None,
+        str(desktop_native) if desktop_native is not None else None,
+        str(machine_native) if machine_native is not None else None,
         # The Desktop plugin binary is signed and usable, but it is a private
         # alpha implementation detail. Keep it behind public installations so
         # an app update cannot unexpectedly replace Jarvis's preferred CLI.
@@ -1505,7 +1630,11 @@ def resolve_codex_cli_executable() -> Path | None:
     for candidate in candidates:
         if candidate:
             resolved = _validated_native_executable(candidate)
-            if resolved is not None and _codex_cli_launchable(resolved):
+            if (
+                resolved is not None
+                and _windows_cli_publisher_matches(resolved, "OpenAI OpCo, LLC")
+                and _codex_cli_launchable(resolved)
+            ):
                 return resolved
     return None
 
@@ -2122,13 +2251,20 @@ class _CodexAppServerTurn:
         self.completed: dict[str, Any] | None = None
         self.error: ModelProviderError | None = None
         self.done = threading.Event()
+        self.notification_lock = threading.RLock()
+        self.terminal_state: str | None = None
+        self.early_notifications: list[tuple[str, dict[str, Any], int]] = []
+        self.early_notification_bytes = 0
 
     def fail(self, message: str) -> None:
-        if self.error is None:
+        with self.notification_lock:
+            if self.terminal_state is not None:
+                return
             self.error = ModelProviderError(
                 "codex-cli", message, retryable=True, provider_unavailable=True
             )
-        self.done.set()
+            self.terminal_state = "failed"
+            self.done.set()
 
 
 @dataclass
@@ -2148,6 +2284,8 @@ class _CodexAppServerTransport:
 
     _MAX_PROTOCOL_LINE_BYTES = 16 * 1024 * 1024
     _ALLOWED_ITEM_TYPES = frozenset({"userMessage", "agentMessage", "reasoning"})
+    _MAX_EARLY_TURN_NOTIFICATIONS = 256
+    _EARLY_TURN_NOTIFICATION_OVERHEAD_BYTES = 256 * 1024
     _MAX_CONVERSATION_THREADS = 32
     _CONVERSATION_IDLE_SECONDS = 30 * 60.0
 
@@ -2522,7 +2660,107 @@ class _CodexAppServerTransport:
         if isinstance(thread_id, str):
             with self._state_lock:
                 state = self._turns.get(thread_id)
-        if method in {"item/started", "item/completed"} and state is not None:
+        if method in {
+            "item/started",
+            "item/completed",
+            "item/agentMessage/delta",
+            "turn/completed",
+            "error",
+        } and state is not None:
+            self._dispatch_turn_notification(state, message)
+            return
+
+    @staticmethod
+    def _notification_turn_id(method: str, params: dict[str, Any]) -> str | None:
+        if method == "turn/completed":
+            turn = params.get("turn")
+            turn_id = turn.get("id") if isinstance(turn, dict) else None
+        else:
+            turn_id = params.get("turnId")
+        return turn_id if isinstance(turn_id, str) and turn_id else None
+
+    def _dispatch_turn_notification(
+        self,
+        state: _CodexAppServerTurn,
+        message: dict[str, Any],
+    ) -> None:
+        method = message.get("method")
+        params = message.get("params")
+        if not isinstance(method, str) or not isinstance(params, dict):
+            state.fail("app server emitted malformed JSON")
+            return
+        with state.notification_lock:
+            if state.terminal_state is not None:
+                # Completion is immutable. App-server pipes can flush a late
+                # same-turn item or delta after turn/completed; those bytes have
+                # no authority to rewrite the answer or call the stream callback.
+                return
+            turn_id = self._notification_turn_id(method, params)
+            if turn_id is None:
+                state.fail("app server returned a notification without a turn identifier")
+                return
+            if state.turn_id is None:
+                encoded_size = len(json.dumps(
+                    message,
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                    default=str,
+                ).encode("utf-8"))
+                maximum_bytes = (
+                    (state.maximum_bytes * 2)
+                    + self._EARLY_TURN_NOTIFICATION_OVERHEAD_BYTES
+                )
+                if (
+                    len(state.early_notifications)
+                    >= self._MAX_EARLY_TURN_NOTIFICATIONS
+                    or state.early_notification_bytes + encoded_size > maximum_bytes
+                ):
+                    state.fail("app server emitted too many early turn notifications")
+                    return
+                state.early_notifications.append((turn_id, message, encoded_size))
+                state.early_notification_bytes += encoded_size
+                return
+            if turn_id != state.turn_id:
+                # A reused thread can deliver delayed notifications from its
+                # preceding turn. They have no authority over this turn.
+                return
+            self._apply_turn_notification(state, message)
+
+    def _bind_turn(
+        self,
+        state: _CodexAppServerTurn,
+        turn_id: str,
+    ) -> None:
+        if not isinstance(turn_id, str) or not turn_id:
+            state.fail("app server returned a malformed turn")
+            return
+        with state.notification_lock:
+            if state.turn_id not in {None, turn_id}:
+                state.fail("app server changed the active turn identifier")
+                return
+            state.turn_id = turn_id
+            early_notifications = state.early_notifications
+            state.early_notifications = []
+            state.early_notification_bytes = 0
+            if state.error is not None:
+                return
+            for notification_turn_id, message, _encoded_size in early_notifications:
+                if notification_turn_id == turn_id:
+                    self._apply_turn_notification(state, message)
+                    if state.terminal_state is not None:
+                        break
+
+    def _apply_turn_notification(
+        self,
+        state: _CodexAppServerTurn,
+        message: dict[str, Any],
+    ) -> None:
+        method = message.get("method")
+        params = message.get("params")
+        if not isinstance(method, str) or not isinstance(params, dict):
+            state.fail("app server emitted malformed JSON")
+            return
+        if method in {"item/started", "item/completed"}:
             item = params.get("item")
             item_type = item.get("type") if isinstance(item, dict) else None
             if item_type not in self._ALLOWED_ITEM_TYPES:
@@ -2544,20 +2782,16 @@ class _CodexAppServerTransport:
                         return
                     state.final_text = text
             return
-        if method == "item/agentMessage/delta" and state is not None:
+        if method == "item/agentMessage/delta":
             delta = params.get("delta")
             item_id = params.get("itemId")
-            turn_id = params.get("turnId")
             if (
                 not isinstance(delta, str)
                 or not isinstance(item_id, str)
-                or not isinstance(turn_id, str)
-                or (state.turn_id is not None and state.turn_id != turn_id)
                 or state.agent_item_id not in {None, item_id}
             ):
                 state.fail("app server returned a malformed text delta")
                 return
-            state.turn_id = turn_id
             state.agent_item_id = item_id
             encoded_size = len(delta.encode("utf-8"))
             if state.byte_count + encoded_size > state.maximum_bytes:
@@ -2570,16 +2804,20 @@ class _CodexAppServerTransport:
             except Exception:
                 state.fail("stream delta callback failed")
             return
-        if method == "turn/completed" and state is not None:
+        if method == "turn/completed":
             turn = params.get("turn")
-            if not isinstance(turn, dict) or not isinstance(turn.get("id"), str):
+            if (
+                not isinstance(turn, dict)
+                or not isinstance(turn.get("id"), str)
+                or turn.get("id") != state.turn_id
+            ):
                 state.fail("app server returned a malformed completion")
                 return
-            state.turn_id = turn["id"]
             state.completed = turn
+            state.terminal_state = "completed"
             state.done.set()
             return
-        if method == "error" and state is not None:
+        if method == "error":
             state.fail("app server reported a turn error")
 
     def _fail_all(self, message: str) -> None:
@@ -2684,7 +2922,7 @@ class _CodexAppServerTransport:
             turn_id = turn.get("id") if isinstance(turn, dict) else None
             if not isinstance(turn_id, str):
                 raise ModelProviderError("codex-cli", "app server returned a malformed turn")
-            state.turn_id = turn_id
+            self._bind_turn(state, turn_id)
             while not state.done.wait(0.05):
                 if cancellation_guard is not None and cancellation_guard():
                     try:

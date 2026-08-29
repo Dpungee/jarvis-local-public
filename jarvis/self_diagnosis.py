@@ -22,14 +22,35 @@ from .approvals import SENSITIVE_ACTIONS
 from .config import SOURCE_ROOT, Config
 from .memory import SCHEMA_VERSION, Memory
 from .tools import ToolBox, _minimal_environment
+from .trusted_executables import trusted_path_executable
 
 
 SELFTEST_OUTPUT_LIMIT = 24_000
+_SELFTEST_DIRECTORY_PREFIX = "jst-"
+_SELFTEST_RUNTIME_DIRECTORY = "r"
+_SELFTEST_PROCESS_DIRECTORY = "p"
+_SELFTEST_TEMP_DIRECTORY = "t"
 _COPY_EXCLUDES = frozenset({
-    ".env", ".git", ".mypy_cache", ".pytest_cache", ".ruff_cache", ".tmp",
-    ".venv", "__pycache__", "backups", "build", "data", "dist", "htmlcov",
-    "workspace", "workspace-projects",
+    ".aws", ".azure", ".codex", ".config", ".docker", ".env", ".git",
+    ".gcloud", ".gnupg", ".idea", ".kube", ".mypy_cache", ".npm", ".nuget",
+    ".pki", ".terraform", ".vscode",
+    ".pytest_cache", ".ruff_cache", ".secrets", ".ssh", ".test-tmp", ".tmp",
+    ".venv", "C", "__pycache__", "backups", "build", "codex-queue", "data", "env",
+    "dist", "htmlcov", "kairos-eval", "node_modules", "reports", "work",
+    "venv", "workspace", "workspace-projects",
 })
+_COPY_EXCLUDES_CASEFOLDED = frozenset(name.casefold() for name in _COPY_EXCLUDES)
+_COPY_SECRET_NAMES = frozenset({
+    ".git-credentials", ".gitconfig", ".netrc", ".npmrc", ".pypirc",
+    "auth.json", "cookie.json", "cookies.json", "netrc", "nuget.config",
+    "oauth.json", "pip.conf", "pip.ini", "secrets.json", "settings.xml",
+})
+_COPY_SECRET_SUFFIXES = (
+    ".der", ".jks", ".key", ".keystore", ".p12", ".pem", ".pfx", ".wal",
+)
+_COPY_SECRET_PREFIXES = (
+    "client_secret", "credentials", "oauth_token", "refresh_token", "token",
+)
 _IMMUTABLE_REPAIR_FILES = frozenset({
     "jarvis/agent.py",
     "jarvis/approvals.py",
@@ -86,7 +107,24 @@ def _copy_ignore(directory: str, names: list[str]) -> set[str]:
     ignored: set[str] = set()
     parent = Path(directory)
     for name in names:
-        if name in _COPY_EXCLUDES or name.endswith((".pyc", ".pyo")):
+        normalized = name.casefold()
+        secret_prefixed = any(
+            normalized == prefix
+            or any(
+                normalized.startswith(prefix + separator)
+                for separator in (".", "_", "-")
+            )
+            for prefix in _COPY_SECRET_PREFIXES
+        )
+        if (
+            normalized in _COPY_EXCLUDES_CASEFOLDED
+            or normalized in _COPY_SECRET_NAMES
+            or normalized.endswith((".pyc", ".pyo", ".egg-info"))
+            or normalized.endswith(_COPY_SECRET_SUFFIXES)
+            or secret_prefixed
+            or normalized.startswith("jarvis-codex-")
+            or normalized.startswith(".env.") and normalized != ".env.example"
+        ):
             ignored.add(name)
             continue
         candidate = parent / name
@@ -107,7 +145,34 @@ def _selftest_environment(runtime_root: Path) -> dict[str, str]:
     # Start from the same isolated-home allowlist as workspace execution. This
     # prevents copied tests from reading ambient provider/connector credentials
     # through either environment variables or the operator's real home folders.
+    runtime_root = runtime_root.resolve()
     environment = _minimal_environment(runtime_root)
+    # Windows deletes environment variables assigned an empty string. A test
+    # which temporarily patches and restores os.environ could therefore drop
+    # _minimal_environment's empty GIT_CONFIG_VALUE_3 while leaving
+    # GIT_CONFIG_COUNT=4, making every later Git command fail to parse its
+    # environment. Self-tests already disable system/global Git config,
+    # credential prompts, and ambient variables, so the empty helper-reset
+    # entry is redundant here. Use the three non-empty config pairs only.
+    environment["GIT_CONFIG_COUNT"] = "3"
+    environment.pop("GIT_CONFIG_KEY_3", None)
+    environment.pop("GIT_CONFIG_VALUE_3", None)
+    # Full self-tests run test suites which create their own disposable trees.
+    # Keep their temp root deliberately shallow: on Windows, descriptive test
+    # names plus venv/package paths can otherwise exceed the legacy MAX_PATH
+    # boundary even though every individual component is valid.  The compact
+    # directory remains inside the same private self-test root; only its name is
+    # shorter than _minimal_environment's general-purpose runtime/temp layout.
+    test_temp = runtime_root / _SELFTEST_TEMP_DIRECTORY
+    test_temp.mkdir(parents=True, exist_ok=True)
+    details = os.lstat(test_temp)
+    attributes = getattr(details, "st_file_attributes", 0)
+    if (
+        stat.S_ISLNK(details.st_mode)
+        or attributes & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+        or not stat.S_ISDIR(details.st_mode)
+    ):
+        raise PermissionError("Self-test temp path must be an ordinary directory")
     environment.update({
         "JARVIS_CLOUD_ENABLED": "false",
         "JARVIS_MODEL": "auto",
@@ -124,8 +189,19 @@ def _selftest_environment(runtime_root: Path) -> dict[str, str]:
         "JARVIS_INITIATIVE": "disabled",
         "JARVIS_INITIATIVE_QUIET_HOURS": "",
         "PYTHONNOUSERSITE": "1",
+        "TEMP": str(test_temp),
+        "TMP": str(test_temp),
     })
     return environment
+
+
+def _selftest_layout(root: Path) -> tuple[Path, Path]:
+    """Return compact, disjoint copy/process paths below one disposable root."""
+    resolved = root.resolve()
+    return (
+        resolved / _SELFTEST_RUNTIME_DIRECTORY,
+        resolved / _SELFTEST_PROCESS_DIRECTORY,
+    )
 
 
 def _failing_test_ids(output: str) -> list[str]:
@@ -175,10 +251,13 @@ def _imported_runtime_files(source_root: Path, test_file: Path) -> set[Path]:
 def _last_commit(source_root: Path, candidate: Path) -> str | None:
     if not (source_root / ".git").exists():
         return None
+    git = trusted_path_executable("git", prohibited_roots=(source_root,))
+    if git is None:
+        return None
     try:
         relative = candidate.relative_to(source_root)
         result = subprocess.run(
-            ["git", "-C", str(source_root), "log", "-1", "--format=%h", "--", str(relative)],
+            [str(git), "-C", str(source_root), "log", "-1", "--format=%h", "--", str(relative)],
             stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL,
@@ -248,8 +327,8 @@ def run_isolated_selftest(
         raise ValueError("Full and anchor self-test modes are mutually exclusive")
     timeout = max(30, min(int(timeout), 3_600))
     started = time.monotonic()
-    with tempfile.TemporaryDirectory(prefix="jarvis-selftest-") as temporary:
-        isolated = Path(temporary) / "runtime"
+    with tempfile.TemporaryDirectory(prefix=_SELFTEST_DIRECTORY_PREFIX) as temporary:
+        isolated, process_root = _selftest_layout(Path(temporary))
         shutil.copytree(SOURCE_ROOT, isolated, ignore=_copy_ignore)
         if anchors:
             command = [sys.executable, "-B", "-m", "unittest", *ANCHOR_TEST_IDS]
@@ -269,7 +348,7 @@ def run_isolated_selftest(
             completed = subprocess.run(
                 command,
                 cwd=isolated,
-                env=_selftest_environment(Path(temporary) / "process"),
+                env=_selftest_environment(process_root),
                 stdin=subprocess.DEVNULL,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,

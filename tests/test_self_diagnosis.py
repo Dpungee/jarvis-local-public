@@ -2,9 +2,12 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
+from pathlib import PureWindowsPath
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -30,6 +33,136 @@ class SelfDiagnosisTests(unittest.TestCase):
             self.assertNotIn(key, environment)
         self.assertEqual(environment["PYTHONNOUSERSITE"], "1")
         self.assertIn(str(Path(temporary).resolve()), environment["USERPROFILE"])
+
+    def test_selftest_layout_bounds_nested_windows_test_paths(self):
+        with tempfile.TemporaryDirectory(prefix="jst-layout-") as temporary:
+            root = Path(temporary)
+            copied_runtime, process_root = diagnosis._selftest_layout(root)
+            environment = diagnosis._selftest_environment(process_root)
+            test_temp = Path(environment["TEMP"])
+
+        self.assertEqual(copied_runtime.name, "r")
+        self.assertEqual(process_root.name, "p")
+        self.assertEqual(test_temp.name, "t")
+        self.assertEqual(test_temp.parent, process_root)
+        self.assertEqual(environment["TMP"], environment["TEMP"])
+        self.assertNotEqual(copied_runtime, process_root)
+
+        # Model the longest common nested dependency-test shape using Windows
+        # separators.  This guards the internal path budget independently of
+        # the host running the test suite and leaves room below legacy MAX_PATH
+        # for a normal package filename.
+        nested = (
+            PureWindowsPath("C:/Users/example/AppData/Local/Temp/jst-12345678/p/t")
+            / "jarvis-dependency-tests"
+            / (
+                "dependencies-12345-"
+                "test_pyproject_only_project_is_refused_without_executing_build_backend"
+            )
+            / "workspace"
+            / ".jarvis"
+            / "py"
+            / "Lib"
+            / "site-packages"
+            / "package_metadata_file.json"
+        )
+        self.assertLess(len(str(nested)), 260)
+
+    def test_selftest_environment_supports_local_git_without_credentials(self):
+        git = shutil.which("git")
+        if git is None:
+            self.skipTest("Git is unavailable")
+        with tempfile.TemporaryDirectory() as temporary:
+            environment = diagnosis._selftest_environment(Path(temporary) / "process")
+            completed = subprocess.run(
+                [git, "init", "-b", "main", str(Path(temporary) / "repository")],
+                env=environment,
+                capture_output=True,
+                text=True,
+                timeout=10,
+                check=False,
+            )
+
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertEqual(environment["GIT_CONFIG_COUNT"], "3")
+        self.assertEqual(environment["GIT_CONFIG_KEY_2"], "protocol.allow")
+        self.assertEqual(environment["GIT_CONFIG_VALUE_2"], "never")
+        self.assertNotIn("GIT_CONFIG_KEY_3", environment)
+        self.assertNotIn("GIT_CONFIG_VALUE_3", environment)
+        self.assertEqual(environment["PIP_CONFIG_FILE"], os.devnull)
+        self.assertEqual(environment["NPM_CONFIG_GLOBAL"], "false")
+        self.assertEqual(environment["NPM_CONFIG_IGNORE_SCRIPTS"], "true")
+        for index in range(int(environment["GIT_CONFIG_COUNT"])):
+            self.assertTrue(environment[f"GIT_CONFIG_KEY_{index}"])
+            self.assertTrue(environment[f"GIT_CONFIG_VALUE_{index}"])
+            self.assertIn(f"GIT_CONFIG_VALUE_{index}", environment)
+
+    def test_selftest_git_environment_survives_windows_style_patch_round_trip(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            environment = diagnosis._selftest_environment(Path(temporary) / "p")
+            with patch.dict(os.environ, environment, clear=True):
+                with patch.dict(
+                    os.environ,
+                    {"LOCALAPPDATA": str(Path(temporary) / "local")},
+                    clear=False,
+                ):
+                    pass
+                restored = dict(os.environ)
+
+        count = int(restored["GIT_CONFIG_COUNT"])
+        self.assertEqual(count, 3)
+        for index in range(count):
+            self.assertTrue(restored[f"GIT_CONFIG_KEY_{index}"])
+            self.assertTrue(restored[f"GIT_CONFIG_VALUE_{index}"])
+        self.assertEqual(restored["GIT_CONFIG_KEY_2"], "protocol.allow")
+        self.assertEqual(restored["GIT_CONFIG_VALUE_2"], "never")
+        self.assertEqual(restored["GIT_CONFIG_NOSYSTEM"], "1")
+        self.assertEqual(restored["GIT_CONFIG_GLOBAL"], os.devnull)
+        self.assertEqual(restored["GIT_TERMINAL_PROMPT"], "0")
+
+    def test_selftest_copy_excludes_ignored_secrets_and_local_artifacts(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            names = [
+                ".env.example",
+                ".env.private",
+                ".ENV",
+                ".GIT",
+                ".AWS",
+                ".CODEX",
+                ".GNUPG",
+                ".KUBE",
+                ".test-tmp",
+                ".npmrc",
+                ".pypirc",
+                "auth.json",
+                "cookies.json",
+                "oauth.json",
+                "client_secret.json",
+                "credentials-backup.json",
+                "jarvis-codex-run.response.json",
+                "private.pem",
+                "token-store.json",
+                "TOKENIZER.PY",
+                "module.py",
+            ]
+            for name in names:
+                candidate = root / name
+                if name in {
+                    ".test-tmp", ".ENV", ".GIT", ".AWS", ".CODEX", ".GNUPG", ".KUBE",
+                }:
+                    candidate.mkdir()
+                else:
+                    candidate.write_text("fixture", encoding="utf-8")
+
+            ignored = diagnosis._copy_ignore(str(root), names)
+
+        self.assertNotIn(".env.example", ignored)
+        self.assertNotIn("TOKENIZER.PY", ignored)
+        self.assertNotIn("module.py", ignored)
+        self.assertTrue(
+            (set(names) - {".env.example", "TOKENIZER.PY", "module.py"}) <= ignored
+        )
 
     def test_repair_draft_rejects_hardlinked_live_source_before_reading(self):
         with tempfile.TemporaryDirectory() as temporary:

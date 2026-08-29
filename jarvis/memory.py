@@ -34,6 +34,7 @@ from .specialists import (
     specialist_for_consultation_prompt,
     specialist_for_family,
     specialist_for_prompt,
+    specialist_for_scheduled_prompt,
 )
 from .vault import Vault, VaultNote
 
@@ -2460,7 +2461,8 @@ class Memory:
         estimate = self._metric_optional_count(
             estimated_prompt_tokens, "estimated_prompt_tokens"
         )
-        assert estimate is not None
+        if estimate is None:
+            raise ValueError("estimated_prompt_tokens must be a non-negative integer")
         maximum_calls = self._positive_budget(call_limit, "call_limit")
         maximum_prompt = self._positive_budget(
             prompt_token_limit, "prompt_token_limit"
@@ -4117,7 +4119,9 @@ class Memory:
             "model_latency_ms", "model_attempts", "retries", "context_chars",
             "estimated_prompt_tokens", "tool_calls",
         }
-        allowed_text = {"provider", "model", "profile"}
+        allowed_text = {
+            "provider", "model", "profile", "task_contract_status",
+        }
         safe_metrics: dict[str, Any] = {}
         for key, value in dict(metrics or {}).items():
             if value is None:
@@ -4799,6 +4803,8 @@ class Memory:
 
     def set_screen_companion_rule_enabled(self, rule_id: int, enabled: bool) -> bool:
         normalized = self._prediction_optional_id(rule_id, "rule_id")
+        if normalized is None:
+            raise ValueError("rule_id is required")
         if not isinstance(enabled, bool):
             raise TypeError("enabled must be boolean")
         with self._immediate_transaction():
@@ -4811,6 +4817,8 @@ class Memory:
 
     def delete_screen_companion_rule(self, rule_id: int) -> bool:
         normalized = self._prediction_optional_id(rule_id, "rule_id")
+        if normalized is None:
+            raise ValueError("rule_id is required")
         with self._immediate_transaction():
             self.db.execute(
                 "DELETE FROM screen_companion_receipts WHERE rule_id=?",
@@ -8155,6 +8163,8 @@ class Memory:
         normalized_job = self._prediction_optional_id(job_id, "scheduled_job_id")
         if normalized_job is None:
             raise ValueError("scheduled_job_id is required")
+        if not isinstance(enabled, bool):
+            raise TypeError("enabled must be boolean")
         normalized_project = self._project_id(project_id)
         current = _as_utc(now)
         stamp = current.isoformat()
@@ -8213,7 +8223,7 @@ class Memory:
                     f"Scheduled job #{job_id} ({row['name']}): {row['prompt']}\n"
                     "Complete the bounded task in its assigned project and report the result."
                 )
-                specialist = specialist_for_prompt(prompt)
+                specialist = specialist_for_scheduled_prompt(prompt)
                 task_id, created = self._insert_task_locked(
                     prompt,
                     stamp=current_text,
@@ -8502,10 +8512,13 @@ class Memory:
         status = str(status).strip().casefold()
         if status not in {"active", "paused", "completed", "cancelled"}:
             raise ValueError("Goal status must be active, paused, completed, or cancelled")
+        normalized_goal = self._prediction_optional_id(goal_id, "goal_id")
+        if normalized_goal is None:
+            raise ValueError("goal_id is required")
         with self._immediate_transaction():
             updated = self.db.execute(
                 "UPDATE goals SET status=?, updated_at=? WHERE id=?",
-                (status, now_iso(), int(goal_id)),
+                (status, now_iso(), normalized_goal),
             )
         return updated.rowcount == 1
 
@@ -8715,10 +8728,17 @@ class Memory:
         return [dict(row) for row in rows]
 
     def set_backlog_enabled(self, backlog_id: int, enabled: bool) -> bool:
+        normalized_backlog = self._prediction_optional_id(
+            backlog_id, "backlog_id"
+        )
+        if normalized_backlog is None:
+            raise ValueError("backlog_id is required")
+        if not isinstance(enabled, bool):
+            raise TypeError("enabled must be boolean")
         with self._immediate_transaction():
             updated = self.db.execute(
                 "UPDATE proactive_backlog SET enabled=?, updated_at=? WHERE id=?",
-                (int(bool(enabled)), now_iso(), int(backlog_id)),
+                (int(enabled), now_iso(), normalized_backlog),
             )
         return updated.rowcount == 1
 
@@ -9171,6 +9191,8 @@ class Memory:
 
     def revoke_work_domain(self, domain_id: int) -> bool:
         normalized = self._prediction_optional_id(domain_id, "domain_id")
+        if normalized is None:
+            raise ValueError("domain_id is required")
         with self._immediate_transaction():
             updated = self.db.execute(
                 """UPDATE work_domains SET enabled=0, standing_authorization=0,
@@ -9491,18 +9513,51 @@ class Memory:
         *,
         approval_scope: str,
         task_id: int | None = None,
+        display_resource: str | None = None,
     ) -> tuple[bool, int]:
         action = _validated_nonsecret_metadata(action, "Approval action")[:100]
         exact_resource = str(resource).strip()
-        try:
-            parsed_resource = json.loads(exact_resource)
-        except (TypeError, ValueError, json.JSONDecodeError):
-            persisted_resource = redact_secrets(exact_resource)
-        else:
-            persisted_resource = _redacted_json_text(parsed_resource)
-        resource = _bounded_persisted_text(
-            persisted_resource, 2_000, "approval resource"
+        presented_resource = (
+            exact_resource if display_resource is None else str(display_resource).strip()
         )
+        if display_resource is not None and presented_resource != exact_resource:
+            try:
+                exact_payload = json.loads(exact_resource)
+                display_payload = json.loads(presented_resource)
+            except (TypeError, ValueError, json.JSONDecodeError) as exc:
+                raise ValueError(
+                    "Custom approval display resource must be valid JSON"
+                ) from exc
+            if (
+                not isinstance(exact_payload, dict)
+                or not isinstance(display_payload, dict)
+                or exact_payload.get("tool") != "install_project_dependencies"
+                or display_payload.get("tool") != "install_project_dependencies"
+                or exact_payload.get("arguments_sha256")
+                != display_payload.get("arguments_sha256")
+            ):
+                raise ValueError(
+                    "Custom approval display is not bound to the exact dependency resource"
+                )
+            if len(presented_resource) > 1_900:
+                raise ValueError("Dependency approval display resource is too large")
+        approval_tool = ""
+        try:
+            parsed_resource = json.loads(presented_resource)
+        except (TypeError, ValueError, json.JSONDecodeError):
+            persisted_resource = redact_secrets(presented_resource)
+        else:
+            if isinstance(parsed_resource, dict):
+                approval_tool = str(parsed_resource.get("tool") or "").casefold()
+            persisted_resource = _redacted_json_text(parsed_resource)
+        if action == "control_desktop_application" and approval_tool == "desktop_interact":
+            if len(persisted_resource) > 32_000:
+                raise ValueError("Desktop interaction approval resource is too large")
+            resource = persisted_resource
+        else:
+            resource = _bounded_persisted_text(
+                persisted_resource, 2_000, "approval resource"
+            )
         reason = _bounded_persisted_text(
             redact_secrets(str(reason).strip()), 1_000, "approval reason"
         )

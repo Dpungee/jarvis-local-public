@@ -11,6 +11,16 @@ from .base import InboundMessage
 MAX_TELEGRAM_RESPONSE_BYTES = 2_000_000
 
 
+class _NoRedirectHandler(urllib.request.HTTPRedirectHandler):
+    """Keep the bot-token URL bound to Telegram's configured API origin."""
+
+    def redirect_request(
+        self, req: Any, fp: Any, code: int, msg: str,
+        headers: Any, newurl: str,
+    ) -> None:
+        return None
+
+
 class TelegramAdapter:
     channel = "telegram"
 
@@ -27,7 +37,9 @@ class TelegramAdapter:
         self._url = f"https://api.telegram.org/bot{token}/"
         self.offset = max(0, int(offset))
         self.poll_seconds = max(1, min(int(poll_seconds), 30))
-        self._transport = transport or urllib.request.urlopen
+        self._transport = transport or urllib.request.build_opener(
+            _NoRedirectHandler()
+        ).open
 
     def _call(self, method: str, payload: dict[str, Any]) -> dict[str, Any]:
         request = urllib.request.Request(

@@ -21,6 +21,7 @@ from jarvis.tools import (
 TEMP_ROOT = Path(__file__).resolve().parent / ".tmp"
 TEMP_ROOT.mkdir(exist_ok=True)
 EXPECTED_SENSITIVE_TOOLS = frozenset({
+    "install_project_dependencies",
     "computer_list_files",
     "computer_read_file",
     "computer_search_files",
@@ -110,7 +111,6 @@ class ToolCapabilityHardeningTests(unittest.TestCase):
             "trash_path", "build_document", "search_files", "detect_project", "run_process",
             "build_document_preview", "image_visual_qa", "image_generation_status",
             "generate_image", "edit_attached_image",
-            "install_project_dependencies",
             "start_process", "process_status", "process_logs", "stop_process",
             "http_health", "remember", "recall", "session_search", "skill_list", "skill_read",
             "screen_companion_status", "screen_companion_control",
@@ -134,7 +134,7 @@ class ToolCapabilityHardeningTests(unittest.TestCase):
             "feature_setup_status", "feature_setup_plan",
         }
         execution_tools = {
-            "run_process", "install_project_dependencies", "start_process", "process_status", "process_logs",
+            "run_process", "start_process", "process_status", "process_logs",
             "stop_process", "http_health",
         }
         cases = (
@@ -166,6 +166,22 @@ class ToolCapabilityHardeningTests(unittest.TestCase):
         activity = self.memory.list_activity(limit=1)[0]
         self.assertEqual(activity["category"], "tool")
         self.assertEqual(activity["task_id"], 4321)
+
+    def test_tool_exception_text_is_secret_redacted_at_the_chokepoint(self):
+        toolbox = ToolBox(self.config, self.memory)
+        original = toolbox.tools["list_files"]
+        token = "sk-proj-" + "S" * 24
+
+        def fail(**_kwargs):
+            raise RuntimeError(f"provider leaked {token}")
+
+        toolbox.tools["list_files"] = Tool(
+            original.name, original.description, original.parameters, fail
+        )
+        payload = json.loads(toolbox.execute("list_files", {"path": "."}))
+        self.assertFalse(payload["ok"])
+        self.assertNotIn(token, payload["error"])
+        self.assertIn("[REDACTED]", payload["error"])
 
     def test_full_capability_toolbox_registers_only_resolvable_callables(self):
         toolbox = ToolBox(replace(
@@ -333,6 +349,20 @@ class ToolCapabilityHardeningTests(unittest.TestCase):
             json.dumps({"projectId": "prj_test", "orgId": "org_test"}),
             encoding="utf-8",
         )
+        # The dependency-install approval snapshot is intentionally derived
+        # from real manifests before any authorization row can be created.
+        (self.config.workspace / "package.json").write_text(
+            "{}\n", encoding="utf-8"
+        )
+        toolbox.google_drive.download_approval_snapshot = Mock(return_value={
+            "drive_account_permission_id": "account123",
+            "download_item": {
+                "id": "file123", "name": "approved.txt",
+                "mime_type": "text/plain", "is_folder": False,
+                "trashed": False, "size": 10,
+            },
+            "resolved_export_mime_type": None,
+        })
         self.assertEqual(set(SENSITIVE_ACTIONS), EXPECTED_SENSITIVE_TOOLS)
         self.assertTrue(EXPECTED_SENSITIVE_TOOLS.issubset(toolbox.tools))
         schema = {

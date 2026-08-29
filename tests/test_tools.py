@@ -332,6 +332,33 @@ class ToolTests(unittest.TestCase):
         self.assertEqual(after["mode"], before["mode"])
         self.assertEqual(after["paused"], before["paused"])
 
+    def test_readonly_companion_control_can_reduce_but_not_expand_authority(self):
+        self.memory.control_screen_companion_state(action="on")
+        readonly = ToolBox(replace(self.config, autonomy="readonly"), self.memory)
+
+        for arguments in (
+            {"action": "resume"},
+            {"action": "on"},
+            {"action": "mode", "mode": "collaborate"},
+        ):
+            with self.subTest(arguments=arguments):
+                result = json.loads(readonly.execute(
+                    "screen_companion_control", arguments
+                ))
+                self.assertFalse(result["ok"])
+                self.assertIn("Readonly mode", result["error"])
+
+        paused = json.loads(readonly.execute(
+            "screen_companion_control", {"action": "pause"}
+        ))
+        self.assertTrue(paused["ok"])
+        self.assertTrue(paused["result"]["paused"])
+        stopped = json.loads(readonly.execute(
+            "screen_companion_control", {"action": "off"}
+        ))
+        self.assertTrue(stopped["ok"])
+        self.assertFalse(stopped["result"]["enabled"])
+
     def test_skill_and_session_tools_are_read_only_progressive_capabilities(self):
         conversation = self.memory.new_conversation("Local AI tuning")
         self.memory.add_message(
@@ -1192,6 +1219,22 @@ class ToolTests(unittest.TestCase):
         with patch("jarvis.tools.shutil.which", return_value=str(executable)):
             with self.assertRaisesRegex(PermissionError, "untrusted workspace"):
                 _program_command("git", ["status"], self.workspace)
+
+    def test_user_writable_path_executable_is_blocked_for_run_and_start(self):
+        user_bin = self.test_dir / "user-bin"
+        user_bin.mkdir()
+        executable = user_bin / ("git.exe" if os.name == "nt" else "git")
+        executable.write_bytes(b"untrusted path executable")
+
+        with patch("jarvis.tools.shutil.which", return_value=str(executable)):
+            with self.assertRaisesRegex(PermissionError, "OS-administered"):
+                _program_command("git", ["status"], self.workspace)
+            with self.assertRaisesRegex(PermissionError, "OS-administered"):
+                self.toolbox.run_process("git", ["status"])
+            with self.assertRaisesRegex(PermissionError, "OS-administered"):
+                self.toolbox.start_process("git", ["status"], name="poisoned-git")
+
+        self.assertEqual(self.toolbox.process_status()["processes"], [])
 
     def test_search_is_literal_and_file_paths_stay_bounded(self):
         (self.workspace / "sample.txt").write_text("(a+)+$ and Plain Text", encoding="utf-8")

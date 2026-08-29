@@ -234,7 +234,7 @@ class TrainingPipelineTests(unittest.TestCase):
             self.assertEqual(manifest["total_examples"], 1)
             total_lines = 0
             exported_records = []
-            for _split, details in manifest["files"].items():
+            for details in manifest["files"].values():
                 content = (output / details["file"]).read_text(encoding="utf-8")
                 self.assertEqual(details["sha256"], hashlib.sha256(content.encode()).hexdigest())
                 total_lines += len(content.splitlines())

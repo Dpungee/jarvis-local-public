@@ -43,6 +43,7 @@ from jarvis.attachments import ImageAttachment
 from jarvis.config import Config
 from jarvis.memory import Memory, ModelBudgetExceeded
 from jarvis.memory_embeddings import EmbeddingError
+from jarvis.model_client import ModelProviderError
 from jarvis.ollama_client import ChatResponse, OllamaError
 from jarvis.proactive import record_result_reflection
 from jarvis.router import Route
@@ -3194,6 +3195,49 @@ class AgentLoopTests(unittest.TestCase):
         )
         self.assertEqual(result.metrics["model_attempts"], 3)
         self.assertEqual(result.metrics["retries"], 2)
+
+    def test_provider_unavailability_skips_later_models_on_same_backend(self):
+        class ProviderRecoveryClient(ScriptedClient):
+            def __init__(self):
+                super().__init__([])
+
+            def models(self, refresh=True):
+                return [
+                    "claude-cli:haiku",
+                    "claude-cli:sonnet",
+                    "claude-cli:opus",
+                    "openai:gpt-5.6-luna",
+                ]
+
+            def chat(self, messages, tools, model, **kwargs):
+                self.requests.append({"model": model})
+                if model.startswith("claude-cli:"):
+                    raise ModelProviderError(
+                        "claude-cli",
+                        "backend unavailable",
+                        retryable=True,
+                        provider_unavailable=True,
+                    )
+                return FakeResponse(content="Recovered without retrying dead backend models.")
+
+        self.config = replace(
+            self.config,
+            fast_model="claude-cli:haiku",
+            reasoning_model="claude-cli:sonnet",
+            coding_model="claude-cli:opus",
+            deep_model="openai:gpt-5.6-luna",
+        )
+        client = ProviderRecoveryClient()
+        agent = Agent(self.config, self.memory, client=client)
+        agent.toolbox = FakeToolBox()
+
+        result = agent.run("Explain this ordinary request")
+
+        self.assertEqual(result.status, "complete")
+        self.assertEqual(
+            [item["model"] for item in client.requests],
+            ["claude-cli:haiku", "openai:gpt-5.6-luna"],
+        )
 
     def test_cancellation_stops_before_model_failover(self):
         class FailingClient(ScriptedClient):

@@ -24,6 +24,32 @@ from jarvis.public_presence_store import PublicPresenceStore
 
 
 class PublicPresenceServiceTests(unittest.TestCase):
+    def test_installed_layout_uses_per_user_data_not_site_packages(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            installed_root = root / "site-packages"
+            local_app_data = root / "LocalAppData"
+            installed_root.mkdir()
+            with (
+                patch(
+                    "jarvis.public_presence_service._SOURCE_ROOT",
+                    installed_root,
+                ),
+                patch.dict(
+                    os.environ,
+                    {"LOCALAPPDATA": str(local_app_data)},
+                    clear=False,
+                ),
+            ):
+                os.environ.pop("JARVIS_DATA", None)
+                database = public_presence_database_path()
+
+        self.assertEqual(
+            database,
+            (local_app_data / "JarvisLocal" / "data" / "public_presence.db").resolve(),
+        )
+        self.assertFalse(database.is_relative_to(installed_root.resolve()))
+
     def test_disabled_and_missing_controls_fail_closed(self):
         service = PublicPresenceService()
         with self.assertRaisesRegex(PublicPresenceUnavailable, "disabled"):

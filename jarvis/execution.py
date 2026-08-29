@@ -2,17 +2,18 @@ from __future__ import annotations
 
 import ctypes
 import os
-import shutil
 import stat
 import subprocess
 import threading
 import time
 import uuid
+from collections.abc import Iterable
 from ctypes import wintypes
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any
 
+from .trusted_executables import trusted_install_file, windows_system_executable
 
 DOCKER_IMAGE = (
     "python:3.13.15-slim-bookworm@"
@@ -162,8 +163,9 @@ def _terminate_process_tree(process: subprocess.Popen[bytes], job: WindowsJob) -
         return
     if os.name == "nt":
         try:
+            taskkill = windows_system_executable("System32", "taskkill.exe")
             subprocess.run(
-                ["taskkill.exe", "/PID", str(process.pid), "/T", "/F"],
+                [str(taskkill), "/PID", str(process.pid), "/T", "/F"],
                 stdin=subprocess.DEVNULL,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
@@ -181,42 +183,82 @@ def _terminate_process_tree(process: subprocess.Popen[bytes], job: WindowsJob) -
         process.kill()
 
 
-def docker_executable() -> str | None:
-    candidates: list[Path] = []
-    if os.name == "nt":
-        program_files = Path(os.environ.get("ProgramFiles", r"C:\Program Files"))
-        candidates.append(program_files / "Docker" / "Docker" / "resources" / "bin" / "docker.exe")
-        local_app_data = os.environ.get("LOCALAPPDATA")
-        if local_app_data:
-            candidates.append(
-                Path(local_app_data) / "Docker" / "resources" / "bin" / "docker.exe"
-            )
-    resolved_from_path = shutil.which("docker")
-    if resolved_from_path:
-        candidates.append(Path(resolved_from_path))
+def _docker_install_candidates() -> tuple[Path, ...]:
+    """Return fixed Docker CLI locations without consulting cwd or PATH."""
+    if os.name != "nt":
+        return (Path("/usr/bin/docker"), Path("/usr/sbin/docker"))
+
+    roots: list[Path] = []
+    try:
+        import winreg
+
+        with winreg.OpenKey(
+            winreg.HKEY_LOCAL_MACHINE,
+            r"SOFTWARE\Microsoft\Windows\CurrentVersion",
+        ) as key:
+            for value_name in ("ProgramFilesDir", "ProgramFilesDir (x86)"):
+                try:
+                    value, _kind = winreg.QueryValueEx(key, value_name)
+                except OSError:
+                    continue
+                root = Path(str(value))
+                if root.is_absolute() and root not in roots:
+                    roots.append(root)
+    except (ImportError, OSError):
+        pass
+    if not roots:
+        # This is a fixed machine-wide location, not the redirectable
+        # ProgramFiles environment variable.
+        roots.append(Path(r"C:\Program Files"))
+    return tuple(
+        root / "Docker" / "Docker" / "resources" / "bin" / "docker.exe"
+        for root in roots
+    )
+
+
+def docker_executable(configured: str | Path | None = None) -> str | None:
+    """Resolve Docker only from an OS-administered absolute install path."""
+    candidates: tuple[Path, ...]
+    if configured is None:
+        candidates = _docker_install_candidates()
+    else:
+        candidate = Path(configured)
+        expected_name = "docker.exe" if os.name == "nt" else "docker"
+        if not candidate.is_absolute() or candidate.name.casefold() != expected_name:
+            return None
+        candidates = (candidate,)
     for candidate in candidates:
-        try:
-            resolved = candidate.resolve(strict=True)
-            details = os.lstat(resolved)
-            attributes = getattr(details, "st_file_attributes", 0)
-            if (
-                stat.S_ISREG(details.st_mode)
-                and not stat.S_ISLNK(details.st_mode)
-                and not attributes & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
-            ):
-                return str(resolved)
-        except OSError:
-            continue
+        resolved = trusted_install_file(candidate)
+        if resolved is not None:
+            return str(resolved)
     return None
 
 
-def docker_available(*, timeout: float = 5.0) -> bool:
-    executable = docker_executable()
-    if executable is None:
+def _docker_subprocess_environment(
+    executable: str,
+    source: dict[str, str] | os._Environ[str],
+) -> dict[str, str]:
+    environment = dict(source)
+    environment["PATH"] = str(Path(executable).parent)
+    if os.name == "nt":
+        environment["NoDefaultCurrentDirectoryInExePath"] = "1"
+    return environment
+
+
+def docker_available(
+    *,
+    timeout: float = 5.0,
+    executable: str | Path | None = None,
+) -> bool:
+    resolved = docker_executable(executable)
+    if resolved is None:
         return False
+    directory = Path(resolved).parent
     try:
         result = subprocess.run(
-            [executable, "info", "--format", "{{.ServerVersion}}"],
+            [resolved, "info", "--format", "{{.ServerVersion}}"],
+            cwd=directory,
+            env=_docker_subprocess_environment(resolved, os.environ),
             stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL,
@@ -252,8 +294,11 @@ class ExecutionHandle:
         _terminate_process_tree(self.process, self.job)
         if self.container_name and self.docker:
             try:
+                directory = Path(self.docker).resolve().parent
                 subprocess.run(
                     [self.docker, "rm", "--force", self.container_name],
+                    cwd=directory,
+                    env=_docker_subprocess_environment(self.docker, os.environ),
                     stdin=subprocess.DEVNULL,
                     stdout=subprocess.DEVNULL,
                     stderr=subprocess.DEVNULL,
@@ -408,12 +453,12 @@ class DockerBackend(ExecutionBackend):
         self.workspace = Path(workspace).resolve()
         if "," in str(self.workspace):
             raise ValueError("Docker workspaces may not contain commas")
-        self.docker = executable or docker_executable()
+        self.docker = docker_executable(executable)
         if self.docker is None:
             raise RuntimeError(
                 "JARVIS_EXECUTION_BACKEND=docker requires the Docker CLI and a running daemon"
             )
-        if verify and not docker_available():
+        if verify and not docker_available(executable=self.docker):
             raise RuntimeError(
                 "JARVIS_EXECUTION_BACKEND=docker requires a reachable Docker daemon"
             )
@@ -517,16 +562,12 @@ class DockerBackend(ExecutionBackend):
         with self._windows_mount_lock:
             if self._windows_mount_prepared:
                 return
-            system_root = Path(os.environ.get("SystemRoot", r"C:\Windows"))
-            icacls = (system_root / "System32" / "icacls.exe").resolve(strict=True)
-            details = os.lstat(icacls)
-            attributes = getattr(details, "st_file_attributes", 0)
-            if (
-                not stat.S_ISREG(details.st_mode)
-                or stat.S_ISLNK(details.st_mode)
-                or attributes & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
-            ):
-                raise RuntimeError("The trusted Windows ACL utility is unavailable")
+            try:
+                icacls = windows_system_executable("System32", "icacls.exe")
+            except (OSError, PermissionError, ValueError) as exc:
+                raise RuntimeError(
+                    "The trusted Windows ACL utility is unavailable"
+                ) from exc
             sid = self._current_windows_user_sid()
             try:
                 result = subprocess.run(
@@ -537,8 +578,7 @@ class DockerBackend(ExecutionBackend):
                         f"*{sid}:(OI)(CI)(M)",
                     ],
                     stdin=subprocess.DEVNULL,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.PIPE,
+                    capture_output=True,
                     timeout=15,
                     check=False,
                     text=True,
@@ -680,17 +720,11 @@ class DockerBackend(ExecutionBackend):
         name = process_name or f"run-{uuid.uuid4().hex[:16]}"
         command = self.command_for(program, arguments, cwd=cwd, process_name=name)
         container_name = command[command.index("--name") + 1]
-        docker_environment = dict(env)
         docker_directory = str(Path(self.docker).resolve().parent)
-        inherited_path = docker_environment.get("PATH", "")
-        docker_environment["PATH"] = (
-            docker_directory
-            if not inherited_path
-            else docker_directory + os.pathsep + inherited_path
-        )
+        docker_environment = _docker_subprocess_environment(self.docker, env)
         return self._start_contained(
             command,
-            cwd=self.workspace,
+            cwd=Path(docker_directory),
             env=docker_environment,
             backend=self.name,
             container_name=container_name,

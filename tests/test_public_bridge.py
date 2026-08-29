@@ -16,7 +16,10 @@ from jarvis.public_bridge import (
     PublicCitation,
     PublicProvenance,
     SanitizedResearchBrief,
+    bridge_object_from_json,
+    bridge_object_to_json,
     public_bridge_payload_digest,
+    sanitize_untrusted_public_text,
 )
 
 
@@ -96,6 +99,37 @@ class PublicBridgeTests(unittest.TestCase):
                 )
                 self.assertEqual(restored, original)
                 self.assertEqual(restored.digest, original.digest)
+
+    def test_bounded_json_bridge_round_trip_preserves_exact_payload_binding(self) -> None:
+        original = self._object(
+            ApprovedProjectSummary(
+                project_id="project:json",
+                title="Public milestone",
+                summary="A reviewed public summary.",
+            )
+        )
+
+        encoded = bridge_object_to_json(original)
+        restored = bridge_object_from_json(encoded, now=self.now + 1)
+
+        self.assertEqual(restored, original)
+        self.assertEqual(restored.payload_digest, public_bridge_payload_digest(original.payload))
+        with self.assertRaisesRegex(PublicBridgeError, "one object"):
+            bridge_object_from_json("[]", now=self.now)
+        with self.assertRaisesRegex(PublicBridgeError, "bounded string"):
+            bridge_object_from_json("x" * 100_001, now=self.now)
+        with self.assertRaisesRegex(PublicBridgeError, "only a PublicBridgeObject"):
+            bridge_object_to_json(original.to_record())  # type: ignore[arg-type]
+
+    def test_inbound_sanitizer_redacts_private_ips_without_hiding_public_ips(self) -> None:
+        cleaned, labels = sanitize_untrusted_public_text(
+            "Private service 192.168.1.20; public resolver 8.8.8.8."
+        )
+
+        self.assertIn("private_machine", labels)
+        self.assertNotIn("192.168.1.20", cleaned)
+        self.assertIn("[REDACTED PRIVATE DATA]", cleaned)
+        self.assertIn("8.8.8.8", cleaned)
 
     def test_closed_schema_rejects_prompt_and_private_context_fields(self) -> None:
         original = self._object(

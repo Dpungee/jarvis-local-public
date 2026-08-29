@@ -1,8 +1,8 @@
 # Public-release checklist
 
-This checklist records verified evidence for the `v0.6.2` public-preview candidate and
-the operator or repository actions that remain pending. Do not infer completion of an
-unchecked item from a clean source scan.
+This checklist records verified evidence for the published `v0.6.2` public-preview
+release and the operator or repository actions that remain pending. Do not infer
+completion of an unchecked item from a clean source scan.
 
 ## Privacy and credentials
 
@@ -10,7 +10,7 @@ unchecked item from a clean source scan.
       documents, postal codes, usernames, local paths, and account identifiers.
 - [x] Confirm `.env`, databases, WAL files, logs, vault content, workspaces, backups,
       OAuth state, browser state, and credentials are not tracked.
-- [x] Scan the full candidate Git history with a dedicated secret scanner, not only the current
+- [x] Scan the full release Git history with a dedicated secret scanner, not only the current
       working tree.
 - [x] Publish from a clean root commit because private material appeared in development
       and earlier public history.
@@ -18,17 +18,18 @@ unchecked item from a clean source scan.
       tracked file. This is an operator attestation; the published source and artifacts
       contain no detected credential.
 - [x] Ensure every reachable release commit and tag uses a GitHub no-reply address when
-      the maintainer email should remain private. Public `main`, `v0.6.0`, and the
-      reviewed `v0.6.2` candidate resolve only through sanitized no-reply history.
+      the maintainer email should remain private. Public `main` and the published
+      `v0.6.0`, `v0.6.1`, and `v0.6.2` tags resolve only through sanitized no-reply
+      history.
 
 ## Product trust
 
-- [x] Finish active changes and run the full deterministic suite on the release candidate.
-- [ ] Confirm the GitHub Actions matrix and privacy scan pass from a clean checkout of
-      the exact final candidate on Python 3.11, 3.12, and 3.13 for Windows.
-- [ ] Resolve or justify every open finding from Python, JavaScript/TypeScript, and
-      GitHub Actions CodeQL analysis of the exact final candidate. Prior candidate runs
-      were clean; the reconstructed public repository must independently rerun all three.
+- [x] Finish active changes and run the full deterministic suite on the published release.
+- [x] Confirm the GitHub Actions matrix and privacy scan pass from a clean checkout of
+      the exact `v0.6.2` release on Python 3.11, 3.12, and 3.13 for Windows.
+- [x] Resolve or justify every open finding from Python, JavaScript/TypeScript, and
+      GitHub Actions CodeQL analysis of the exact `v0.6.2` release. The published
+      release completed the required CodeQL checks without an open finding.
 - [ ] Verify setup and first launch on a clean Windows user account.
 - [ ] Capture one sanitized Presence screenshot or short demo with synthetic content.
 - [x] Publish measured capabilities and current limitations without aspirational claims.
@@ -40,8 +41,9 @@ unchecked item from a clean source scan.
 - [x] Include the owner-approved Apache-2.0 license and NOTICE file.
 - [x] Apply the prepared public description, summary, and topics.
 - [ ] Set the homepage/documentation link on GitHub.
-- [x] Create the `v0.6.0` tagged prerelease with release notes, source archives,
-      distributions, and published SHA-256 checksums.
+- [x] Preserve the historical `v0.6.0` and `v0.6.1` tagged prereleases, and publish the
+      current `v0.6.2` tagged prerelease with release notes, distributions, source
+      archives, and published SHA-256 checksums.
 - [x] Retire older public preview refs and keep the development repository and archive
       private; anonymous checks return no older public branch, tag, release, or commit.
 - [x] Keep raw internal queues and generated evidence excluded; publish only curated,

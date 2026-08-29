@@ -17,7 +17,7 @@ import re
 import time
 import unicodedata
 from dataclasses import dataclass
-from typing import Any, Mapping, Sequence, Union
+from typing import Any, Mapping, Union
 from urllib.parse import parse_qsl, unquote_to_bytes, urlsplit, urlunsplit
 
 
@@ -323,9 +323,10 @@ def validate_public_url(value: Any, label: str = "url") -> str:
             f"{label} may not use a non-canonical numeric host"
         )
     try:
-        parsed.port
+        validated_port = parsed.port
     except ValueError as exc:
         raise PublicBridgeError(f"{label} contains an invalid port") from exc
+    del validated_port
     if address is None and re.fullmatch(r"[a-z0-9.-]{1,253}", hostname) is None:
         raise PublicBridgeError(f"{label} host must be an ASCII domain or IP address")
     if address is not None and (

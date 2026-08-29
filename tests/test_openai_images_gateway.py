@@ -5,8 +5,10 @@ import io
 import json
 import os
 import tempfile
+import threading
 import unittest
 import urllib.error
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from unittest.mock import patch
 
@@ -213,6 +215,60 @@ class OpenAIImagesGatewayTests(unittest.TestCase):
                 provider.generate("valid prompt", "never.png")
         self.assertNotIn(secret, str(caught.exception))
         self.assertFalse((self.workspace / "never.png").exists())
+
+    def test_default_transport_refuses_redirect_without_forwarding_bearer_key(self):
+        received_authorization: list[str | None] = []
+
+        class RedirectTarget(BaseHTTPRequestHandler):
+            def do_GET(self):
+                received_authorization.append(self.headers.get("Authorization"))
+                self.send_response(200)
+                self.end_headers()
+
+            def do_POST(self):
+                received_authorization.append(self.headers.get("Authorization"))
+                self.send_response(200)
+                self.end_headers()
+
+            def log_message(self, *_args):
+                return
+
+        target = ThreadingHTTPServer(("127.0.0.1", 0), RedirectTarget)
+        target_thread = threading.Thread(target=target.serve_forever, daemon=True)
+        target_thread.start()
+
+        target_url = f"http://127.0.0.1:{target.server_port}/capture"
+
+        class RedirectSource(BaseHTTPRequestHandler):
+            def do_POST(self):
+                self.send_response(302)
+                self.send_header("Location", target_url)
+                self.end_headers()
+
+            def log_message(self, *_args):
+                return
+
+        source = ThreadingHTTPServer(("127.0.0.1", 0), RedirectSource)
+        source_thread = threading.Thread(target=source.serve_forever, daemon=True)
+        source_thread.start()
+        try:
+            provider = OpenAIImagesProvider(self.workspace)
+            secret = "sk-test-never-forward"
+            with (
+                patch.dict(os.environ, {"OPENAI_API_KEY": secret}, clear=True),
+                patch.object(images, "API_ROOT", f"http://127.0.0.1:{source.server_port}"),
+                self.assertRaisesRegex(OpenAIImageError, "request failed"),
+            ):
+                provider.generate("valid prompt", "redirect.png")
+            self.assertEqual(received_authorization, [])
+            self.assertFalse((self.workspace / "redirect.png").exists())
+        finally:
+            source.shutdown()
+            target.shutdown()
+            source.server_close()
+            target.server_close()
+            source_thread.join(timeout=2)
+            target_thread.join(timeout=2)
 
     def test_response_and_base64_bounds_fail_closed(self):
         oversized_response = lambda *_args, **_kwargs: FakeResponse(b"x" * 21)

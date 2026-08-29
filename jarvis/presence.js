@@ -20,6 +20,7 @@ const state = {
   projects: [],
   pinnedProjects: new Set(),
   activeView: "home",
+  utilityGeneration: 0,
   models: {},
   jobs: [],
   pendingImages: [],
@@ -1060,6 +1061,7 @@ function toggleCurrentProjectPin() {
 }
 
 function showChat() {
+  state.utilityGeneration += 1;
   state.activeView = "home";
   document.body.classList.remove("utility-mode");
   $("utility-view").hidden = true;
@@ -1094,8 +1096,30 @@ const utilityCopy = {
   customize: ["Preferences", "Settings", "Adjust Jarvis features, model mode, voice, and workspace behavior."],
 };
 
+function beginUtilityRender(view, generation = null) {
+  if (state.activeView !== view) return null;
+  const renderGeneration = generation === null
+    ? state.utilityGeneration + 1
+    : Number(generation);
+  if (!Number.isSafeInteger(renderGeneration) || renderGeneration < 1) return null;
+  if (generation === null) state.utilityGeneration = renderGeneration;
+  if (state.utilityGeneration !== renderGeneration) return null;
+  return {view, generation: renderGeneration, content: $("utility-content")};
+}
+
+function isUtilityRenderCurrent(render) {
+  return Boolean(
+    render
+    && state.activeView === render.view
+    && state.utilityGeneration === render.generation
+    && !$("utility-view").hidden
+  );
+}
+
 async function openUtility(view) {
   if (!Object.prototype.hasOwnProperty.call(utilityCopy, view)) return;
+  const generation = state.utilityGeneration + 1;
+  state.utilityGeneration = generation;
   state.activeView = view;
   document.body.classList.add("utility-mode");
   $("utility-view").hidden = false;
@@ -1108,13 +1132,14 @@ async function openUtility(view) {
     button.classList.toggle("active", button.dataset.view === view);
   });
   if (view === "projects") renderProjects();
-  if (view === "artifacts") await renderArtifacts();
-  if (view === "scheduled") await renderSchedule();
+  if (view === "artifacts") await renderArtifacts(generation);
+  if (view === "scheduled") await renderSchedule(generation);
   if (view === "dispatch") renderDispatch();
-  if (view === "devices") await renderNetworkInventory();
-  if (view === "companion") await renderCompanion();
-  if (view === "public-presence") await renderPublicPresence();
-  if (view === "customize") await renderCustomize();
+  if (view === "devices") await renderNetworkInventory(generation);
+  if (view === "companion") await renderCompanion(generation);
+  if (view === "public-presence") await renderPublicPresence(generation);
+  if (view === "customize") await renderCustomize(generation);
+  if (!isUtilityRenderCurrent({view, generation})) return;
   $("utility-view").scrollTop = 0;
 }
 
@@ -1320,10 +1345,13 @@ function formatTimestamp(value, seconds = false) {
   return Number.isNaN(date.getTime()) ? "Time unavailable" : date.toLocaleString();
 }
 
-async function renderArtifacts() {
-  const content = $("utility-content");
+async function renderArtifacts(generation = null) {
+  const render = beginUtilityRender("artifacts", generation);
+  if (!render) return;
+  const {content} = render;
   content.replaceChildren(emptyUtility("Loading project artifacts…"));
   const result = await api(`/api/artifacts?project_id=${encodeURIComponent(state.projectId)}`);
+  if (!isUtilityRenderCurrent(render)) return;
   content.replaceChildren();
   const project = activeProject();
   const summary = document.createElement("section");
@@ -1411,10 +1439,13 @@ function scheduledRow(titleText, metaText, statusText) {
   return row;
 }
 
-async function renderSchedule() {
-  const content = $("utility-content");
+async function renderSchedule(generation = null) {
+  const render = beginUtilityRender("scheduled", generation);
+  if (!render) return;
+  const {content} = render;
   content.replaceChildren(emptyUtility("Loading scheduled work…"));
   const result = await api("/api/schedule");
+  if (!isUtilityRenderCurrent(render)) return;
   content.replaceChildren(
     scheduleSection("Task queue", result.tasks || [], (row) => scheduledRow(
       `#${row.id} · ${row.prompt || "Untitled task"}`,
@@ -3021,8 +3052,10 @@ function paintNetworkInventory() {
   }
 }
 
-async function renderNetworkInventory() {
-  const content = $("utility-content");
+async function renderNetworkInventory(generation = null) {
+  const render = beginUtilityRender("devices", generation);
+  if (!render) return;
+  const {content} = render;
   content.replaceChildren(emptyUtility("Loading stored Home Network inventory…"));
   const [networkResult, bluetoothResult] = await Promise.allSettled([
     api("/api/network-inventory"),
@@ -3050,6 +3083,7 @@ async function renderNetworkInventory() {
     };
   }
   showNetworkDefenseIncidents(state.networkInventory?.pending_incidents);
+  if (!isUtilityRenderCurrent(render)) return;
   paintNetworkInventory();
 }
 
@@ -3071,11 +3105,14 @@ async function controlPublicPresence(action) {
   await renderPublicPresence();
 }
 
-async function renderPublicPresence() {
-  const content = $("utility-content");
+async function renderPublicPresence(generation = null) {
+  const render = beginUtilityRender("public-presence", generation);
+  if (!render) return;
+  const {content} = render;
   content.replaceChildren(emptyUtility("Checking the Public Presence boundary…"));
   const data = await api("/api/public-presence");
   state.publicPresence = data;
+  if (!isUtilityRenderCurrent(render)) return;
   const summary = publicPresenceSummary(data);
 
   const overview = document.createElement("article");
@@ -3233,12 +3270,15 @@ async function controlCompanionQuick(action, mode = null) {
   if (state.activeView === "companion") await renderCompanion();
 }
 
-async function renderCompanion() {
-  const content = $("utility-content");
+async function renderCompanion(generation = null) {
+  const render = beginUtilityRender("companion", generation);
+  if (!render) return;
+  const {content} = render;
   content.replaceChildren(emptyUtility("Loading Screen Companion…"));
   const data = await api("/api/screen-companion");
   state.screenCompanion = data;
   renderCompanionQuick();
+  if (!isUtilityRenderCurrent(render)) return;
   content.replaceChildren();
 
   const overview = document.createElement("section");
@@ -3619,8 +3659,10 @@ function maybeShowFeatureOnboarding() {
   if (!dialog.open) dialog.showModal();
 }
 
-async function renderCustomize() {
-  const content = $("utility-content");
+async function renderCustomize(generation = null) {
+  const render = beginUtilityRender("customize", generation);
+  if (!render) return;
+  const {content} = render;
   content.replaceChildren();
   const card = document.createElement("section");
   card.className = "utility-card";
@@ -3655,6 +3697,7 @@ async function renderCustomize() {
   content.append(card);
 
   const featureStatus = await refreshFeatureOnboarding();
+  if (!isUtilityRenderCurrent(render)) return;
   const features = document.createElement("section");
   features.className = "utility-card";
   const featureHead = document.createElement("div");
@@ -3767,6 +3810,17 @@ function isHistoricalConversationEvent(event) {
   return Number.isFinite(createdAt) && createdAt < state.pageStartedAt - 2;
 }
 
+function isCurrentConversationJob(payload) {
+  if (!payload?.conversation_id || !payload?.job_id) return false;
+  return state.activeJobs.get(payload.conversation_id) === payload.job_id
+    // The server removes a finished job just after enqueueing its terminal
+    // event. A status refresh can therefore clear activeJobs before the next
+    // event poll. Progress/stream nodes are client-held, job-correlated proof
+    // that the terminal event belongs to the request already being rendered.
+    || state.progressNodes.has(payload.job_id)
+    || state.streamNodes.has(payload.job_id);
+}
+
 async function pollEvents() {
   if (state.polling) return;
   state.polling = true;
@@ -3793,10 +3847,16 @@ async function pollEvents() {
         : null;
       const belongsHere = Boolean(eventTarget);
       if (event.kind === "started" && payload.conversation_id) {
+        const activeJob = state.activeJobs.get(payload.conversation_id);
+        if (activeJob && activeJob !== payload.job_id) continue;
         state.activeJobs.set(payload.conversation_id, payload.job_id);
         refreshConversations().catch(() => {});
         syncBusy();
       }
+      const requiresCurrentJob = [
+        "activity", "assistant_delta", "assistant", "error", "fatal", "cancelled",
+      ].includes(event.kind) && payload.conversation_id;
+      if (requiresCurrentJob && !isCurrentConversationJob(payload)) continue;
       if (["assistant", "error", "fatal", "cancelled"].includes(event.kind)
           && payload.conversation_id) {
         state.activeJobs.delete(payload.conversation_id);

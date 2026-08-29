@@ -14,6 +14,7 @@ from typing import Any
 
 from .redaction import contains_secret
 from .screen_companion import DEFAULT_EXCLUDED_APPS, WindowsForegroundProvider
+from .trusted_executables import windows_system_executable
 
 
 _PROTECTED_COMPONENTS = frozenset({
@@ -163,12 +164,11 @@ def _physical_storage_devices() -> list[dict[str, Any]] | None:
     with _STORAGE_CACHE_LOCK:
         if _STORAGE_CACHE is not None and current - _STORAGE_CACHE_AT < 60:
             return [dict(item) for item in _STORAGE_CACHE]
-    windows = _windows_directory()
-    powershell = (
-        windows / "System32" / "WindowsPowerShell" / "v1.0" / "powershell.exe"
-        if windows is not None else None
-    )
-    if powershell is None or not powershell.is_file():
+    try:
+        powershell = windows_system_executable(
+            "System32", "WindowsPowerShell", "v1.0", "powershell.exe"
+        )
+    except (OSError, PermissionError, ValueError):
         return None
     command = (
         "$ErrorActionPreference='Stop';"

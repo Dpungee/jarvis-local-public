@@ -46,6 +46,16 @@ class OpenAIImageValidationError(OpenAIImageError, ValueError):
     """Raised before an invalid local or remote operation is attempted."""
 
 
+class _NoRedirectHandler(urllib.request.HTTPRedirectHandler):
+    """Keep provider credentials bound to the configured OpenAI origin."""
+
+    def redirect_request(
+        self, req: Any, fp: Any, code: int, msg: str,
+        headers: Any, newurl: str,
+    ) -> None:
+        return None
+
+
 def _is_link(details: os.stat_result) -> bool:
     return stat.S_ISLNK(details.st_mode) or bool(
         getattr(details, "st_file_attributes", 0)
@@ -160,7 +170,7 @@ class OpenAIImagesProvider:
             raise OpenAIImageValidationError("Image request timeout must be 1-300 seconds")
         self.api_key_env = api_key_env
         self.timeout_seconds = float(timeout_seconds)
-        self._opener = opener or urllib.request.urlopen
+        self._opener = opener or urllib.request.build_opener(_NoRedirectHandler()).open
 
     def __repr__(self) -> str:
         return (

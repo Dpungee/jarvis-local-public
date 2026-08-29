@@ -155,6 +155,63 @@ class CapabilityGatewayTests(unittest.TestCase):
                 transport=lambda *_args, **_kwargs: "{}",
             )
 
+    def test_exact_non_pattern_credential_is_scrubbed_from_success_response(self):
+        self.install()
+        fixture_value = "ordinarySecret42"
+        os.environ["JARVIS_CONNECTOR_EXAMPLE_ACCESS"] = fixture_value
+        snapshot = self.gateway.approval_snapshot(
+            "example-service",
+            "create-item",
+            {"category": "notes", "text": "hello world"},
+        )
+
+        result = self.gateway.call(
+            "example-service",
+            "create-item",
+            {"category": "notes", "text": "hello world"},
+            expected_snapshot=snapshot,
+            transport=lambda *_args, **_kwargs: json.dumps({
+                "message": "created",
+                "echo": fixture_value,
+                "metadata": {"innocuous": f"received {fixture_value}"},
+            }),
+        )
+
+        serialized = json.dumps(result, sort_keys=True)
+        self.assertNotIn(fixture_value, serialized)
+        self.assertEqual(result["result"]["echo"], "[REDACTED]")
+        self.assertEqual(
+            result["result"]["metadata"]["innocuous"],
+            "received [REDACTED]",
+        )
+
+    def test_exact_non_pattern_credential_is_scrubbed_from_transport_exception(self):
+        self.install()
+        fixture_value = "ordinarySecret42"
+        os.environ["JARVIS_CONNECTOR_EXAMPLE_ACCESS"] = fixture_value
+        snapshot = self.gateway.approval_snapshot(
+            "example-service",
+            "create-item",
+            {"category": "notes", "text": "hello world"},
+        )
+
+        def failing_transport(*_args, **_kwargs):
+            raise RuntimeError(f"innocuous upstream detail: {fixture_value}")
+
+        with self.assertRaises(ConnectorError) as raised:
+            self.gateway.call(
+                "example-service",
+                "create-item",
+                {"category": "notes", "text": "hello world"},
+                expected_snapshot=snapshot,
+                transport=failing_transport,
+            )
+
+        self.assertNotIn(fixture_value, str(raised.exception))
+        self.assertIn("[REDACTED]", str(raised.exception))
+        self.assertIsNone(raised.exception.__cause__)
+        self.assertIsNone(raised.exception.__context__)
+
     def test_executable_secret_and_open_schemas_are_rejected(self):
         cases = []
         secret = connector_manifest()

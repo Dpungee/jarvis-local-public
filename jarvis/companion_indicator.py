@@ -30,6 +30,14 @@ _ALLOWED_ACTION_STATES = frozenset({
 })
 
 
+class _NoRedirectHandler(urllib.request.HTTPRedirectHandler):
+    def redirect_request(
+        self, req: Any, fp: Any, code: int, msg: str,
+        headers: Any, newurl: str,
+    ) -> None:
+        return None
+
+
 class _MonitorInfo(ctypes.Structure):
     _fields_ = [
         ("cbSize", wintypes.DWORD),
@@ -158,16 +166,10 @@ def indicator_presentation(state: dict[str, Any] | None) -> IndicatorPresentatio
 
 
 def indicator_should_be_visible(state: dict[str, Any] | None) -> bool:
-    """Show controls after Presence returns a real Companion status.
-
-    A missing status remains hidden so startup and connection failures do not flash
-    an unactionable window.  Off, paused, and unavailable states remain visible:
-    those labels tell the operator that observation is not happening and preserve
-    the On/Resume controls needed to change that state.
-    """
+    """Show the privacy indicator only while screen observation is active."""
 
     view = indicator_presentation(state)
-    return isinstance(state, dict) and view.online
+    return view.online and view.mode != "disabled" and not view.paused
 
 
 class CompanionIndicatorClient:
@@ -182,6 +184,7 @@ class CompanionIndicatorClient:
         authority = f"[{normalized_host}]" if ":" in normalized_host else normalized_host
         self.base_url = f"http://{authority}:{port}"
         self.timeout = max(0.25, min(float(timeout), 10.0))
+        self._opener = urllib.request.build_opener(_NoRedirectHandler()).open
 
     def _request(self, path: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
         body = None
@@ -197,7 +200,7 @@ class CompanionIndicatorClient:
             headers=headers,
             method=method,
         )
-        with urllib.request.urlopen(request, timeout=self.timeout) as response:
+        with self._opener(request, timeout=self.timeout) as response:
             if response.status != 200:
                 raise RuntimeError(f"Presence returned HTTP {response.status}")
             decoded = json.loads(response.read(65_536).decode("utf-8"))

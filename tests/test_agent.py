@@ -605,6 +605,47 @@ class AgentLoopTests(unittest.TestCase):
         self.assertIn("[[jarvis-image:generated-images/jarvis-image-", result)
         self.assertEqual(client.requests, [])
 
+    def test_negated_or_advisory_image_language_never_calls_image_tools(self):
+        image = ImageAttachment(
+            "image/png", b"\x89PNG\r\n\x1a\nprivate-pixels", "logo.png"
+        )
+        cases = (
+            ("You should not generate a logo image.", ()),
+            ("I cannot generate a logo image.", ()),
+            ("Do not:\n generate a logo image.", ()),
+            ("Should I improve this image?", (image,)),
+            ("If you edit this image, what would change?", (image,)),
+            ("Do not:\n edit this image.", (image,)),
+        )
+        for prompt, attachments in cases:
+            with self.subTest(prompt=prompt):
+                client = VisionScriptedClient([
+                    FakeResponse(content="I treated that as a question or negation and made no image change."),
+                ])
+                agent = Agent(
+                    replace(
+                        self.config,
+                        fast_model="openai:gpt-5.6-luna",
+                        reasoning_model="openai:gpt-5.6-luna",
+                        coding_model="openai:gpt-5.6-luna",
+                        deep_model="openai:gpt-5.6-luna",
+                    ),
+                    self.memory,
+                    client=client,
+                    coding_review=False,
+                    coding_planning=False,
+                )
+                toolbox = ImageFakeToolBox()
+                agent.toolbox = toolbox
+
+                result = agent.run(prompt, attachments=attachments)
+
+                self.assertEqual(result.status, "complete", result.reason)
+                self.assertFalse({
+                    name for name, _arguments in toolbox.calls
+                }.intersection({"generate_image", "edit_attached_image"}))
+                self.assertEqual(len(client.requests), 1)
+
     def test_neural_recall_is_injected_and_learns_from_the_task_outcome(self):
         class FakeEmbedder:
             model = "test-embedding"
@@ -1898,6 +1939,12 @@ class AgentLoopTests(unittest.TestCase):
             "Rewrite this politely: send the report when you finish",
             'Rephrase this sentence: "Email the document to the account owner."',
             "Translate `Post this update to my X account.` into Spanish.",
+            "Explain this example: «Send the report by email.»",
+            "Explain <blockquote>Send the report by email.</blockquote>",
+            "Explain:\n> Send the report by email.",
+            'Explain the unclosed example: "Send the report by email.',
+            'Explain the example: "Send the report\nby email."',
+            "Explain [Send the report by email](https://example.com).",
         )
         for prompt in positive:
             with self.subTest(prompt=prompt):
@@ -1907,6 +1954,9 @@ class AgentLoopTests(unittest.TestCase):
                 self.assertFalse(_requires_external_mutation(prompt))
         self.assertTrue(_requires_external_mutation(
             "Rewrite this politely, then send the report."
+        ))
+        self.assertTrue(_requires_external_mutation(
+            "Rewrite «Send this» politely, then send the report by email."
         ))
 
     def test_approval_retry_followups_require_exact_affirmative_context(self):

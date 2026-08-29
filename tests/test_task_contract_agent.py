@@ -10,8 +10,11 @@ from unittest.mock import patch
 
 from jarvis.agent import (
     Agent,
+    _authorized_feature_configuration_write,
     _is_clear_tool_free_dialogue,
+    _is_pending_goal_followup,
     _may_request_feature_configuration,
+    _requires_web,
     _weather_clarification_location,
 )
 from jarvis.config import Config
@@ -391,7 +394,8 @@ class TaskContractAgentIntegrationTests(unittest.TestCase):
 
         result = agent.run(prompt)
 
-        self.assertEqual(result.status, "complete")
+        self.assertEqual(result.status, "incomplete")
+        self.assertIn("persistent artifact", str(result.reason))
         self.assertEqual(len(client.requests), 2)
         self.assertEqual(result.metrics["model_attempts"], 2)
         self.assertEqual(result.metrics["retries"], 0)
@@ -430,12 +434,189 @@ class TaskContractAgentIntegrationTests(unittest.TestCase):
 
         result = agent.run(update, conversation_id=conversation_id)
 
-        self.assertEqual(result.status, "complete")
+        self.assertEqual(result.status, "incomplete")
+        self.assertIn("persistent artifact", str(result.reason))
         self.assertIn("supplied notes", str(result))
         self.assertEqual(len(client.requests), 2)
         self.assertEqual(result.metrics["model_attempts"], 2)
         self.assertEqual(result.metrics["retries"], 0)
+        pending = self.memory.pending_conversation_goal(conversation_id)
+        self.assertIsNotNone(pending)
+        self.assertEqual(pending["state"], "incomplete")
+        self.assertTrue(pending["retryable"])
+
+    def test_missing_input_goal_repeats_one_question_for_nonanswer_followups(self):
+        original_prompt = "Shape these notes into a field guide."
+        pending_contract = parse_task_contract(
+            contract_payload(
+                original_prompt,
+                lane="creation",
+                target=None,
+            ),
+            grounding_texts=[original_prompt],
+        )
+        conversation_id = self.memory.new_conversation("missing source followups")
+        goal_id = self.memory.begin_conversation_goal(
+            conversation_id,
+            original_prompt,
+            "conversation",
+            contract=pending_contract,
+        )
+        agent, client = self.make_agent()
+
+        with patch.object(
+            self.memory,
+            "resume_conversation_goal",
+            side_effect=AssertionError("a non-answer must not resume the goal"),
+        ), patch.object(
+            agent.toolbox,
+            "execute",
+            side_effect=AssertionError("a clarification must not execute a tool"),
+        ):
+            for followup in (
+                "yes",
+                "go ahead",
+                "go head",
+                "are you done?",
+                "are you done yet?",
+                "is that finished?",
+                "how's it going?",
+                "what's the update on it?",
+                "what did you find?",
+                "ok retry",
+            ):
+                with self.subTest(followup=followup):
+                    result = agent.run(followup, conversation_id=conversation_id)
+                    self.assertEqual(
+                        str(result),
+                        "What should I use for the missing source material?",
+                    )
+                    self.assertEqual(str(result).count("?"), 1)
+                    self.assertEqual(result.status, "complete")
+                    self.assertEqual(result.tool_calls, 0)
+
+                    pending = self.memory.pending_conversation_goal(conversation_id)
+                    self.assertIsNotNone(pending)
+                    self.assertEqual(pending["id"], goal_id)
+                    self.assertEqual(pending["state"], "active")
+                    self.assertEqual(pending["resume_count"], 0)
+                    self.assertEqual(pending["context"], [])
+
+        self.assertEqual(client.requests, [])
+
+    def test_missing_input_guard_survives_restart_then_accepts_grounded_answer(self):
+        original_prompt = "Shape these notes into a field guide."
+        pending_contract = parse_task_contract(
+            contract_payload(
+                original_prompt,
+                lane="creation",
+                target=None,
+            ),
+            grounding_texts=[original_prompt],
+        )
+        conversation_id = self.memory.new_conversation("restart clarification")
+        goal_id = self.memory.begin_conversation_goal(
+            conversation_id,
+            original_prompt,
+            "conversation",
+            contract=pending_contract,
+        )
+        database_path = self.data_dir / "agent.db"
+        self.memory.close()
+        self.memory = Memory(database_path)
+
+        update = "Use these notes: verify inputs; preserve last-known-good data."
+        continued = contract_payload(
+            original_prompt,
+            lane="creation",
+            target=None,
+            relation="continue",
+        )
+        continued["evidence_source"] = "none"
+        agent, client = self.make_agent([
+            FakeResponse(json.dumps(continued)),
+            FakeResponse("Field guide created from the supplied notes."),
+        ])
+
+        with patch.object(
+            agent.toolbox,
+            "execute",
+            side_effect=AssertionError("the clarification must not execute a tool"),
+        ):
+            blocked = agent.run("go head", conversation_id=conversation_id)
+
+        self.assertEqual(
+            str(blocked),
+            "What should I use for the missing source material?",
+        )
+        self.assertEqual(client.requests, [])
+        pending = self.memory.pending_conversation_goal(conversation_id)
+        self.assertIsNotNone(pending)
+        self.assertEqual(pending["id"], goal_id)
+        self.assertEqual(pending["resume_count"], 0)
+
+        completed = agent.run(update, conversation_id=conversation_id)
+
+        self.assertEqual(completed.status, "incomplete")
+        self.assertIn("persistent artifact", str(completed.reason))
+        self.assertIn("supplied notes", str(completed))
+        self.assertEqual(len(client.requests), 2)
+        pending = self.memory.pending_conversation_goal(conversation_id)
+        self.assertIsNotNone(pending)
+        self.assertEqual(pending["state"], "incomplete")
+        self.assertTrue(pending["retryable"])
+
+    def test_action_shaped_grounded_answer_uses_contract_reconciliation(self):
+        original_prompt = "Assess the supplied telemetry for the anomaly."
+        pending_contract = parse_task_contract(
+            contract_payload(
+                original_prompt,
+                lane="inspection",
+                target="telemetry",
+                missing_inputs=[{"key": "capture"}],
+            ),
+            grounding_texts=[original_prompt],
+        )
+        update = "Use that file: telemetry.json."
+        continued = TaskContract(
+            version=1,
+            relation="continue",
+            lane="inspection",
+            artifact_kind="none",
+            evidence_source="provided",
+            requested_effect="read",
+            goal=original_prompt,
+            target="telemetry.json",
+            constraint_quotes=(update,),
+            missing_inputs=(),
+            acceptance=("answer",),
+        )
+        conversation_id = self.memory.new_conversation("grounded action answer")
+        self.memory.begin_conversation_goal(
+            conversation_id,
+            original_prompt,
+            "file_ops",
+            contract=pending_contract,
+        )
+        agent, client = self.make_agent([
+            FakeResponse("The supplied capture shows no unexplained drift."),
+        ])
+
+        with patch.object(
+            agent,
+            "_resolve_task_contract",
+            return_value=continued,
+        ) as resolver:
+            result = agent.run(update, conversation_id=conversation_id)
+
+        self.assertEqual(result.status, "complete")
+        self.assertIn("no unexplained drift", str(result))
+        resolver.assert_called_once()
+        self.assertEqual(len(client.requests), 1)
         self.assertIsNone(self.memory.pending_conversation_goal(conversation_id))
+
+    def test_go_head_is_not_a_global_continuation_without_a_pending_goal(self):
+        self.assertFalse(_is_pending_goal_followup("go head"))
 
     def test_unfamiliar_semantics_map_to_broad_lanes_without_phrase_rules(self):
         cases = (
@@ -592,6 +773,382 @@ class TaskContractAgentIntegrationTests(unittest.TestCase):
         }
         self.assertEqual(writable, FEATURE_SETUP_TOOLS)
 
+    def test_forged_configuration_write_on_unrelated_text_cannot_reach_feature_tools(self):
+        prompt = (
+            "Turn this supplied sentence into a five-word note: "
+            "cobalt trees lean west."
+        )
+        raw = contract_payload(
+            prompt,
+            lane="configuration",
+            target="cobalt trees lean west",
+        )
+        raw["requested_effect"] = "write"
+        forged = parse_task_contract(raw, grounding_texts=[prompt])
+        config = replace(
+            self.config,
+            root=self.temp_dir,
+            autonomy="full",
+            network_access="disabled",
+            bluetooth_access="disabled",
+        )
+        client = ContractCapableClient([
+            FakeResponse(tool_calls=[{
+                "function": {
+                    "name": "feature_setup_decide",
+                    "arguments": {
+                        "capability_id": "bluetooth-inventory",
+                        "decision": "skip",
+                    },
+                }
+            }]),
+            FakeResponse("I handled the supplied sentence."),
+        ])
+        agent = Agent(
+            config,
+            self.memory,
+            lambda _event: None,
+            client=client,
+            coding_review=False,
+            coding_planning=False,
+        )
+        environment = self.temp_dir / ".env"
+        before = environment.read_bytes() if environment.exists() else None
+        executed: list[str] = []
+        original_execute = agent.toolbox.execute
+
+        def record_execute(name, arguments):
+            executed.append(name)
+            return original_execute(name, arguments)
+
+        with patch.object(
+            agent,
+            "_resolve_task_contract",
+            return_value=forged,
+        ) as resolver, patch.object(
+            agent.toolbox,
+            "execute",
+            side_effect=record_execute,
+        ):
+            agent.run(prompt)
+
+        resolver.assert_called_once()
+        offered = {
+            str(item.get("function", {}).get("name") or "")
+            for item in client.requests[0]["tools"]
+        }
+        after = environment.read_bytes() if environment.exists() else None
+        violations = []
+        if offered.intersection(FEATURE_SETUP_TOOLS):
+            violations.append("feature setup tools were exposed")
+        if set(executed).intersection(FEATURE_SETUP_TOOLS):
+            violations.append("a feature setup tool executed")
+        if after != before:
+            violations.append("feature configuration state mutated")
+        self.assertEqual(violations, [])
+
+    def test_creation_write_cannot_complete_from_prose_without_artifact_evidence(self):
+        prompt = (
+            "Turn this unfamiliar cobalt lattice text into a one-page field note: "
+            "cobalt equals west."
+        )
+        contract = parse_task_contract(
+            contract_payload(
+                prompt,
+                lane="creation",
+                target="cobalt equals west",
+            ),
+            grounding_texts=[prompt],
+        )
+        agent, client = self.make_agent([
+            FakeResponse("I created the requested one-page field note."),
+        ])
+
+        with patch.object(
+            agent,
+            "_resolve_task_contract",
+            return_value=contract,
+        ) as resolver:
+            result = agent.run(prompt)
+
+        resolver.assert_called_once()
+        successful_artifacts = [
+            path for path in self.workspace.rglob("*") if path.is_file()
+        ]
+        violations = []
+        if result.status == "complete":
+            violations.append("creation was marked complete from prose alone")
+        if result.tool_calls != 0:
+            violations.append("the zero-tool adversarial setup unexpectedly used a tool")
+        if successful_artifacts:
+            violations.append("the zero-tool adversarial setup unexpectedly wrote an artifact")
+        self.assertEqual(violations, [])
+
+    def test_raw_authorized_creation_completes_after_successful_artifact_write(self):
+        prompt = (
+            "Create field-note.md in the workspace from this exact text: "
+            "cobalt equals west."
+        )
+        contract = parse_task_contract(
+            contract_payload(
+                prompt,
+                lane="creation",
+                target="field-note.md",
+            ),
+            grounding_texts=[prompt],
+        )
+        agent, client = self.make_agent([
+            FakeResponse(tool_calls=[{
+                "function": {
+                    "name": "write_file",
+                    "arguments": {
+                        "path": "field-note.md",
+                        "content": "cobalt equals west.\n",
+                    },
+                }
+            }]),
+            FakeResponse("Created field-note.md from the supplied text."),
+        ])
+
+        with patch.object(
+            agent,
+            "_resolve_task_contract",
+            return_value=contract,
+        ) as resolver:
+            result = agent.run(prompt)
+
+        resolver.assert_called_once()
+        self.assertEqual(result.status, "complete", result.reason)
+        self.assertGreaterEqual(result.tool_calls, 1)
+        self.assertEqual(
+            (self.workspace / "field-note.md").read_text(encoding="utf-8"),
+            "cobalt equals west.\n",
+        )
+
+    def test_exact_feature_identity_and_decision_may_expose_feature_write(self):
+        cases = (
+            ("Set up Home-network inventory.", "Home-network inventory"),
+            ("Disable Automatic paired-Bluetooth checks.", "Automatic paired-Bluetooth checks"),
+            ("Skip bluetooth-monitoring.", "bluetooth-monitoring"),
+        )
+        for prompt, target in cases:
+            with self.subTest(prompt=prompt):
+                raw = contract_payload(
+                    prompt,
+                    lane="configuration",
+                    target=target,
+                )
+                raw["requested_effect"] = "write"
+                contract = parse_task_contract(raw, grounding_texts=[prompt])
+                agent, client = self.make_agent([
+                    FakeResponse("The exact feature decision is ready for review."),
+                ])
+                with patch.object(
+                    agent,
+                    "_resolve_task_contract",
+                    return_value=contract,
+                ):
+                    agent.run(prompt)
+                offered = {
+                    str(item.get("function", {}).get("name") or "")
+                    for item in client.requests[0]["tools"]
+                }
+                self.assertIn("feature_setup_decide", offered)
+
+    def test_partial_status_quoted_and_background_feature_text_cannot_expose_write(self):
+        cases = (
+            (
+                "Disable Bluetooth.",
+                "Bluetooth",
+                "write",
+                None,
+                "interactive",
+            ),
+            (
+                "Is Automatic paired-Bluetooth checks configured?",
+                "Automatic paired-Bluetooth checks",
+                "read",
+                None,
+                "interactive",
+            ),
+            (
+                'Explain the phrase "Disable Automatic paired-Bluetooth checks."',
+                "Automatic paired-Bluetooth checks",
+                "write",
+                None,
+                "interactive",
+            ),
+            (
+                "Disable Automatic paired-Bluetooth checks.",
+                "Automatic paired-Bluetooth checks",
+                "write",
+                77,
+                "proactive",
+            ),
+            (
+                "Do not enable Home-network inventory.",
+                "Home-network inventory",
+                "write",
+                None,
+                "interactive",
+            ),
+            (
+                "Explain how to enable Home-network inventory.",
+                "Home-network inventory",
+                "write",
+                None,
+                "interactive",
+            ),
+            (
+                "Should I enable Home-network inventory?",
+                "Home-network inventory",
+                "write",
+                None,
+                "interactive",
+            ),
+            (
+                "If it seems useful, enable Home-network inventory.",
+                "Home-network inventory",
+                "write",
+                None,
+                "interactive",
+            ),
+        )
+        for prompt, target, effect, task_id, origin in cases:
+            with self.subTest(prompt=prompt, task_id=task_id):
+                raw = contract_payload(
+                    prompt,
+                    lane="configuration",
+                    target=target,
+                )
+                raw["requested_effect"] = effect
+                contract = parse_task_contract(raw, grounding_texts=[prompt])
+                agent, client = self.make_agent([
+                    FakeResponse("No feature state was changed."),
+                ])
+                with patch.object(
+                    agent,
+                    "_resolve_task_contract",
+                    return_value=contract,
+                ):
+                    agent.run(
+                        prompt,
+                        task_id=task_id,
+                        prediction_origin=origin,
+                    )
+                offered = {
+                    str(item.get("function", {}).get("name") or "")
+                    for item in client.requests[0]["tools"]
+                }
+                self.assertNotIn("feature_setup_decide", offered)
+
+    def test_feature_write_authority_requires_an_unnegated_imperative(self):
+        allowed = {
+            "Enable Home-network inventory.": "setup",
+            "Jarvis, disable Home-network inventory now.": "disable",
+            "Please skip Home-network inventory.": "skip",
+            "Turn Home-network inventory on.": "setup",
+            "Turn Home-network inventory off.": "disable",
+        }
+        for prompt, expected_decision in allowed.items():
+            with self.subTest(prompt=prompt):
+                feature_ids, decisions = _authorized_feature_configuration_write(
+                    prompt
+                )
+                self.assertEqual(feature_ids, frozenset({"private-lan-inventory"}))
+                self.assertEqual(decisions, frozenset({expected_decision}))
+
+        denied = (
+            "Do not enable Home-network inventory.",
+            "Never enable Home-network inventory.",
+            "Explain how to enable Home-network inventory.",
+            "Should I enable Home-network inventory?",
+            "If it seems useful, enable Home-network inventory.",
+            "Maybe enable Home-network inventory.",
+        )
+        for prompt in denied:
+            with self.subTest(prompt=prompt):
+                self.assertEqual(
+                    _authorized_feature_configuration_write(prompt),
+                    (frozenset(), frozenset()),
+                )
+
+    def test_feature_tool_arguments_must_match_raw_authorized_identity_and_decision(self):
+        cases = (
+            (
+                "Skip bluetooth-monitoring.",
+                "bluetooth-monitoring",
+                {"capability_id": "private-lan-inventory", "decision": "skip"},
+            ),
+            (
+                "Disable bluetooth-monitoring.",
+                "bluetooth-monitoring",
+                {"capability_id": "bluetooth-monitoring", "decision": "skip"},
+            ),
+        )
+        for prompt, target, arguments in cases:
+            with self.subTest(prompt=prompt, arguments=arguments):
+                raw = contract_payload(
+                    prompt,
+                    lane="configuration",
+                    target=target,
+                )
+                raw["requested_effect"] = "write"
+                contract = parse_task_contract(raw, grounding_texts=[prompt])
+                client = ContractCapableClient([
+                    FakeResponse(tool_calls=[{
+                        "function": {
+                            "name": "feature_setup_decide",
+                            "arguments": arguments,
+                        }
+                    }]),
+                    FakeResponse("No mismatched decision was applied."),
+                ])
+                agent = Agent(
+                    replace(self.config, root=self.temp_dir, autonomy="full"),
+                    self.memory,
+                    lambda _event: None,
+                    client=client,
+                    coding_review=False,
+                    coding_planning=False,
+                )
+                environment = self.temp_dir / ".env"
+                before = environment.read_bytes() if environment.exists() else None
+                executed: list[tuple[str, dict]] = []
+                original_execute = agent.toolbox.execute
+
+                def record_execute(
+                    name,
+                    tool_arguments,
+                    *,
+                    _executed=executed,
+                    _original_execute=original_execute,
+                ):
+                    _executed.append((name, dict(tool_arguments)))
+                    return _original_execute(name, tool_arguments)
+
+                with patch.object(
+                    agent,
+                    "_resolve_task_contract",
+                    return_value=contract,
+                ), patch.object(
+                    agent.toolbox,
+                    "execute",
+                    side_effect=record_execute,
+                ):
+                    agent.run(prompt)
+
+                mismatched_calls = [
+                    call for call in executed if call[0] == "feature_setup_decide"
+                ]
+                after = environment.read_bytes() if environment.exists() else None
+                violations = []
+                if mismatched_calls:
+                    violations.append("mismatched feature decision executed")
+                if after != before:
+                    violations.append("mismatched feature decision mutated state")
+                self.assertEqual(violations, [])
+
     def test_skip_and_disable_reduce_feature_authority_without_approval(self):
         config = replace(
             self.config,
@@ -662,6 +1219,8 @@ class TaskContractAgentIntegrationTests(unittest.TestCase):
             "How much RAM should my computer have?",
             "How does Python memory management work?",
             "How many hard drives should a NAS have?",
+            "yo jar wht u think abt dogs",
+            "nah what do u think of dogs",
         )
         for prompt in cases:
             with self.subTest(prompt=prompt):
@@ -692,6 +1251,72 @@ class TaskContractAgentIntegrationTests(unittest.TestCase):
                 self.assertFalse(client.requests[0]["think"])
                 self.assertEqual(result.metrics["model_attempts"], 1)
                 self.assertEqual(result.metrics["retries"], 0)
+
+    def test_slang_current_information_uses_grounded_public_research_now(self):
+        prompt = "can u chek if Python 3.15 is out rn?"
+        contract = parse_task_contract(
+            contract_payload(
+                prompt,
+                lane="research",
+                target="Python 3.15",
+            ),
+            grounding_texts=[prompt],
+        )
+        evidence = [{
+            "tool": "web_search",
+            "arguments": {"query": prompt},
+            "success": True,
+            "response": {
+                "ok": True,
+                "result": {
+                    "verified_pages": [{
+                        "title": "Python downloads",
+                        "url": "https://www.python.org/downloads/",
+                        "content": "Current supported Python release information.",
+                    }],
+                },
+            },
+        }]
+        agent, client = self.make_agent([
+            FakeResponse(
+                "The official downloads page provides the current supported release "
+                "information, installer choices, and maintenance status needed to verify "
+                "whether Python 3.15 is available now. Check its named stable release and "
+                "published support details rather than relying on an undated model answer: "
+                "https://www.python.org/downloads/"
+            ),
+        ])
+
+        with patch.object(
+            agent,
+            "_resolve_task_contract",
+            return_value=contract,
+        ) as resolver, patch.object(
+            agent,
+            "_collect_quick_public_evidence",
+            return_value=(
+                evidence,
+                {"web_search"},
+                {"https://www.python.org/downloads/"},
+                1,
+            ),
+        ) as collector:
+            result = agent.run(prompt)
+
+        self.assertEqual(result.status, "complete", result.reason)
+        resolver.assert_called_once()
+        collector.assert_called_once_with(
+            prompt,
+            require_relevance=False,
+            strict_core_terms=True,
+        )
+        self.assertEqual(len(client.requests), 1)
+        self.assertIn("python.org/downloads", str(result))
+
+    def test_slang_event_lookup_is_web_intent_not_dialogue(self):
+        prompt = "is eminem touring next yr?"
+        self.assertTrue(_requires_web(prompt))
+        self.assertFalse(_is_clear_tool_free_dialogue(prompt))
 
     def test_operational_and_ambiguous_requests_do_not_claim_fast_dialogue(self):
         for prompt in (
@@ -990,7 +1615,10 @@ class TaskContractAgentIntegrationTests(unittest.TestCase):
                 agent, client = self.make_agent([FakeResponse("Bounded response.")])
                 with patch.object(agent, "_resolve_task_contract", return_value=contract):
                     result = agent.run(prompt)
-                self.assertEqual(result.status, "complete")
+                self.assertEqual(
+                    result.status,
+                    "incomplete" if contract.lane == "creation" else "complete",
+                )
                 exposed = {
                     str(item.get("function", {}).get("name") or "")
                     for item in client.requests[0]["tools"]

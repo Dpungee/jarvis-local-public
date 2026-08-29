@@ -123,12 +123,26 @@ class ClientTests(unittest.TestCase):
         self.assertEqual(response.metrics.prompt_tokens, 12)
         self.assertEqual(response.metrics.completion_tokens, 4)
         self.assertEqual(response.metadata["model"], "qwen3:8b")
+        self.assertTrue(response.model_attested)
+        self.assertTrue(response.metadata["model_attested"])
         self.assertEqual(len(opener.timeouts), 2)
         for actual, configured in zip(opener.timeouts, (2.0, 9.0), strict=True):
             with self.subTest(actual=actual, configured=configured):
                 self.assertGreater(actual, 0)
                 self.assertLessEqual(actual, configured)
                 self.assertAlmostEqual(actual, configured, delta=0.05)
+
+    def test_chat_model_attestation_fails_closed_without_server_model(self):
+        opener = SequenceOpen(FakeResponse({
+            "message": {"role": "assistant", "content": "done"},
+        }))
+        client = make_client(opener)
+
+        response = client.chat([], [], "qwen3:8b")
+
+        self.assertIsNone(response.model)
+        self.assertFalse(response.model_attested)
+        self.assertFalse(response.metadata["model_attested"])
 
     def test_chat_payload_honors_explicit_thinking_and_keeps_model_warm(self):
         opener = SequenceOpen(

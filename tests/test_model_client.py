@@ -945,11 +945,29 @@ class CodexCLIProviderTests(unittest.TestCase):
             client = build_model_client(config)
 
         self.assertIsNotNone(client.codex_cli)
-        self.addCleanup(client.codex_cli._working_directory_owner.cleanup)
+        self.addCleanup(client.close)
         cli_directory = Path(client.codex_cli.working_directory).resolve()
         self.assertTrue(cli_directory.is_dir())
         self.assertNotEqual(cli_directory, config.root.resolve())
         self.assertNotIn(str(config.root.resolve()).casefold(), str(cli_directory).casefold())
+
+    def test_codex_close_releases_every_owned_temporary_directory(self):
+        launch_owner = tempfile.TemporaryDirectory(prefix="jarvis-codex-close-test-")
+        launch_path = Path(launch_owner.name)
+        client = CodexCLIClient(
+            "codex.exe",
+            working_directory=launch_path,
+            working_directory_owner=launch_owner,
+        )
+        sqlite_path = client.codex_sqlite_home
+
+        client.close()
+
+        self.assertFalse(launch_path.exists())
+        self.assertFalse(sqlite_path.exists())
+        # Cleanup is idempotent so service shutdown and object finalization may
+        # both call it without racing temporary-directory finalizers.
+        client.close()
 
     def test_codex_clients_isolate_sqlite_state_while_sharing_attested_login_home(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -1519,6 +1537,194 @@ class CodexCLIProviderTests(unittest.TestCase):
         self.assertNotIn("First private prompt", second_input)
         self.assertNotIn("First answer", second_input)
 
+    def test_app_server_thread_selection_is_not_served_model_attestation(self):
+        transport = _CodexAppServerTransport(
+            "codex.exe",
+            working_directory=".",
+            environment={},
+            config_overrides=(),
+            skill_override="",
+            generation_timeout=10,
+            max_response_bytes=4096,
+        )
+        requests = []
+        schema = {
+            "type": "object",
+            "additionalProperties": False,
+            "required": ["intent"],
+            "properties": {"intent": {"type": "string"}},
+        }
+
+        def request(method, params, **_kwargs):
+            requests.append((method, params))
+            if method == "thread/start":
+                return {
+                    "thread": {"id": "thr_structured"},
+                    "model": "gpt-5.6-luna",
+                    "modelProvider": "openai",
+                }
+            if method == "turn/start":
+                turn_id = "turn_structured"
+                answer = json.dumps({
+                    "content": {"intent": "dialogue"},
+                    "tool_calls": [],
+                })
+                transport._handle_message({
+                    "method": "item/completed",
+                    "params": {
+                        "threadId": params["threadId"],
+                        "turnId": turn_id,
+                        "item": {
+                            "type": "agentMessage",
+                            "id": "item_structured",
+                            "text": answer,
+                        },
+                    },
+                })
+                transport._handle_message({
+                    "method": "turn/completed",
+                    "params": {
+                        "threadId": params["threadId"],
+                        "turn": {"id": turn_id, "status": "completed", "items": []},
+                    },
+                })
+                return {"turn": {"id": turn_id}}
+            raise AssertionError(f"unexpected request: {method}")
+
+        with patch.object(transport, "_ensure_started"), patch.object(
+            transport, "_request", side_effect=request
+        ):
+            response = transport.chat_stream(
+                [{"role": "user", "content": "Classify this turn"}],
+                "gpt-5.6-luna",
+                lambda _text: None,
+                think=False,
+                cancellation_guard=None,
+                response_format=schema,
+            )
+
+        self.assertEqual(json.loads(response["content"]), {"intent": "dialogue"})
+        self.assertEqual(response.model, "gpt-5.6-luna")
+        self.assertFalse(response.model_attested)
+        self.assertFalse(response.metadata["model_attested"])
+        turn_params = next(params for method, params in requests if method == "turn/start")
+        self.assertIn("outputSchema", turn_params)
+        self.assertEqual(
+            turn_params["outputSchema"]["properties"]["content"], schema
+        )
+        self.assertEqual(
+            turn_params["outputSchema"]["properties"]["tool_calls"]["maxItems"],
+            0,
+        )
+
+    def test_app_server_does_not_attest_missing_or_untrusted_provider(self):
+        for provider in (None, "anthropic"):
+            with self.subTest(provider=provider):
+                transport = _CodexAppServerTransport(
+                    "codex.exe",
+                    working_directory=".",
+                    environment={},
+                    config_overrides=(),
+                    skill_override="",
+                    generation_timeout=10,
+                    max_response_bytes=4096,
+                )
+
+                def request(
+                    method,
+                    params,
+                    *,
+                    _provider=provider,
+                    _transport=transport,
+                    **_kwargs,
+                ):
+                    if method == "thread/start":
+                        result = {
+                            "thread": {"id": "thr_unattested"},
+                            "model": "gpt-5.6-luna",
+                        }
+                        if _provider is not None:
+                            result["modelProvider"] = _provider
+                        return result
+                    if method == "turn/start":
+                        turn_id = "turn_unattested"
+                        _transport._handle_message({
+                            "method": "item/completed",
+                            "params": {
+                                "threadId": params["threadId"],
+                                "turnId": turn_id,
+                                "item": {
+                                    "type": "agentMessage",
+                                    "id": "item_unattested",
+                                    "text": "Hello",
+                                },
+                            },
+                        })
+                        _transport._handle_message({
+                            "method": "turn/completed",
+                            "params": {
+                                "threadId": params["threadId"],
+                                "turn": {
+                                    "id": turn_id,
+                                    "status": "completed",
+                                    "items": [],
+                                },
+                            },
+                        })
+                        return {"turn": {"id": turn_id}}
+                    raise AssertionError(f"unexpected request: {method}")
+
+                with patch.object(transport, "_ensure_started"), patch.object(
+                    transport, "_request", side_effect=request
+                ):
+                    response = transport.chat_stream(
+                        [{"role": "user", "content": "Hello"}],
+                        "auto",
+                        lambda _text: None,
+                        think=False,
+                        cancellation_guard=None,
+                    )
+
+                self.assertEqual(response.model, "auto")
+                self.assertFalse(response.model_attested)
+
+    def test_structured_app_server_failure_falls_back_without_attestation(self):
+        class BrokenAppServer:
+            _process = None
+
+            def __init__(self):
+                self.closed = False
+
+            def chat_stream(self, *_args, **_kwargs):
+                raise ModelProviderError(
+                    "codex-cli", "structured transport broke", provider_unavailable=True
+                )
+
+            def close(self):
+                self.closed = True
+
+        client = CodexCLIClient("codex.exe", working_directory=".")
+        broken = BrokenAppServer()
+        client._app_server = broken
+        fallback_response = ChatResponse(
+            {"role": "assistant", "content": '{"intent":"dialogue"}'},
+            {"done": True, "model": "gpt-5.6-luna", "model_attested": False},
+        )
+        with patch.object(
+            client, "_chat_exec", return_value=fallback_response
+        ) as fallback:
+            response = client.chat(
+                [{"role": "user", "content": "Classify this"}],
+                [],
+                "gpt-5.6-luna",
+                response_format={"type": "object"},
+            )
+
+        self.assertIs(response, fallback_response)
+        self.assertFalse(response.model_attested)
+        self.assertTrue(broken.closed)
+        fallback.assert_called_once()
+
     def test_app_server_discards_delayed_prior_turn_before_new_turn_is_bound(self):
         transport = _CodexAppServerTransport(
             "codex.exe",
@@ -1696,6 +1902,36 @@ class CodexCLIProviderTests(unittest.TestCase):
         self.assertIsNone(conversation)
         transport._stop_locked()
         self.assertEqual(transport._conversations, {})
+
+    def test_app_server_close_releases_all_process_pipes(self):
+        transport = _CodexAppServerTransport(
+            "codex.exe",
+            working_directory=".",
+            environment={},
+            config_overrides=(),
+            skill_override="",
+            generation_timeout=10,
+            max_response_bytes=1024,
+        )
+
+        class StoppedProcess:
+            def __init__(self):
+                self.stdin = io.BytesIO()
+                self.stdout = io.BytesIO()
+                self.stderr = io.BytesIO()
+
+            def poll(self):
+                return 0
+
+        process = StoppedProcess()
+        transport._process = process
+
+        transport.close()
+
+        self.assertTrue(process.stdin.closed)
+        self.assertTrue(process.stdout.closed)
+        self.assertTrue(process.stderr.closed)
+        self.assertIsNone(transport._process)
 
     def test_app_server_continuation_is_isolated_by_jarvis_conversation(self):
         transport = _CodexAppServerTransport(
@@ -2060,6 +2296,8 @@ class OpenAIProviderTests(unittest.TestCase):
 
         self.assertEqual("".join(deltas), "Hello world")
         self.assertEqual(response["content"], "Hello world")
+        self.assertEqual(response.model, "gpt-5.6")
+        self.assertTrue(response.model_attested)
         self.assertEqual(response.metrics.prompt_tokens, 4)
         self.assertEqual(response.metrics.completion_tokens, 2)
         self.assertTrue(json.loads(opener.requests[0].data)["stream"])
@@ -2216,8 +2454,30 @@ class OpenAIProviderTests(unittest.TestCase):
         self.assertIsInstance(response, ChatResponse)
         self.assertEqual(response["content"], "Calling again")
         self.assertEqual(response["tool_calls"][0]["function"]["name"], "lookup")
+        self.assertEqual(response.model, "gpt-5.6")
+        self.assertTrue(response.model_attested)
         self.assertEqual(response.metrics.prompt_tokens, 31)
         self.assertEqual(response.metrics.completion_tokens, 7)
+
+    def test_responses_api_does_not_attest_a_missing_model_field(self):
+        opener = SequenceOpen(FakeResponse({
+            "status": "completed",
+            "output": [{
+                "type": "message",
+                "content": [{"type": "output_text", "text": "done"}],
+            }],
+            "usage": {"input_tokens": 1, "output_tokens": 1},
+        }))
+        client = OpenAIClient(
+            "sk-test-openai-not-real", open_url=opener, max_retries=0
+        )
+
+        response = client.chat(
+            [{"role": "user", "content": "hello"}], [], "gpt-5.6"
+        )
+
+        self.assertEqual(response.model, "gpt-5.6")
+        self.assertFalse(response.model_attested)
 
     def test_http_errors_do_not_echo_key_or_provider_body(self):
         error = urllib.error.HTTPError(
@@ -2359,6 +2619,8 @@ class AnthropicProviderTests(unittest.TestCase):
 
         self.assertEqual(deltas, ["Hi ", "there"])
         self.assertEqual(response["content"], "Hi there")
+        self.assertEqual(response.model, "claude-sonnet-5")
+        self.assertTrue(response.model_attested)
         self.assertEqual(response.metrics.prompt_tokens, 5)
         self.assertEqual(response.metrics.completion_tokens, 2)
         self.assertTrue(json.loads(opener.requests[0].data)["stream"])
@@ -2424,8 +2686,27 @@ class AnthropicProviderTests(unittest.TestCase):
         self.assertNotIn("private reasoning", response["content"])
         self.assertEqual(response["content"], "I need one more lookup.")
         self.assertEqual(response["tool_calls"][0]["function"]["arguments"], {"query": "beta"})
+        self.assertEqual(response.model, "claude-sonnet-5")
+        self.assertTrue(response.model_attested)
         self.assertEqual(response.metrics.prompt_tokens, 29)
         self.assertEqual(response.metrics.completion_tokens, 11)
+
+    def test_messages_api_does_not_attest_a_missing_model_field(self):
+        opener = SequenceOpen(FakeResponse({
+            "content": [{"type": "text", "text": "done"}],
+            "stop_reason": "end_turn",
+            "usage": {"input_tokens": 1, "output_tokens": 1},
+        }))
+        client = AnthropicClient(
+            "sk-ant-test-not-real", open_url=opener, max_retries=0
+        )
+
+        response = client.chat(
+            [{"role": "user", "content": "hello"}], [], "claude-sonnet-5"
+        )
+
+        self.assertEqual(response.model, "claude-sonnet-5")
+        self.assertFalse(response.model_attested)
 
     def test_fast_sonnet_five_request_disables_thinking(self):
         opener = SequenceOpen(FakeResponse({

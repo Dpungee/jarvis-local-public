@@ -1,0 +1,630 @@
+{
+  "schema_version": 2,
+  "name": "Jarvis Phase 2 synthetic TaskContract holdout v2",
+  "description": "Synthetic, prompt-diverse evaluation cases held out from Jarvis training, memory, and lesson pipelines. Cases cover every live semantic lane, material ambiguity, noisy language, continuation, restart, immediate-action evidence, and durable future work.",
+  "dataset_kind": "synthetic_held_out",
+  "exclusion_policy": {
+    "training": false,
+    "memory": false,
+    "lesson_distillation": false,
+    "prompt_receipts": false
+  },
+  "exit_criteria": {
+    "route_accuracy_min": 0.9,
+    "ambiguity_recall_min": 0.9,
+    "specified_false_positive_rate_max": 0.1,
+    "relation_accuracy_min": 0.9,
+    "continuation_recall_min": 0.9,
+    "constraint_retention_min": 1.0,
+    "effect_accuracy_min": 0.9,
+    "evidence_accuracy_min": 0.9,
+    "acceptance_retention_min": 1.0,
+    "false_unavailable_max": 0,
+    "immediate_evidence_rate_min": 1.0,
+    "promise_only_immediate_max": 0,
+    "unbacked_future_promise_max": 0,
+    "future_queue_receipt_rate_min": 1.0,
+    "restart_preservation_rate_min": 1.0
+  },
+  "cases": [
+    {
+      "id": "p2_dialogue_01",
+      "tags": ["dialogue", "slang"],
+      "operator_prompt": "yo be real, is it weird that rainy days make me wanna do absolutely nothing?",
+      "recent_user_turns": [],
+      "latest_assistant_context": null,
+      "pending_contract": null,
+      "expected": {"lane": "dialogue", "clarification": false, "relation": "new", "retained_constraints": [], "requested_effect": "none", "evidence_source": "none", "acceptance_contains": ["answer"], "false_unavailable": false, "action_timing": "none", "immediate_action_evidence_required": false, "future_queue_receipt_required": false, "restart_sequence_outcome": "not_applicable"}
+    },
+    {
+      "id": "p2_dialogue_02",
+      "tags": ["dialogue", "misspelling"],
+      "operator_prompt": "wat do u think makes a dog trust somebody fast",
+      "recent_user_turns": [],
+      "latest_assistant_context": null,
+      "pending_contract": null,
+      "expected": {"lane": "dialogue", "clarification": false, "relation": "new", "retained_constraints": [], "requested_effect": "none", "evidence_source": "none", "acceptance_contains": ["answer"], "false_unavailable": false, "action_timing": "none", "immediate_action_evidence_required": false, "future_queue_receipt_required": false, "restart_sequence_outcome": "not_applicable"}
+    },
+    {
+      "id": "p2_dialogue_03",
+      "tags": ["dialogue", "ambiguous", "short_followup"],
+      "operator_prompt": "so... what's your take?",
+      "recent_user_turns": [],
+      "latest_assistant_context": "I can help with that.",
+      "pending_contract": null,
+      "expected": {"lane": "dialogue", "clarification": true, "relation": "new", "retained_constraints": [], "requested_effect": "none", "evidence_source": "none", "acceptance_contains": [], "false_unavailable": false, "action_timing": "none", "immediate_action_evidence_required": false, "future_queue_receipt_required": false, "restart_sequence_outcome": "not_applicable"}
+    },
+    {
+      "id": "p2_dialogue_04",
+      "tags": ["dialogue", "transformation"],
+      "operator_prompt": "Make this sound less harsh: Your crew left a mess and I need it fixed today.",
+      "recent_user_turns": [],
+      "latest_assistant_context": null,
+      "pending_contract": null,
+      "expected": {"lane": "dialogue", "clarification": false, "relation": "new", "retained_constraints": ["less harsh"], "requested_effect": "none", "evidence_source": "none", "acceptance_contains": ["answer"], "false_unavailable": false, "action_timing": "none", "immediate_action_evidence_required": false, "future_queue_receipt_required": false, "restart_sequence_outcome": "not_applicable"}
+    },
+    {
+      "id": "p2_dialogue_05",
+      "tags": ["dialogue", "pending_contract", "short_followup", "cancellation"],
+      "operator_prompt": "nah drop it",
+      "recent_user_turns": ["Compare today's home internet plans under $80."],
+      "latest_assistant_context": "I was preparing the comparison.",
+      "pending_contract": {"version": 1, "relation": "new", "lane": "research", "artifact_kind": "none", "evidence_source": "public_web", "requested_effect": "read", "goal": "Compare today's home internet plans under $80.", "target": "home internet plans", "constraint_quotes": ["under $80"], "missing_inputs": [], "acceptance": ["sources"]},
+      "expected": {"lane": "dialogue", "clarification": false, "relation": "cancel", "retained_constraints": [], "requested_effect": "none", "evidence_source": "none", "acceptance_contains": ["answer"], "false_unavailable": false, "action_timing": "none", "immediate_action_evidence_required": false, "future_queue_receipt_required": false, "restart_sequence_outcome": "not_applicable"}
+    },
+    {
+      "id": "p2_dialogue_06",
+      "tags": ["dialogue", "pending_contract", "replacement", "slang"],
+      "operator_prompt": "actually forget that, gimme three funny names for a tiny orange cat",
+      "recent_user_turns": ["Check this week's airline baggage fees."],
+      "latest_assistant_context": "I was checking current airline pages.",
+      "pending_contract": {"version": 1, "relation": "new", "lane": "research", "artifact_kind": "none", "evidence_source": "public_web", "requested_effect": "read", "goal": "Check this week's airline baggage fees.", "target": "airline baggage fees", "constraint_quotes": ["this week's"], "missing_inputs": [], "acceptance": ["sources"]},
+      "expected": {"lane": "dialogue", "clarification": false, "relation": "replace", "retained_constraints": ["three", "tiny orange cat"], "requested_effect": "none", "evidence_source": "none", "acceptance_contains": ["answer"], "false_unavailable": false, "action_timing": "none", "immediate_action_evidence_required": false, "future_queue_receipt_required": false, "restart_sequence_outcome": "not_applicable"}
+    },
+    {
+      "id": "p2_dialogue_07",
+      "tags": ["dialogue", "explanation"],
+      "operator_prompt": "Explain sunk cost fallacy like I'm twelve, with one everyday example.",
+      "recent_user_turns": [],
+      "latest_assistant_context": null,
+      "pending_contract": null,
+      "expected": {"lane": "dialogue", "clarification": false, "relation": "new", "retained_constraints": ["like I'm twelve", "one everyday example"], "requested_effect": "none", "evidence_source": "none", "acceptance_contains": ["answer"], "false_unavailable": false, "action_timing": "none", "immediate_action_evidence_required": false, "future_queue_receipt_required": false, "restart_sequence_outcome": "not_applicable"}
+    },
+    {
+      "id": "p2_dialogue_08",
+      "tags": ["dialogue", "brainstorm"],
+      "operator_prompt": "Brainstorm five low-key date ideas for a cold night at home.",
+      "recent_user_turns": [],
+      "latest_assistant_context": null,
+      "pending_contract": null,
+      "expected": {"lane": "dialogue", "clarification": false, "relation": "new", "retained_constraints": ["five", "at home"], "requested_effect": "none", "evidence_source": "none", "acceptance_contains": ["answer"], "false_unavailable": false, "action_timing": "none", "immediate_action_evidence_required": false, "future_queue_receipt_required": false, "restart_sequence_outcome": "not_applicable"}
+    },
+    {
+      "id": "p2_dialogue_09",
+      "tags": ["dialogue", "provided_text"],
+      "operator_prompt": "Summarize this in one sentence: We moved the launch because the payment provider needs another security review.",
+      "recent_user_turns": [],
+      "latest_assistant_context": null,
+      "pending_contract": null,
+      "expected": {"lane": "dialogue", "clarification": false, "relation": "new", "retained_constraints": ["one sentence"], "requested_effect": "none", "evidence_source": "provided", "acceptance_contains": ["answer"], "false_unavailable": false, "action_timing": "none", "immediate_action_evidence_required": false, "future_queue_receipt_required": false, "restart_sequence_outcome": "not_applicable"}
+    },
+    {
+      "id": "p2_dialogue_10",
+      "tags": ["dialogue", "misspelling", "slang"],
+      "operator_prompt": "idk man, shuld i train today or just take the rest day",
+      "recent_user_turns": [],
+      "latest_assistant_context": null,
+      "pending_contract": null,
+      "expected": {"lane": "dialogue", "clarification": false, "relation": "new", "retained_constraints": [], "requested_effect": "none", "evidence_source": "none", "acceptance_contains": ["answer"], "false_unavailable": false, "action_timing": "none", "immediate_action_evidence_required": false, "future_queue_receipt_required": false, "restart_sequence_outcome": "not_applicable"}
+    },
+    {
+      "id": "p2_dialogue_11",
+      "tags": ["dialogue", "ambiguous"],
+      "operator_prompt": "Help me choose.",
+      "recent_user_turns": [],
+      "latest_assistant_context": null,
+      "pending_contract": null,
+      "expected": {"lane": "dialogue", "clarification": true, "relation": "new", "retained_constraints": [], "requested_effect": "none", "evidence_source": "none", "acceptance_contains": [], "false_unavailable": false, "action_timing": "none", "immediate_action_evidence_required": false, "future_queue_receipt_required": false, "restart_sequence_outcome": "not_applicable"}
+    },
+    {
+      "id": "p2_dialogue_12",
+      "tags": ["dialogue", "pending_contract", "restart", "short_followup"],
+      "operator_prompt": "keep going",
+      "recent_user_turns": [],
+      "latest_assistant_context": "The provider stopped before returning the explanation.",
+      "pending_contract": {"version": 1, "relation": "new", "lane": "dialogue", "artifact_kind": "none", "evidence_source": "none", "requested_effect": "none", "goal": "Explain how compound interest works using a $100 example.", "target": null, "constraint_quotes": ["using a $100 example"], "missing_inputs": [], "acceptance": ["answer"]},
+      "expected": {"lane": "dialogue", "clarification": false, "relation": "continue", "retained_constraints": ["using a $100 example"], "requested_effect": "none", "evidence_source": "none", "acceptance_contains": ["answer"], "false_unavailable": false, "action_timing": "none", "immediate_action_evidence_required": false, "future_queue_receipt_required": false, "restart_sequence_outcome": "preserved"}
+    },
+
+    {
+      "id": "p2_research_01",
+      "tags": ["research", "current_information"],
+      "operator_prompt": "Check the current IRS mileage rate using the official IRS page.",
+      "recent_user_turns": [],
+      "latest_assistant_context": null,
+      "pending_contract": null,
+      "expected": {"lane": "research", "clarification": false, "relation": "new", "retained_constraints": ["current", "official IRS page"], "requested_effect": "read", "evidence_source": "public_web", "acceptance_contains": ["sources"], "false_unavailable": false, "action_timing": "immediate", "immediate_action_evidence_required": true, "future_queue_receipt_required": false, "restart_sequence_outcome": "not_applicable"}
+    },
+    {
+      "id": "p2_research_02",
+      "tags": ["research", "current_information", "misspelling"],
+      "operator_prompt": "find the newest stable Rust realease and cite the offical release notes",
+      "recent_user_turns": [],
+      "latest_assistant_context": null,
+      "pending_contract": null,
+      "expected": {"lane": "research", "clarification": false, "relation": "new", "retained_constraints": ["newest stable", "offical release notes"], "requested_effect": "read", "evidence_source": "public_web", "acceptance_contains": ["sources"], "false_unavailable": false, "action_timing": "immediate", "immediate_action_evidence_required": true, "future_queue_receipt_required": false, "restart_sequence_outcome": "not_applicable"}
+    },
+    {
+      "id": "p2_research_03",
+      "tags": ["research", "ambiguous"],
+      "operator_prompt": "go research that for me",
+      "recent_user_turns": [],
+      "latest_assistant_context": "There are several possible topics.",
+      "pending_contract": null,
+      "expected": {"lane": "research", "clarification": true, "relation": "new", "retained_constraints": [], "requested_effect": "read", "evidence_source": "none", "acceptance_contains": [], "false_unavailable": false, "action_timing": "none", "immediate_action_evidence_required": false, "future_queue_receipt_required": false, "restart_sequence_outcome": "not_applicable"}
+    },
+    {
+      "id": "p2_research_04",
+      "tags": ["research", "current_information", "pending_contract", "restart", "short_followup", "slang"],
+      "operator_prompt": "u done yet?",
+      "recent_user_turns": [],
+      "latest_assistant_context": "The lookup was interrupted before sources were fetched.",
+      "pending_contract": {"version": 1, "relation": "new", "lane": "research", "artifact_kind": "none", "evidence_source": "public_web", "requested_effect": "read", "goal": "Compare current prepaid phone plans under $40 per month.", "target": "prepaid phone plans", "constraint_quotes": ["current", "under $40 per month"], "missing_inputs": [], "acceptance": ["sources"]},
+      "expected": {"lane": "research", "clarification": false, "relation": "continue", "retained_constraints": ["current", "under $40 per month"], "requested_effect": "read", "evidence_source": "public_web", "acceptance_contains": ["sources"], "false_unavailable": false, "action_timing": "immediate", "immediate_action_evidence_required": true, "future_queue_receipt_required": false, "restart_sequence_outcome": "preserved"}
+    },
+    {
+      "id": "p2_research_05",
+      "tags": ["research", "current_information", "slang"],
+      "operator_prompt": "yo whats the weather lookin like in 10001 today",
+      "recent_user_turns": [],
+      "latest_assistant_context": null,
+      "pending_contract": null,
+      "expected": {"lane": "research", "clarification": false, "relation": "new", "retained_constraints": ["10001", "today"], "requested_effect": "read", "evidence_source": "public_web", "acceptance_contains": ["sources"], "false_unavailable": false, "action_timing": "immediate", "immediate_action_evidence_required": true, "future_queue_receipt_required": false, "restart_sequence_outcome": "not_applicable"}
+    },
+    {
+      "id": "p2_research_06",
+      "tags": ["research", "current_information", "ambiguous"],
+      "operator_prompt": "what's the weather today?",
+      "recent_user_turns": [],
+      "latest_assistant_context": null,
+      "pending_contract": null,
+      "expected": {"lane": "research", "clarification": true, "relation": "new", "retained_constraints": ["today"], "requested_effect": "read", "evidence_source": "public_web", "acceptance_contains": [], "false_unavailable": false, "action_timing": "none", "immediate_action_evidence_required": false, "future_queue_receipt_required": false, "restart_sequence_outcome": "not_applicable"}
+    },
+    {
+      "id": "p2_research_07",
+      "tags": ["research", "current_information"],
+      "operator_prompt": "Find any active CPSC recalls for portable power stations this month.",
+      "recent_user_turns": [],
+      "latest_assistant_context": null,
+      "pending_contract": null,
+      "expected": {"lane": "research", "clarification": false, "relation": "new", "retained_constraints": ["active", "this month"], "requested_effect": "read", "evidence_source": "public_web", "acceptance_contains": ["sources"], "false_unavailable": false, "action_timing": "immediate", "immediate_action_evidence_required": true, "future_queue_receipt_required": false, "restart_sequence_outcome": "not_applicable"}
+    },
+    {
+      "id": "p2_research_08",
+      "tags": ["research", "current_information"],
+      "operator_prompt": "Verify the current carry-on size limit on JetBlue's official site.",
+      "recent_user_turns": [],
+      "latest_assistant_context": null,
+      "pending_contract": null,
+      "expected": {"lane": "research", "clarification": false, "relation": "new", "retained_constraints": ["current", "official site"], "requested_effect": "read", "evidence_source": "public_web", "acceptance_contains": ["sources"], "false_unavailable": false, "action_timing": "immediate", "immediate_action_evidence_required": true, "future_queue_receipt_required": false, "restart_sequence_outcome": "not_applicable"}
+    },
+    {
+      "id": "p2_research_09",
+      "tags": ["research", "current_information", "misspelling"],
+      "operator_prompt": "see if theres a newer BIOS for the MSI MAG B650 TOMAHAWK WIFI rn",
+      "recent_user_turns": [],
+      "latest_assistant_context": null,
+      "pending_contract": null,
+      "expected": {"lane": "research", "clarification": false, "relation": "new", "retained_constraints": ["MSI MAG B650 TOMAHAWK WIFI", "rn"], "requested_effect": "read", "evidence_source": "public_web", "acceptance_contains": ["sources"], "false_unavailable": false, "action_timing": "immediate", "immediate_action_evidence_required": true, "future_queue_receipt_required": false, "restart_sequence_outcome": "not_applicable"}
+    },
+    {
+      "id": "p2_research_10",
+      "tags": ["research", "current_information"],
+      "operator_prompt": "Compare today's listed prices for three 27-inch 4K monitors under $500.",
+      "recent_user_turns": [],
+      "latest_assistant_context": null,
+      "pending_contract": null,
+      "expected": {"lane": "research", "clarification": false, "relation": "new", "retained_constraints": ["today's listed prices", "three", "under $500"], "requested_effect": "read", "evidence_source": "public_web", "acceptance_contains": ["sources"], "false_unavailable": false, "action_timing": "immediate", "immediate_action_evidence_required": true, "future_queue_receipt_required": false, "restart_sequence_outcome": "not_applicable"}
+    },
+    {
+      "id": "p2_research_11",
+      "tags": ["research", "provided_text"],
+      "operator_prompt": "Using only the two pasted policy excerpts, compare their retention rules.",
+      "recent_user_turns": [],
+      "latest_assistant_context": null,
+      "pending_contract": null,
+      "expected": {"lane": "research", "clarification": false, "relation": "new", "retained_constraints": ["only the two pasted policy excerpts"], "requested_effect": "read", "evidence_source": "provided", "acceptance_contains": ["answer"], "false_unavailable": false, "action_timing": "immediate", "immediate_action_evidence_required": true, "future_queue_receipt_required": false, "restart_sequence_outcome": "not_applicable"}
+    },
+    {
+      "id": "p2_research_12",
+      "tags": ["research", "current_information", "pending_contract", "short_followup"],
+      "operator_prompt": "go ahead and check now",
+      "recent_user_turns": ["Check whether the county burn ban is still active using the county site."],
+      "latest_assistant_context": "I have the exact research goal saved.",
+      "pending_contract": {"version": 1, "relation": "new", "lane": "research", "artifact_kind": "none", "evidence_source": "public_web", "requested_effect": "read", "goal": "Check whether the county burn ban is still active using the county site.", "target": "county burn ban", "constraint_quotes": ["still active", "using the county site"], "missing_inputs": [], "acceptance": ["sources"]},
+      "expected": {"lane": "research", "clarification": false, "relation": "continue", "retained_constraints": ["still active", "using the county site"], "requested_effect": "read", "evidence_source": "public_web", "acceptance_contains": ["sources"], "false_unavailable": false, "action_timing": "immediate", "immediate_action_evidence_required": true, "future_queue_receipt_required": false, "restart_sequence_outcome": "not_applicable"}
+    },
+
+    {
+      "id": "p2_creation_01",
+      "tags": ["creation", "document"],
+      "operator_prompt": "Create a one-page PDF named crew-brief.pdf from these notes: arrival 7 AM, helmets required, rain plan in trailer.",
+      "recent_user_turns": [],
+      "latest_assistant_context": null,
+      "pending_contract": null,
+      "expected": {"lane": "creation", "clarification": false, "relation": "new", "retained_constraints": ["one-page", "crew-brief.pdf"], "requested_effect": "write", "evidence_source": "provided", "acceptance_contains": ["artifact"], "false_unavailable": false, "action_timing": "immediate", "immediate_action_evidence_required": true, "future_queue_receipt_required": false, "restart_sequence_outcome": "not_applicable"}
+    },
+    {
+      "id": "p2_creation_02",
+      "tags": ["creation", "software"],
+      "operator_prompt": "Build a tiny FastAPI service in the workspace with GET /ready and tests.",
+      "recent_user_turns": [],
+      "latest_assistant_context": null,
+      "pending_contract": null,
+      "expected": {"lane": "creation", "clarification": false, "relation": "new", "retained_constraints": ["GET /ready", "tests"], "requested_effect": "execute", "evidence_source": "workspace", "acceptance_contains": ["artifact", "tests"], "false_unavailable": false, "action_timing": "immediate", "immediate_action_evidence_required": true, "future_queue_receipt_required": false, "restart_sequence_outcome": "not_applicable"}
+    },
+    {
+      "id": "p2_creation_03",
+      "tags": ["creation", "image", "misspelling"],
+      "operator_prompt": "make a transparant PNG logo for Cedar Peak Plumbing, blue and simple",
+      "recent_user_turns": [],
+      "latest_assistant_context": null,
+      "pending_contract": null,
+      "expected": {"lane": "creation", "clarification": false, "relation": "new", "retained_constraints": ["Cedar Peak Plumbing", "blue and simple"], "requested_effect": "write", "evidence_source": "provided", "acceptance_contains": ["artifact"], "false_unavailable": false, "action_timing": "immediate", "immediate_action_evidence_required": true, "future_queue_receipt_required": false, "restart_sequence_outcome": "not_applicable"}
+    },
+    {
+      "id": "p2_creation_04",
+      "tags": ["creation", "ambiguous"],
+      "operator_prompt": "make me a slide deck",
+      "recent_user_turns": [],
+      "latest_assistant_context": null,
+      "pending_contract": null,
+      "expected": {"lane": "creation", "clarification": true, "relation": "new", "retained_constraints": [], "requested_effect": "write", "evidence_source": "provided", "acceptance_contains": [], "false_unavailable": false, "action_timing": "none", "immediate_action_evidence_required": false, "future_queue_receipt_required": false, "restart_sequence_outcome": "not_applicable"}
+    },
+    {
+      "id": "p2_creation_05",
+      "tags": ["creation", "data"],
+      "operator_prompt": "Turn this table into jobs.csv with the columns date, client, hours, and amount: 8/1, Reed, 3, 450.",
+      "recent_user_turns": [],
+      "latest_assistant_context": null,
+      "pending_contract": null,
+      "expected": {"lane": "creation", "clarification": false, "relation": "new", "retained_constraints": ["jobs.csv", "date, client, hours, and amount"], "requested_effect": "write", "evidence_source": "provided", "acceptance_contains": ["artifact"], "false_unavailable": false, "action_timing": "immediate", "immediate_action_evidence_required": true, "future_queue_receipt_required": false, "restart_sequence_outcome": "not_applicable"}
+    },
+    {
+      "id": "p2_creation_06",
+      "tags": ["creation", "software", "pending_contract", "restart", "short_followup"],
+      "operator_prompt": "go ahead",
+      "recent_user_turns": [],
+      "latest_assistant_context": "The build request was saved before the runtime restarted.",
+      "pending_contract": {"version": 1, "relation": "new", "lane": "creation", "artifact_kind": "software", "evidence_source": "workspace", "requested_effect": "execute", "goal": "Build a local invoice tracker with a health check and unit tests.", "target": "local invoice tracker", "constraint_quotes": ["health check", "unit tests"], "missing_inputs": [], "acceptance": ["artifact", "tests", "launch"]},
+      "expected": {"lane": "creation", "clarification": false, "relation": "continue", "retained_constraints": ["health check", "unit tests"], "requested_effect": "execute", "evidence_source": "workspace", "acceptance_contains": ["artifact", "tests", "launch"], "false_unavailable": false, "action_timing": "immediate", "immediate_action_evidence_required": true, "future_queue_receipt_required": false, "restart_sequence_outcome": "preserved"}
+    },
+    {
+      "id": "p2_creation_07",
+      "tags": ["creation", "document", "research", "current_information"],
+      "operator_prompt": "Research current OSHA heat guidance and save a cited one-page brief as heat-guide.pdf.",
+      "recent_user_turns": [],
+      "latest_assistant_context": null,
+      "pending_contract": null,
+      "expected": {"lane": "creation", "clarification": false, "relation": "new", "retained_constraints": ["current OSHA heat guidance", "one-page", "heat-guide.pdf"], "requested_effect": "write", "evidence_source": "public_web", "acceptance_contains": ["artifact", "sources"], "false_unavailable": false, "action_timing": "immediate", "immediate_action_evidence_required": true, "future_queue_receipt_required": false, "restart_sequence_outcome": "not_applicable"}
+    },
+    {
+      "id": "p2_creation_08",
+      "tags": ["creation", "document", "slang"],
+      "operator_prompt": "yo turn these bullets into a clean Word handoff called night-shift.docx: lock gate, charge radios, log fuel",
+      "recent_user_turns": [],
+      "latest_assistant_context": null,
+      "pending_contract": null,
+      "expected": {"lane": "creation", "clarification": false, "relation": "new", "retained_constraints": ["night-shift.docx", "clean Word handoff"], "requested_effect": "write", "evidence_source": "provided", "acceptance_contains": ["artifact"], "false_unavailable": false, "action_timing": "immediate", "immediate_action_evidence_required": true, "future_queue_receipt_required": false, "restart_sequence_outcome": "not_applicable"}
+    },
+    {
+      "id": "p2_creation_09",
+      "tags": ["creation", "ambiguous", "short_followup"],
+      "operator_prompt": "build that",
+      "recent_user_turns": [],
+      "latest_assistant_context": "A few unrelated app ideas were discussed.",
+      "pending_contract": null,
+      "expected": {"lane": "creation", "clarification": true, "relation": "new", "retained_constraints": [], "requested_effect": "execute", "evidence_source": "workspace", "acceptance_contains": [], "false_unavailable": false, "action_timing": "none", "immediate_action_evidence_required": false, "future_queue_receipt_required": false, "restart_sequence_outcome": "not_applicable"}
+    },
+    {
+      "id": "p2_creation_10",
+      "tags": ["creation", "document", "pending_contract", "short_followup"],
+      "operator_prompt": "use these notes: north gate opens at six; Kim has the keys; backup number is on the board",
+      "recent_user_turns": ["Create a one-page shift PDF, but I still need to give you the notes."],
+      "latest_assistant_context": "What source material should I use?",
+      "pending_contract": {"version": 1, "relation": "new", "lane": "creation", "artifact_kind": "document", "evidence_source": "provided", "requested_effect": "write", "goal": "Create a one-page shift PDF, but I still need to give you the notes.", "target": null, "constraint_quotes": ["one-page shift PDF"], "missing_inputs": [{"key": "source_material"}], "acceptance": []},
+      "expected": {"lane": "creation", "clarification": false, "relation": "continue", "retained_constraints": ["one-page shift PDF"], "requested_effect": "write", "evidence_source": "provided", "acceptance_contains": ["artifact"], "false_unavailable": false, "action_timing": "immediate", "immediate_action_evidence_required": true, "future_queue_receipt_required": false, "restart_sequence_outcome": "not_applicable"}
+    },
+    {
+      "id": "p2_creation_11",
+      "tags": ["creation", "software", "misspelling"],
+      "operator_prompt": "scafold a small Node app with /health, a readme, and actual tests then run em",
+      "recent_user_turns": [],
+      "latest_assistant_context": null,
+      "pending_contract": null,
+      "expected": {"lane": "creation", "clarification": false, "relation": "new", "retained_constraints": ["/health", "actual tests"], "requested_effect": "execute", "evidence_source": "workspace", "acceptance_contains": ["artifact", "tests"], "false_unavailable": false, "action_timing": "immediate", "immediate_action_evidence_required": true, "future_queue_receipt_required": false, "restart_sequence_outcome": "not_applicable"}
+    },
+    {
+      "id": "p2_creation_12",
+      "tags": ["creation", "document"],
+      "operator_prompt": "Create an xlsx budget with sheets named Estimate and Actual from the numbers pasted below.",
+      "recent_user_turns": [],
+      "latest_assistant_context": null,
+      "pending_contract": null,
+      "expected": {"lane": "creation", "clarification": false, "relation": "new", "retained_constraints": ["Estimate and Actual"], "requested_effect": "write", "evidence_source": "provided", "acceptance_contains": ["artifact"], "false_unavailable": false, "action_timing": "immediate", "immediate_action_evidence_required": true, "future_queue_receipt_required": false, "restart_sequence_outcome": "not_applicable"}
+    },
+
+    {
+      "id": "p2_inspection_01",
+      "tags": ["inspection", "workspace"],
+      "operator_prompt": "Read pyproject.toml and tell me the supported Python versions without changing anything.",
+      "recent_user_turns": [],
+      "latest_assistant_context": null,
+      "pending_contract": null,
+      "expected": {"lane": "inspection", "clarification": false, "relation": "new", "retained_constraints": ["pyproject.toml", "without changing anything"], "requested_effect": "read", "evidence_source": "workspace", "acceptance_contains": ["answer"], "false_unavailable": false, "action_timing": "immediate", "immediate_action_evidence_required": true, "future_queue_receipt_required": false, "restart_sequence_outcome": "not_applicable"}
+    },
+    {
+      "id": "p2_inspection_02",
+      "tags": ["inspection", "computer"],
+      "operator_prompt": "How many physical storage devices are installed in this PC right now?",
+      "recent_user_turns": [],
+      "latest_assistant_context": null,
+      "pending_contract": null,
+      "expected": {"lane": "inspection", "clarification": false, "relation": "new", "retained_constraints": ["physical storage devices", "right now"], "requested_effect": "read", "evidence_source": "computer", "acceptance_contains": ["answer"], "false_unavailable": false, "action_timing": "immediate", "immediate_action_evidence_required": true, "future_queue_receipt_required": false, "restart_sequence_outcome": "not_applicable"}
+    },
+    {
+      "id": "p2_inspection_03",
+      "tags": ["inspection", "workspace", "misspelling"],
+      "operator_prompt": "list whats in the curent project and dont edit nothin",
+      "recent_user_turns": [],
+      "latest_assistant_context": null,
+      "pending_contract": null,
+      "expected": {"lane": "inspection", "clarification": false, "relation": "new", "retained_constraints": ["curent project", "dont edit nothin"], "requested_effect": "read", "evidence_source": "workspace", "acceptance_contains": ["answer"], "false_unavailable": false, "action_timing": "immediate", "immediate_action_evidence_required": true, "future_queue_receipt_required": false, "restart_sequence_outcome": "not_applicable"}
+    },
+    {
+      "id": "p2_inspection_04",
+      "tags": ["inspection", "ambiguous", "short_followup"],
+      "operator_prompt": "check that file",
+      "recent_user_turns": [],
+      "latest_assistant_context": "Several files were mentioned.",
+      "pending_contract": null,
+      "expected": {"lane": "inspection", "clarification": true, "relation": "new", "retained_constraints": [], "requested_effect": "read", "evidence_source": "workspace", "acceptance_contains": [], "false_unavailable": false, "action_timing": "none", "immediate_action_evidence_required": false, "future_queue_receipt_required": false, "restart_sequence_outcome": "not_applicable"}
+    },
+    {
+      "id": "p2_inspection_05",
+      "tags": ["inspection", "computer", "pending_contract", "restart", "short_followup"],
+      "operator_prompt": "are you done?",
+      "recent_user_turns": [],
+      "latest_assistant_context": "The approved read was interrupted by restart.",
+      "pending_contract": {"version": 1, "relation": "new", "lane": "inspection", "artifact_kind": "none", "evidence_source": "computer", "requested_effect": "read", "goal": "Inspect C:\\Users\\example-user\\Downloads for files over 2 GB, read-only.", "target": "C:\\Users\\example-user\\Downloads", "constraint_quotes": ["over 2 GB", "read-only"], "missing_inputs": [], "acceptance": ["answer"]},
+      "expected": {"lane": "inspection", "clarification": false, "relation": "continue", "retained_constraints": ["over 2 GB", "read-only"], "requested_effect": "read", "evidence_source": "computer", "acceptance_contains": ["answer"], "false_unavailable": false, "action_timing": "immediate", "immediate_action_evidence_required": true, "future_queue_receipt_required": false, "restart_sequence_outcome": "preserved"}
+    },
+    {
+      "id": "p2_inspection_06",
+      "tags": ["inspection", "provided_text"],
+      "operator_prompt": "Inspect this pasted log excerpt and identify only the first fatal error: FATAL disk unavailable; WARN retrying.",
+      "recent_user_turns": [],
+      "latest_assistant_context": null,
+      "pending_contract": null,
+      "expected": {"lane": "inspection", "clarification": false, "relation": "new", "retained_constraints": ["only the first fatal error"], "requested_effect": "read", "evidence_source": "provided", "acceptance_contains": ["answer"], "false_unavailable": false, "action_timing": "immediate", "immediate_action_evidence_required": true, "future_queue_receipt_required": false, "restart_sequence_outcome": "not_applicable"}
+    },
+    {
+      "id": "p2_inspection_07",
+      "tags": ["inspection", "workspace"],
+      "operator_prompt": "Find every TODO in src/ and report the file and line, no edits.",
+      "recent_user_turns": [],
+      "latest_assistant_context": null,
+      "pending_contract": null,
+      "expected": {"lane": "inspection", "clarification": false, "relation": "new", "retained_constraints": ["every TODO", "no edits"], "requested_effect": "read", "evidence_source": "workspace", "acceptance_contains": ["answer"], "false_unavailable": false, "action_timing": "immediate", "immediate_action_evidence_required": true, "future_queue_receipt_required": false, "restart_sequence_outcome": "not_applicable"}
+    },
+    {
+      "id": "p2_inspection_08",
+      "tags": ["inspection", "computer", "slang"],
+      "operator_prompt": "yo which installed apps are hogging the most disk space rn",
+      "recent_user_turns": [],
+      "latest_assistant_context": null,
+      "pending_contract": null,
+      "expected": {"lane": "inspection", "clarification": false, "relation": "new", "retained_constraints": ["most disk space", "rn"], "requested_effect": "read", "evidence_source": "computer", "acceptance_contains": ["answer"], "false_unavailable": false, "action_timing": "immediate", "immediate_action_evidence_required": true, "future_queue_receipt_required": false, "restart_sequence_outcome": "not_applicable"}
+    },
+    {
+      "id": "p2_inspection_09",
+      "tags": ["inspection", "ambiguous"],
+      "operator_prompt": "tell me what's taking up space there",
+      "recent_user_turns": [],
+      "latest_assistant_context": null,
+      "pending_contract": null,
+      "expected": {"lane": "inspection", "clarification": true, "relation": "new", "retained_constraints": [], "requested_effect": "read", "evidence_source": "computer", "acceptance_contains": [], "false_unavailable": false, "action_timing": "none", "immediate_action_evidence_required": false, "future_queue_receipt_required": false, "restart_sequence_outcome": "not_applicable"}
+    },
+    {
+      "id": "p2_inspection_10",
+      "tags": ["inspection", "workspace"],
+      "operator_prompt": "Open package.json conceptually and report the test script; do not run it.",
+      "recent_user_turns": [],
+      "latest_assistant_context": null,
+      "pending_contract": null,
+      "expected": {"lane": "inspection", "clarification": false, "relation": "new", "retained_constraints": ["test script", "do not run it"], "requested_effect": "read", "evidence_source": "workspace", "acceptance_contains": ["answer"], "false_unavailable": false, "action_timing": "immediate", "immediate_action_evidence_required": true, "future_queue_receipt_required": false, "restart_sequence_outcome": "not_applicable"}
+    },
+    {
+      "id": "p2_inspection_11",
+      "tags": ["inspection", "workspace", "pending_contract", "short_followup"],
+      "operator_prompt": "retry it now",
+      "recent_user_turns": ["Read config/settings.json and summarize enabled features."],
+      "latest_assistant_context": "The provider failed after the file was selected.",
+      "pending_contract": {"version": 1, "relation": "new", "lane": "inspection", "artifact_kind": "none", "evidence_source": "workspace", "requested_effect": "read", "goal": "Read config/settings.json and summarize enabled features.", "target": "config/settings.json", "constraint_quotes": ["enabled features"], "missing_inputs": [], "acceptance": ["answer"]},
+      "expected": {"lane": "inspection", "clarification": false, "relation": "continue", "retained_constraints": ["enabled features"], "requested_effect": "read", "evidence_source": "workspace", "acceptance_contains": ["answer"], "false_unavailable": false, "action_timing": "immediate", "immediate_action_evidence_required": true, "future_queue_receipt_required": false, "restart_sequence_outcome": "not_applicable"}
+    },
+    {
+      "id": "p2_inspection_12",
+      "tags": ["inspection", "computer"],
+      "operator_prompt": "Read C:\\Users\\example-user\\Documents\\estimate.txt and summarize just the totals.",
+      "recent_user_turns": [],
+      "latest_assistant_context": null,
+      "pending_contract": null,
+      "expected": {"lane": "inspection", "clarification": false, "relation": "new", "retained_constraints": ["C:\\Users\\example-user\\Documents\\estimate.txt", "just the totals"], "requested_effect": "read", "evidence_source": "computer", "acceptance_contains": ["answer"], "false_unavailable": false, "action_timing": "immediate", "immediate_action_evidence_required": true, "future_queue_receipt_required": false, "restart_sequence_outcome": "not_applicable"}
+    },
+
+    {
+      "id": "p2_external_01",
+      "tags": ["external_action", "email"],
+      "operator_prompt": "Email alex@example.com with subject Crew Update and body: We start at seven tomorrow.",
+      "recent_user_turns": [],
+      "latest_assistant_context": null,
+      "pending_contract": null,
+      "expected": {"lane": "external_action", "clarification": false, "relation": "new", "retained_constraints": ["alex@example.com", "Crew Update", "We start at seven tomorrow."], "requested_effect": "external", "evidence_source": "provided", "acceptance_contains": ["external_receipt"], "false_unavailable": false, "action_timing": "immediate", "immediate_action_evidence_required": true, "future_queue_receipt_required": false, "restart_sequence_outcome": "not_applicable"}
+    },
+    {
+      "id": "p2_external_02",
+      "tags": ["external_action", "drive"],
+      "operator_prompt": "Upload workspace/reports/weekly.pdf to my Google Drive folder named Field Reports.",
+      "recent_user_turns": [],
+      "latest_assistant_context": null,
+      "pending_contract": null,
+      "expected": {"lane": "external_action", "clarification": false, "relation": "new", "retained_constraints": ["workspace/reports/weekly.pdf", "Field Reports"], "requested_effect": "external", "evidence_source": "workspace", "acceptance_contains": ["external_receipt"], "false_unavailable": false, "action_timing": "immediate", "immediate_action_evidence_required": true, "future_queue_receipt_required": false, "restart_sequence_outcome": "not_applicable"}
+    },
+    {
+      "id": "p2_external_03",
+      "tags": ["external_action", "ambiguous"],
+      "operator_prompt": "send them the report",
+      "recent_user_turns": [],
+      "latest_assistant_context": "Two reports and three people were discussed.",
+      "pending_contract": null,
+      "expected": {"lane": "external_action", "clarification": true, "relation": "new", "retained_constraints": [], "requested_effect": "external", "evidence_source": "provided", "acceptance_contains": [], "false_unavailable": false, "action_timing": "none", "immediate_action_evidence_required": false, "future_queue_receipt_required": false, "restart_sequence_outcome": "not_applicable"}
+    },
+    {
+      "id": "p2_external_04",
+      "tags": ["external_action", "github", "misspelling"],
+      "operator_prompt": "push the curent branch to origin after the tests pass",
+      "recent_user_turns": [],
+      "latest_assistant_context": null,
+      "pending_contract": null,
+      "expected": {"lane": "external_action", "clarification": false, "relation": "new", "retained_constraints": ["curent branch", "after the tests pass"], "requested_effect": "external", "evidence_source": "workspace", "acceptance_contains": ["external_receipt"], "false_unavailable": false, "action_timing": "immediate", "immediate_action_evidence_required": true, "future_queue_receipt_required": false, "restart_sequence_outcome": "not_applicable"}
+    },
+    {
+      "id": "p2_external_05",
+      "tags": ["external_action", "email", "pending_contract", "restart", "short_followup"],
+      "operator_prompt": "go ahead and send it",
+      "recent_user_turns": [],
+      "latest_assistant_context": "The exact email was preserved before restart and still needs approval.",
+      "pending_contract": {"version": 1, "relation": "new", "lane": "external_action", "artifact_kind": "none", "evidence_source": "provided", "requested_effect": "external", "goal": "Email sam@example.com the final estimate with subject Final Estimate.", "target": "sam@example.com", "constraint_quotes": ["final estimate", "subject Final Estimate"], "missing_inputs": [], "acceptance": ["external_receipt"]},
+      "expected": {"lane": "external_action", "clarification": false, "relation": "continue", "retained_constraints": ["final estimate", "subject Final Estimate"], "requested_effect": "external", "evidence_source": "provided", "acceptance_contains": ["external_receipt"], "false_unavailable": false, "action_timing": "immediate", "immediate_action_evidence_required": true, "future_queue_receipt_required": false, "restart_sequence_outcome": "preserved"}
+    },
+    {
+      "id": "p2_external_06",
+      "tags": ["external_action", "calendar"],
+      "operator_prompt": "Create a calendar event titled Site Walk for September 3 at 8:30 AM lasting 45 minutes.",
+      "recent_user_turns": [],
+      "latest_assistant_context": null,
+      "pending_contract": null,
+      "expected": {"lane": "external_action", "clarification": false, "relation": "new", "retained_constraints": ["Site Walk", "September 3 at 8:30 AM", "45 minutes"], "requested_effect": "external", "evidence_source": "provided", "acceptance_contains": ["external_receipt"], "false_unavailable": false, "action_timing": "immediate", "immediate_action_evidence_required": true, "future_queue_receipt_required": false, "restart_sequence_outcome": "not_applicable"}
+    },
+    {
+      "id": "p2_external_07",
+      "tags": ["external_action", "deployment", "slang"],
+      "operator_prompt": "ship the current app to the Vercel preview env, not production",
+      "recent_user_turns": [],
+      "latest_assistant_context": null,
+      "pending_contract": null,
+      "expected": {"lane": "external_action", "clarification": false, "relation": "new", "retained_constraints": ["Vercel preview env", "not production"], "requested_effect": "external", "evidence_source": "workspace", "acceptance_contains": ["external_receipt"], "false_unavailable": false, "action_timing": "immediate", "immediate_action_evidence_required": true, "future_queue_receipt_required": false, "restart_sequence_outcome": "not_applicable"}
+    },
+    {
+      "id": "p2_external_08",
+      "tags": ["external_action", "ambiguous"],
+      "operator_prompt": "put it in Drive",
+      "recent_user_turns": [],
+      "latest_assistant_context": "Several files and folders are visible.",
+      "pending_contract": null,
+      "expected": {"lane": "external_action", "clarification": true, "relation": "new", "retained_constraints": [], "requested_effect": "external", "evidence_source": "workspace", "acceptance_contains": [], "false_unavailable": false, "action_timing": "none", "immediate_action_evidence_required": false, "future_queue_receipt_required": false, "restart_sequence_outcome": "not_applicable"}
+    },
+    {
+      "id": "p2_external_09",
+      "tags": ["external_action", "social"],
+      "operator_prompt": "Post this exact text to my approved company account: Rain delay; crews resume at noon.",
+      "recent_user_turns": [],
+      "latest_assistant_context": null,
+      "pending_contract": null,
+      "expected": {"lane": "external_action", "clarification": false, "relation": "new", "retained_constraints": ["exact text", "Rain delay; crews resume at noon."], "requested_effect": "external", "evidence_source": "provided", "acceptance_contains": ["external_receipt"], "false_unavailable": false, "action_timing": "immediate", "immediate_action_evidence_required": true, "future_queue_receipt_required": false, "restart_sequence_outcome": "not_applicable"}
+    },
+    {
+      "id": "p2_external_10",
+      "tags": ["external_action", "future_queue", "email"],
+      "operator_prompt": "Every Monday at 7 AM, queue an email draft to ops@example.com summarizing the latest verified project status.",
+      "recent_user_turns": [],
+      "latest_assistant_context": null,
+      "pending_contract": null,
+      "expected": {"lane": "external_action", "clarification": false, "relation": "new", "retained_constraints": ["Every Monday at 7 AM", "ops@example.com", "latest verified project status"], "requested_effect": "external", "evidence_source": "workspace", "acceptance_contains": ["external_receipt"], "false_unavailable": false, "action_timing": "future", "immediate_action_evidence_required": false, "future_queue_receipt_required": true, "restart_sequence_outcome": "not_applicable"}
+    },
+    {
+      "id": "p2_external_11",
+      "tags": ["external_action", "future_queue", "drive", "misspelling"],
+      "operator_prompt": "each friday queue a backup upload of reports/week.pdf to Drive, dont just say youll do it",
+      "recent_user_turns": [],
+      "latest_assistant_context": null,
+      "pending_contract": null,
+      "expected": {"lane": "external_action", "clarification": false, "relation": "new", "retained_constraints": ["each friday", "reports/week.pdf", "dont just say youll do it"], "requested_effect": "external", "evidence_source": "workspace", "acceptance_contains": ["external_receipt"], "false_unavailable": false, "action_timing": "future", "immediate_action_evidence_required": false, "future_queue_receipt_required": true, "restart_sequence_outcome": "not_applicable"}
+    },
+    {
+      "id": "p2_external_12",
+      "tags": ["external_action", "calendar", "pending_contract", "short_followup"],
+      "operator_prompt": "duration: 30 minutes",
+      "recent_user_turns": ["Schedule a Dentist event tomorrow at 9 AM; duration is still missing."],
+      "latest_assistant_context": "What duration should I use?",
+      "pending_contract": {"version": 1, "relation": "new", "lane": "external_action", "artifact_kind": "none", "evidence_source": "provided", "requested_effect": "external", "goal": "Schedule a Dentist event tomorrow at 9 AM; duration is still missing.", "target": "Dentist event", "constraint_quotes": ["tomorrow at 9 AM"], "missing_inputs": [{"key": "duration"}], "acceptance": []},
+      "expected": {"lane": "external_action", "clarification": false, "relation": "continue", "retained_constraints": ["tomorrow at 9 AM", "30 minutes"], "requested_effect": "external", "evidence_source": "provided", "acceptance_contains": ["external_receipt"], "false_unavailable": false, "action_timing": "immediate", "immediate_action_evidence_required": true, "future_queue_receipt_required": false, "restart_sequence_outcome": "not_applicable"}
+    },
+
+    {
+      "id": "p2_configuration_01",
+      "tags": ["configuration", "status"],
+      "operator_prompt": "Is Screen Companion observing, paused, or off right now?",
+      "recent_user_turns": [],
+      "latest_assistant_context": null,
+      "pending_contract": null,
+      "expected": {"lane": "configuration", "clarification": false, "relation": "new", "retained_constraints": ["Screen Companion"], "requested_effect": "read", "evidence_source": "none", "acceptance_contains": ["answer"], "false_unavailable": false, "action_timing": "immediate", "immediate_action_evidence_required": true, "future_queue_receipt_required": false, "restart_sequence_outcome": "not_applicable"}
+    },
+    {
+      "id": "p2_configuration_02",
+      "tags": ["configuration", "misspelling"],
+      "operator_prompt": "turn compainion mode on for Word only",
+      "recent_user_turns": [],
+      "latest_assistant_context": null,
+      "pending_contract": null,
+      "expected": {"lane": "configuration", "clarification": false, "relation": "new", "retained_constraints": ["Word only"], "requested_effect": "write", "evidence_source": "none", "acceptance_contains": ["answer"], "false_unavailable": false, "action_timing": "immediate", "immediate_action_evidence_required": true, "future_queue_receipt_required": false, "restart_sequence_outcome": "not_applicable"}
+    },
+    {
+      "id": "p2_configuration_03",
+      "tags": ["configuration", "pending_contract", "restart", "short_followup"],
+      "operator_prompt": "do it",
+      "recent_user_turns": [],
+      "latest_assistant_context": "The requested bounded mode change was preserved across restart.",
+      "pending_contract": {"version": 1, "relation": "new", "lane": "configuration", "artifact_kind": "none", "evidence_source": "none", "requested_effect": "write", "goal": "Pause Screen Companion but leave normal Jarvis chat running.", "target": "Screen Companion", "constraint_quotes": ["leave normal Jarvis chat running"], "missing_inputs": [], "acceptance": ["answer"]},
+      "expected": {"lane": "configuration", "clarification": false, "relation": "continue", "retained_constraints": ["leave normal Jarvis chat running"], "requested_effect": "write", "evidence_source": "none", "acceptance_contains": ["answer"], "false_unavailable": false, "action_timing": "immediate", "immediate_action_evidence_required": true, "future_queue_receipt_required": false, "restart_sequence_outcome": "preserved"}
+    },
+    {
+      "id": "p2_configuration_04",
+      "tags": ["configuration", "ambiguous"],
+      "operator_prompt": "turn that mode on",
+      "recent_user_turns": [],
+      "latest_assistant_context": "Screen Companion, Public Presence, and proactive mode were discussed.",
+      "pending_contract": null,
+      "expected": {"lane": "configuration", "clarification": true, "relation": "new", "retained_constraints": [], "requested_effect": "write", "evidence_source": "none", "acceptance_contains": [], "false_unavailable": false, "action_timing": "none", "immediate_action_evidence_required": false, "future_queue_receipt_required": false, "restart_sequence_outcome": "not_applicable"}
+    },
+    {
+      "id": "p2_configuration_05",
+      "tags": ["configuration", "status", "slang"],
+      "operator_prompt": "yo is proactive stuff actually enabled rn or nah",
+      "recent_user_turns": [],
+      "latest_assistant_context": null,
+      "pending_contract": null,
+      "expected": {"lane": "configuration", "clarification": false, "relation": "new", "retained_constraints": ["proactive", "rn"], "requested_effect": "read", "evidence_source": "none", "acceptance_contains": ["answer"], "false_unavailable": false, "action_timing": "immediate", "immediate_action_evidence_required": true, "future_queue_receipt_required": false, "restart_sequence_outcome": "not_applicable"}
+    },
+    {
+      "id": "p2_configuration_06",
+      "tags": ["configuration", "control"],
+      "operator_prompt": "Disable Public Presence and keep private Presence online.",
+      "recent_user_turns": [],
+      "latest_assistant_context": null,
+      "pending_contract": null,
+      "expected": {"lane": "configuration", "clarification": false, "relation": "new", "retained_constraints": ["Public Presence", "keep private Presence online"], "requested_effect": "write", "evidence_source": "none", "acceptance_contains": ["answer"], "false_unavailable": false, "action_timing": "immediate", "immediate_action_evidence_required": true, "future_queue_receipt_required": false, "restart_sequence_outcome": "not_applicable"}
+    }
+  ]
+}

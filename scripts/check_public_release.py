@@ -255,16 +255,99 @@ def _validated_history_commit(
     return commit_id
 
 
+def _validated_history_base(
+    git_executable: Path,
+    repo: Path,
+    history_base: str,
+    history_commit: str,
+) -> str:
+    candidate = str(history_base).strip()
+    if re.fullmatch(r"[0-9a-fA-F]{40}", candidate) is None:
+        raise ValueError("history base must be a full 40-character commit ID")
+    if set(candidate) == {"0"}:
+        raise ValueError("history base may not be the all-zero Git sentinel")
+    base_commit = _git(
+        git_executable, repo, "rev-parse", "--verify", f"{candidate}^{{commit}}"
+    ).decode(
+        "ascii", errors="strict"
+    ).strip()
+    if base_commit == history_commit:
+        raise ValueError("history base must precede the history ref")
+    ancestor = subprocess.run(
+        [
+            str(git_executable),
+            "merge-base",
+            "--is-ancestor",
+            base_commit,
+            history_commit,
+        ],
+        cwd=repo,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.PIPE,
+        check=False,
+    )
+    if ancestor.returncode != 0:
+        raise ValueError("history base must be an ancestor of the history ref")
+
+    head_commit = _git(
+        git_executable, repo, "rev-parse", "--verify", "HEAD^{commit}"
+    ).decode("ascii", errors="strict").strip()
+    if head_commit != history_commit:
+        raise ValueError("ranged history ref must equal the checked-out HEAD")
+
+    parent_record = _git(
+        git_executable,
+        repo,
+        "rev-list",
+        "--parents",
+        "-n",
+        "1",
+        history_commit,
+    ).decode("ascii", errors="strict").strip().split()
+    if len(parent_record) != 2 or parent_record[1] != base_commit:
+        raise ValueError(
+            "public release range must contain exactly one reviewed non-merge commit"
+        )
+
+    history_tree = _git(
+        git_executable, repo, "rev-parse", f"{history_commit}^{{tree}}"
+    ).decode("ascii", errors="strict").strip()
+    index_tree = _git(git_executable, repo, "write-tree").decode(
+        "ascii", errors="strict"
+    ).strip()
+    if index_tree != history_tree:
+        raise ValueError("Git index must exactly match the ranged history ref")
+    return base_commit
+
+
 def _history_identity_findings(
-    git_executable: Path, repo: Path, history_ref: str = "HEAD"
+    git_executable: Path,
+    repo: Path,
+    history_ref: str = "HEAD",
+    history_base: str | None = None,
 ) -> list[str]:
     findings: list[str] = []
+    if history_base is not None and re.fullmatch(
+        r"[0-9a-fA-F]{40}", str(history_ref).strip()
+    ) is None:
+        raise ValueError(
+            "ranged history ref must be a full 40-character commit ID"
+        )
     history_commit = _validated_history_commit(git_executable, repo, history_ref)
+    revision = history_commit
+    if history_base is not None:
+        base_commit = _validated_history_base(
+            git_executable,
+            repo,
+            history_base,
+            history_commit,
+        )
+        revision = f"{base_commit}..{history_commit}"
     history = _git(
         git_executable,
         repo,
         "log",
-        history_commit,
+        revision,
         "--format=%H%x1f%an%x1f%ae%x1f%cn%x1f%ce%x1e",
     )
     for raw_record in history.split(b"\x1e"):
@@ -317,10 +400,18 @@ def _history_identity_findings(
     return sorted(set(findings))
 
 
-def check_release(repo: Path, *, history_ref: str = "HEAD") -> list[str]:
+def check_release(
+    repo: Path,
+    *,
+    history_ref: str = "HEAD",
+    history_base: str | None = None,
+) -> list[str]:
     git_executable = _resolve_trusted_git(repo)
     findings: list[str] = _history_identity_findings(
-        git_executable, repo, history_ref
+        git_executable,
+        repo,
+        history_ref,
+        history_base,
     )
     for path, object_id, mode in _indexed_files(git_executable, repo):
         for reason in _path_findings(path):
@@ -381,6 +472,14 @@ def _parse_args() -> argparse.Namespace:
             "full head commit instead of GitHub's synthetic merge commit"
         ),
     )
+    parser.add_argument(
+        "--history-base",
+        default=None,
+        help=(
+            "trusted full commit ID immediately before the proposed release range; "
+            "the base must be an ancestor of --history-ref"
+        ),
+    )
     return parser.parse_args()
 
 
@@ -388,7 +487,11 @@ def main() -> int:
     args = _parse_args()
     repo = args.repo.resolve()
     try:
-        findings = check_release(repo, history_ref=args.history_ref)
+        findings = check_release(
+            repo,
+            history_ref=args.history_ref,
+            history_base=args.history_base,
+        )
     except (OSError, RuntimeError, ValueError) as exc:
         print(f"PUBLIC RELEASE CHECK ERROR: {exc}", file=sys.stderr)
         return 2

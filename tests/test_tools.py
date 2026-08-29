@@ -27,6 +27,7 @@ from jarvis.tools import (
     _contains_secret,
     _decode_http_body,
     _duckduckgo_lite_results,
+    _effect_constraint_sha256,
     _html_to_text,
     _program_command,
     _public_url,
@@ -104,6 +105,77 @@ class ToolTests(unittest.TestCase):
         self.assertTrue(decoded["ok"])
         self.assertTrue(decoded["truncated"])
         self.assertGreater(decoded["original_chars"], MAX_TOOL_OUTPUT)
+
+    def test_nested_handler_failure_is_failed_and_has_exact_target_receipt(self):
+        self.toolbox.tools["nested_failure"] = Tool(
+            "nested_failure",
+            "test",
+            {
+                "type": "object",
+                "properties": {"path": {"type": "string"}},
+                "required": ["path"],
+                "additionalProperties": False,
+            },
+            lambda path: {
+                "operation": "deploy",
+                "ok": False,
+                "returncode": 1,
+                "error": f"could not deploy {path}",
+            },
+        )
+
+        with self.toolbox.effect_contract_context(("preview/app", "production")):
+            decoded = json.loads(self.toolbox.execute(
+                "nested_failure", {"path": "preview/app"}
+            ))
+
+        self.assertFalse(decoded["ok"])
+        activity = next(
+            item for item in self.memory.list_activity(limit=10)
+            if item["action"] == "nested_failure"
+        )
+        self.assertEqual(activity["status"], "failed")
+        details = json.loads(activity["details_json"])
+        self.assertRegex(details["target_sha256"], r"^[0-9a-f]{64}$")
+        self.assertTrue(details["handler_dispatched"])
+        self.assertEqual(
+            details["matched_constraint_sha256"],
+            [_effect_constraint_sha256("preview/app")],
+        )
+        self.assertNotIn("preview/app", activity["details_json"])
+
+    def test_overdeep_handler_envelope_fails_closed(self):
+        nested = {"ok": False}
+        for _ in range(10):
+            nested = {"result": nested}
+        self.toolbox.tools["overdeep"] = Tool(
+            "overdeep",
+            "test",
+            {"type": "object", "properties": {}, "additionalProperties": False},
+            lambda: nested,
+        )
+
+        decoded = json.loads(self.toolbox.execute("overdeep", {}))
+
+        self.assertFalse(decoded["ok"])
+
+    def test_tool_audit_rejects_nonopaque_provider_receipt_ids(self):
+        self.toolbox.tools["private_receipt"] = Tool(
+            "private_receipt",
+            "test",
+            {"type": "object", "properties": {}, "additionalProperties": False},
+            lambda: {"ok": True, "receipt_id": "recipient@example.com"},
+        )
+
+        decoded = json.loads(self.toolbox.execute("private_receipt", {}))
+
+        self.assertTrue(decoded["ok"])
+        activity = next(
+            item for item in self.memory.list_activity(limit=10)
+            if item["action"] == "private_receipt"
+        )
+        self.assertNotIn("recipient@example.com", activity["details_json"])
+        self.assertNotIn("result_receipt_id", json.loads(activity["details_json"]))
 
     def test_tool_catalog_finds_configured_tools_without_granting_authority(self):
         result = json.loads(self.toolbox.execute(

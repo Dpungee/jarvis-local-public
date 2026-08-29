@@ -58,12 +58,18 @@ from .network_security_tools import (
 from .ollama_client import OllamaError
 from .proactive import RuntimeGuard
 from .presence_identity import presence_process_identity
+from .presence_payloads import (
+    presence_performance_summary,
+    safe_presence_event_payload,
+    safe_presence_network_payload,
+    safe_presence_product_comparison,
+    safe_presence_text,
+)
 from .public_presence_store import (
     PublicPresenceStopped,
     PublicPresenceStore,
     PublicPresenceStoreError,
 )
-from .redaction import redact_secrets
 from .router import ModelRouter
 from .screen_companion import (
     COMPANION_SUGGESTION_TTL_SECONDS,
@@ -106,36 +112,6 @@ ASSET_TYPES = {
 
 class NetworkInventoryScanBusy(RuntimeError):
     """A Presence-triggered private-LAN inventory is already running."""
-
-
-def safe_presence_text(value: Any, limit: int = 100_000) -> str:
-    text = redact_secrets(str(value), "[REDACTED]").replace("\x00", "")
-    if len(text) <= limit:
-        return text
-    return text[: max(0, limit - 24)] + "\n…[display truncated]"
-
-
-def safe_presence_network_payload(value: Any, *, depth: int = 0) -> Any:
-    """Bound and redact private-LAN data before it crosses the Presence API."""
-    if depth > 6:
-        return None
-    if value is None or isinstance(value, (bool, int, float)):
-        return value
-    if isinstance(value, str):
-        return safe_presence_text(value, 1_000)
-    if isinstance(value, dict):
-        result: dict[str, Any] = {}
-        for raw_key, item in list(value.items())[:80]:
-            key = safe_presence_text(raw_key, 100).strip()
-            if key:
-                result[key] = safe_presence_network_payload(item, depth=depth + 1)
-        return result
-    if isinstance(value, (list, tuple)):
-        return [
-            safe_presence_network_payload(item, depth=depth + 1)
-            for item in list(value)[:4_096]
-        ]
-    return safe_presence_text(value, 500)
 
 
 _COMPANION_SUGGESTION_NOISE = re.compile(
@@ -218,82 +194,6 @@ def companion_action_outcome_message(
     if str(status).strip().casefold() == "complete":
         return safe_presence_text(f"Done — {text}", 700)
     return safe_presence_text(f"I couldn't finish that — {text}", 700)
-
-
-def _safe_presence_http_url(value: Any) -> str | None:
-    raw = str(value or "").strip()
-    if not raw or len(raw) > 2_000:
-        return None
-    parsed = urlsplit(raw)
-    if (
-        parsed.scheme not in {"http", "https"}
-        or parsed.username is not None
-        or parsed.password is not None
-        or not parsed.hostname
-    ):
-        return None
-    return raw
-
-
-def safe_presence_product_comparison(value: Any) -> dict[str, Any] | None:
-    """Bound a verified agent comparison before it crosses the Presence API."""
-    if not isinstance(value, dict) or not isinstance(value.get("products"), list):
-        return None
-    products: list[dict[str, Any]] = []
-    seen_names: set[str] = set()
-    seen_urls: set[str] = set()
-    for raw in value["products"][:4]:
-        if not isinstance(raw, dict):
-            continue
-        name = safe_presence_text(raw.get("name") or "", 300).strip()
-        source_url = _safe_presence_http_url(raw.get("source_url"))
-        name_key = re.sub(r"\W+", "", name).casefold()
-        if (
-            not name_key
-            or source_url is None
-            or name_key in seen_names
-            or source_url in seen_urls
-        ):
-            continue
-        source_kind = str(raw.get("source_kind") or "other").casefold()
-        if source_kind not in {"manufacturer", "seller", "other"}:
-            source_kind = "other"
-        specs = raw.get("key_specs")
-        products.append({
-            "name": name,
-            "source_url": source_url,
-            "source_kind": source_kind,
-            "seller": safe_presence_text(raw.get("seller") or "", 300).strip() or None,
-            "manufacturer": safe_presence_text(
-                raw.get("manufacturer") or "", 300
-            ).strip() or None,
-            "price_text": safe_presence_text(raw.get("price_text") or "", 100).strip() or None,
-            "currency": safe_presence_text(raw.get("currency") or "", 20).strip() or None,
-            "availability": safe_presence_text(
-                raw.get("availability") or "", 200
-            ).strip() or None,
-            "key_specs": [
-                safe_presence_text(item, 300).strip()
-                for item in (specs if isinstance(specs, list) else [])[:8]
-                if isinstance(item, str) and item.strip()
-            ],
-            "why_fit": safe_presence_text(raw.get("why_fit") or "", 700).strip(),
-            "tradeoff": safe_presence_text(raw.get("tradeoff") or "", 700).strip(),
-            "observed_at": safe_presence_text(
-                raw.get("observed_at") or "", 100
-            ).strip() or None,
-            # Remote image URLs are never forwarded. The UI uses a local
-            # placeholder instead of leaking browsing data to third parties.
-            "image_url": None,
-        })
-        seen_names.add(name_key)
-        seen_urls.add(source_url)
-    if not products:
-        return None
-    return {
-        "ranking": safe_presence_text(value.get("ranking") or "", 1_000).strip(),
-        "products": products,
-    }
 
 
 def normalize_presence_host(value: str) -> str:
@@ -1102,12 +1002,7 @@ class PresenceRuntime:
             self._bluetooth_monitor_once()
 
     def emit(self, kind: str, **payload: Any) -> PresenceEvent:
-        safe_payload: dict[str, Any] = {}
-        for key, value in payload.items():
-            if isinstance(value, str):
-                safe_payload[key] = safe_presence_text(value)
-            else:
-                safe_payload[key] = value
+        safe_payload = safe_presence_event_payload(payload)
         with self._events_lock:
             event = PresenceEvent(
                 self._next_event_id,
@@ -1673,6 +1568,30 @@ class PresenceRuntime:
                 for row in backlog[:100]
             ],
         }
+
+    def performance_overview(self, *, limit: int = 200) -> dict[str, Any]:
+        """Return bounded, prompt-free aggregates from completed Presence jobs."""
+
+        if isinstance(limit, bool) or not isinstance(limit, int):
+            raise TypeError("Performance sample limit must be an integer")
+        bound = max(1, min(limit, 500))
+        with Memory(self.config.data_dir / "jarvis.db") as memory:
+            # Deliberately select no prompt, message, error, attachment, or tool
+            # argument columns. This page is operational telemetry, not history.
+            rows = [
+                dict(row)
+                for row in memory.db.execute(
+                    """SELECT status, finished_at, metrics_json
+                       FROM presence_jobs
+                       WHERE status IN ('completed','failed','cancelled','interrupted')
+                         AND metrics_json IS NOT NULL
+                         AND metrics_json <> '{}'
+                       ORDER BY COALESCE(finished_at, updated_at) DESC, job_id DESC
+                       LIMIT ?""",
+                    (bound,),
+                ).fetchall()
+            ]
+        return presence_performance_summary(rows, requested_limit=bound)
 
     def feature_onboarding_status(self) -> dict[str, Any]:
         store = self._feature_onboarding
@@ -3916,6 +3835,16 @@ class PresenceRequestHandler(BaseHTTPRequestHandler):
                 return
             if path == "/api/schedule":
                 self._json(self.server.runtime.schedule_overview())
+                return
+            if path == "/api/performance":
+                query = parse_qs(parsed.query)
+                raw_limit = str(query.get("limit", ["200"])[0])
+                if re.fullmatch(r"[1-9][0-9]{0,2}", raw_limit) is None:
+                    raise ValueError("limit must be between 1 and 500")
+                limit = int(raw_limit)
+                if limit > 500:
+                    raise ValueError("limit must be between 1 and 500")
+                self._json(self.server.runtime.performance_overview(limit=limit))
                 return
             if path == "/api/network-inventory":
                 self._json(self.server.runtime.network_inventory_status())

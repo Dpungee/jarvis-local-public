@@ -470,6 +470,11 @@ class MemoryTests(unittest.TestCase):
                 "completed",
                 runtime_id="presence:test",
                 metrics={
+                    "trace_id": "b" * 32,
+                    "presence_job_id": job_id,
+                    "origin": "presence",
+                    "build_id": "v0.6.2",
+                    "cohort": "phase1-observability",
                     "queue_ms": 4,
                     "total_ms": 1200,
                     "time_to_first_token_ms": 650,
@@ -493,7 +498,14 @@ class MemoryTests(unittest.TestCase):
             self.assertEqual(metrics["time_to_first_token_ms"], 650)
             self.assertEqual(metrics["model"], "codex-cli:gpt-5.6-luna")
             self.assertEqual(metrics["task_contract_status"], "resolved")
+            self.assertEqual(metrics["trace_id"], "b" * 32)
             self.assertNotIn("private user prompt", row["metrics_json"])
+            summary = memory.presence_performance_summary(
+                cohort="phase1-observability"
+            )
+            self.assertEqual(summary["records"], 1)
+            self.assertEqual(summary["discarded_records"], 0)
+            self.assertEqual(summary["metrics"]["queue_ms"]["p95"], 4)
             with self.assertRaisesRegex(ValueError, "Unsupported Presence metric"):
                 memory.finish_presence_job(
                     job_id,

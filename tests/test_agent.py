@@ -457,10 +457,47 @@ class AgentLoopTests(unittest.TestCase):
         self.assertEqual(result.metrics["tool_calls"], 0)
         self.assertTrue(result.metrics["streamed"])
         self.assertIsInstance(result.metrics["time_to_first_token_ms"], int)
+        self.assertRegex(result.metrics["trace_id"], r"^[0-9a-f]{32}$")
+        self.assertEqual(result.metrics["origin"], "interactive")
+        self.assertEqual(result.metrics["cohort"], "phase1-observability")
+        self.assertEqual(result.metrics["token_measurement"], "unknown")
+        self.assertIsInstance(result.metrics["provider_ttft_ms"], int)
+        self.assertEqual(
+            result.metrics["end_to_end_ttft_ms"],
+            result.metrics["time_to_first_token_ms"],
+        )
+        self.assertGreaterEqual(
+            result.metrics["end_to_end_total_ms"],
+            result.metrics["end_to_end_ttft_ms"],
+        )
         self.assertGreater(result.metrics["context_chars"], 0)
         self.assertGreater(result.metrics["estimated_prompt_tokens"], 0)
         messages = self.memory.recent_messages(result.conversation_id, limit=5)
         self.assertNotIn(secret, json.dumps(messages))
+
+    def test_invalid_optional_telemetry_never_breaks_a_completed_answer(self):
+        agent, _client = self.make_agent([])
+        events = []
+        agent.on_event = events.append
+        agent._active_run_started = time.monotonic()
+        agent._active_selected_model = "free form model label is not telemetry"
+        agent._active_trace_id = "e" * 32
+        result = type("CompletedResult", (), {
+            "model": None,
+            "status": "complete",
+            "tool_calls": 0,
+            "metrics": {},
+        })()
+
+        agent._attach_run_metrics(result)
+
+        self.assertEqual(result.metrics["tool_calls"], 0)
+        self.assertEqual(result.metrics["token_measurement"], "unknown")
+        self.assertNotIn("model", result.metrics)
+        self.assertIn(
+            "observability - invalid optional metrics discarded",
+            events,
+        )
 
     def test_image_is_framed_as_untrusted_runtime_content_and_never_persisted(self):
         raw = b"\x89PNG\r\n\x1a\nprivate-pixels"
@@ -3195,6 +3232,10 @@ class AgentLoopTests(unittest.TestCase):
         )
         self.assertEqual(result.metrics["model_attempts"], 3)
         self.assertEqual(result.metrics["retries"], 2)
+        self.assertEqual(result.metrics["failovers"], 2)
+        self.assertEqual(result.metrics["initial_model"], "openai:gpt-5.6-luna")
+        self.assertEqual(result.metrics["final_model"], "openai:gpt-5.6-sol")
+        self.assertEqual(result.metrics["failure_kind"], "OllamaError")
 
     def test_provider_unavailability_skips_later_models_on_same_backend(self):
         class ProviderRecoveryClient(ScriptedClient):

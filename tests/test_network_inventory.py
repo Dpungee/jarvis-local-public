@@ -393,6 +393,9 @@ class NetworkToolAndRoutingTests(unittest.TestCase):
     def test_routing_requires_an_explicit_device_inventory_request(self):
         for explicit in (
             "Scan my home network and show every connected device",
+            "ight now whos on our network right now",
+            "ok so using those tools can you see if we have any phones on the network",
+            "you look on our network for em",
             "Are there any phones connected to the network right now?",
             "Is a phone connected to our LAN?",
             "Are any tablets on my Wi-Fi at the moment?",
@@ -416,6 +419,9 @@ class NetworkToolAndRoutingTests(unittest.TestCase):
         ))
         for current in (
             "Are there any phones connected to the network right now?",
+            "ight now whos on our network right now",
+            "ok so using those tools can you see if we have any phones on the network",
+            "you look on our network for em",
             "Is a phone connected to our LAN?",
             "Check which devices are on my Wi-Fi",
             "What devices are on the network and are any of them phones?",
@@ -423,6 +429,9 @@ class NetworkToolAndRoutingTests(unittest.TestCase):
             self.assertTrue(_requests_fresh_network_inventory(current))
         for presence in (
             "Are there any phones connected to the network right now?",
+            "ight now whos on our network right now",
+            "ok so using those tools can you see if we have any phones on the network",
+            "you look on our network for em",
             "Which devices are connected to my Wi-Fi?",
             "How many clients are online on our LAN?",
         ):
@@ -619,26 +628,43 @@ class NetworkToolAndRoutingTests(unittest.TestCase):
                     },
                 })
 
-        client = Client()
-        toolbox = InventoryToolBox()
-        agent = Agent(
-            replace(self.config, network_access="private-lan", max_steps=4),
-            self.memory,
-            client=client,
-            coding_review=False,
-            coding_planning=False,
-        )
-        agent.toolbox = toolbox
-        result = agent.run(
-            "Are there any phones connected to the network right now?"
-        )
-        self.assertEqual(result.status, "complete", result.reason)
-        self.assertEqual(len(toolbox.calls), 1)
-        self.assertEqual(toolbox.calls[0][0], "network_inventory")
-        self.assertEqual(toolbox.calls[0][1]["action"], "scan")
-        self.assertIs(toolbox.calls[0][1]["include_identifiers"], False)
-        self.assertEqual(client.chat_calls, 0)
-        self.assertIn("phone", str(result).casefold())
+        for prompt in (
+            "ight now whos on our network right now",
+            "ok so using those tools can you see if we have any phones on the network",
+            "you look on our network for em",
+        ):
+            with self.subTest(prompt=prompt):
+                client = Client()
+                toolbox = InventoryToolBox()
+                conversation_id = self.memory.new_conversation(
+                    "live network device check"
+                )
+                if "using those tools" in prompt:
+                    self.memory.begin_conversation_goal(
+                        conversation_id,
+                        "Check whether any phones are currently connected to our network.",
+                        "security_analysis",
+                    )
+                agent = Agent(
+                    replace(self.config, network_access="private-lan", max_steps=4),
+                    self.memory,
+                    client=client,
+                    coding_review=False,
+                    coding_planning=False,
+                )
+                agent.toolbox = toolbox
+                result = agent.run(prompt, conversation_id=conversation_id)
+                self.assertEqual(result.status, "complete", result.reason)
+                self.assertEqual(len(toolbox.calls), 1)
+                self.assertEqual(toolbox.calls[0][0], "network_inventory")
+                self.assertEqual(toolbox.calls[0][1]["action"], "scan")
+                self.assertIs(toolbox.calls[0][1]["include_identifiers"], False)
+                self.assertEqual(client.chat_calls, 0)
+                self.assertIn("known phone", str(result).casefold())
+                if "using those tools" in prompt:
+                    self.assertIsNone(
+                        self.memory.pending_conversation_goal(conversation_id)
+                    )
 
     def test_saved_posture_request_cannot_be_upgraded_to_active_scan_by_model(self):
         class Response(dict):

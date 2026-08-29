@@ -484,6 +484,12 @@ button:disabled { opacity: .4; cursor: default; }
 .utility-card h3 { margin: 0; overflow: hidden; font-size: 13px; font-weight: 650; text-overflow: ellipsis; white-space: nowrap; }
 .utility-card p { margin: 7px 0 0; color: var(--muted); font-size: 11px; line-height: 1.5; }
 .utility-card small { display: block; margin-top: 9px; color: var(--faint); font-size: 9px; }
+.performance-summary { display: flex; align-items: flex-start; justify-content: space-between; gap: 14px; margin-bottom: 10px; }
+.performance-summary h3 { white-space: normal; }
+.performance-value { display: block; margin-top: 13px; color: #d8f7ff; font-size: 22px; line-height: 1.1; }
+.performance-card .utility-pill.learning { color: #c8c8c8; background: rgba(180,180,180,.10); }
+.performance-card .utility-pill.review { color: #ffe1aa; background: rgba(246,200,107,.12); }
+.performance-card .utility-pill.on-target { color: #b9f0d2; background: rgba(101,217,155,.11); }
 .utility-pill { padding: 3px 7px; flex: 0 0 auto; border-radius: 999px; color: #b9f0d2; background: rgba(101,217,155,.11); font-size: 8px; text-transform: uppercase; }
 .utility-pill.queued, .utility-pill.running { color: #ffe1aa; background: rgba(246,200,107,.12); }
 .utility-pill.failed, .utility-pill.cancelled { color: #ffb7bb; background: rgba(255,123,130,.11); }

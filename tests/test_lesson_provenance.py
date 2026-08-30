@@ -2,7 +2,9 @@ import hashlib
 import sqlite3
 import tempfile
 import unittest
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from unittest.mock import patch
 
 from jarvis.memory import Memory, SCHEMA_VERSION, now_iso
 
@@ -16,6 +18,10 @@ class LessonProvenanceTests(unittest.TestCase):
         conversation_id: int | None = None,
         verification: str = "tool_success",
     ) -> int:
+        if conversation_id is None:
+            conversation_id = memory.new_conversation(
+                f"{family} prediction fixture"
+            )
         return memory.record_prediction(
             family=family,
             profile="provenance-test",
@@ -24,7 +30,7 @@ class LessonProvenanceTests(unittest.TestCase):
             predicted_steps=2,
             predicted_verification=verification,
             basis="prior",
-            origin="practice",
+            origin="interactive",
             conversation_id=conversation_id,
         )
 
@@ -83,16 +89,30 @@ class LessonProvenanceTests(unittest.TestCase):
         *,
         family: str = "code_fix",
     ) -> tuple[int, int, int]:
-        prediction_id, reflection_id, _conversation_id = self._resolved_reflection(
-            memory,
-            family=family,
+        conversation_id = memory.new_conversation(f"{family} verified lesson")
+        prediction_id = self._prediction(
+            memory, family=family, conversation_id=conversation_id
         )
-        memory_id = memory.remember_verified_lesson(
-            content,
-            family=family,
-            outcome_status="complete",
-            reflection_id=reflection_id,
+        self.assertTrue(memory.resolve_prediction(
+            prediction_id,
+            actual_status="complete",
+            actual_steps=2,
+            evidence_ok=True,
+        ))
+        reflection_id = memory.record_reflection(
+            status="complete",
+            summary="Deterministic provenance fixture outcome.",
+            improvements=content,
+            conversation_id=conversation_id,
+            prediction_id=prediction_id,
+            tool_calls=2,
         )
+        row = memory.db.execute(
+            "SELECT id FROM memories WHERE kind='lesson' AND reflection_id=?",
+            (reflection_id,),
+        ).fetchone()
+        self.assertIsNotNone(row)
+        memory_id = int(row["id"])
         return memory_id, prediction_id, reflection_id
 
     def _legacy_lesson(
@@ -154,11 +174,19 @@ class LessonProvenanceTests(unittest.TestCase):
         ).fetchone()
         self.assertIsNotNone(row)
         memory_id = int(row["id"])
+        legacy_content = memory._canonical_reflection_lesson_content(
+            family=family,
+            outcome_status="complete",
+            summary=summary,
+            mistakes=mistakes,
+            improvements=improvements,
+        )
+        self.assertIsNotNone(legacy_content)
         # Schema v28 stored this exact source before predictions were bound
         # directly to reflections.
         memory.db.execute(
-            "UPDATE memories SET source=? WHERE id=?",
-            (f"verified reflection:{reflection_id}", memory_id),
+            "UPDATE memories SET source=?, content=? WHERE id=?",
+            (f"verified reflection:{reflection_id}", legacy_content, memory_id),
         )
         return memory_id, prediction_id, reflection_id
 
@@ -179,9 +207,9 @@ class LessonProvenanceTests(unittest.TestCase):
             self.assertEqual(int(provenance["reflection_id"]), reflection_id)
             self.assertEqual(
                 str(provenance["content_sha256"]),
-                hashlib.sha256(
-                    b"Repair parser boundaries with a focused regression test."
-                ).hexdigest(),
+                hashlib.sha256(str(memory.db.execute(
+                    "SELECT content FROM memories WHERE id=?", (memory_id,)
+                ).fetchone()["content"]).encode("utf-8")).hexdigest(),
             )
             self.assertRegex(str(provenance["provenance_sha256"]), r"^[0-9a-f]{64}$")
             self.assertNotEqual(
@@ -703,6 +731,479 @@ class LessonProvenanceTests(unittest.TestCase):
                 totals = upgraded.memory_quality()["totals"]
                 self.assertEqual(totals["provenance_valid_lessons"], 1)
                 self.assertEqual(totals["provenance_quarantined_lessons"], 1)
+
+    def test_v37_rebuilds_a_partial_control_table_before_indexing(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "partial-v37.db"
+            with Memory(path):
+                pass
+            legacy = sqlite3.connect(path)
+            try:
+                legacy.execute("DROP TABLE lesson_controls")
+                legacy.execute(
+                    "CREATE TABLE lesson_controls(memory_id INTEGER PRIMARY KEY)"
+                )
+                legacy.execute("PRAGMA user_version=36")
+                legacy.commit()
+            finally:
+                legacy.close()
+
+            with Memory(path) as migrated:
+                columns = {
+                    str(row["name"])
+                    for row in migrated.db.execute(
+                        "PRAGMA table_info(lesson_controls)"
+                    )
+                }
+                self.assertEqual(
+                    columns,
+                    {
+                        "memory_id", "project_id", "observed_at", "valid_until",
+                        "lifecycle_status", "superseded_by", "recorded_at",
+                        "control_sha256",
+                    },
+                )
+                self.assertEqual(
+                    int(migrated.db.execute("PRAGMA user_version").fetchone()[0]),
+                    SCHEMA_VERSION,
+                )
+
+    def test_v37_preserves_valid_historical_application_evidence_after_ttl(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "historical-v36.db"
+            old_stamp = "2025-01-01T12:00:00+00:00"
+            with Memory(path) as memory, patch(
+                "jarvis.memory.now_iso", return_value=old_stamp
+            ):
+                lesson_id, _source_prediction, _reflection = self._verified_lesson(
+                    memory,
+                    "Reuse the historical cobalt parser boundary.",
+                )
+                conversation_id = memory.new_conversation(
+                    "historical lesson application"
+                )
+                prediction_id = self._prediction(
+                    memory, conversation_id=conversation_id
+                )
+                memory.record_lesson_applications(
+                    prediction_id, "code_fix", [lesson_id]
+                )
+                self.assertTrue(memory.resolve_prediction(
+                    prediction_id,
+                    actual_status="complete",
+                    actual_steps=2,
+                    evidence_ok=True,
+                ))
+                memory.db.execute("PRAGMA user_version=36")
+
+            with Memory(path) as migrated:
+                self.assertEqual(
+                    migrated.db.execute(
+                        "SELECT COUNT(*) FROM lesson_applications"
+                    ).fetchone()[0],
+                    1,
+                )
+                self.assertEqual(
+                    migrated.match_lessons(
+                        "historical cobalt parser", "code_fix"
+                    ),
+                    [],
+                )
+                self.assertEqual(
+                    migrated._lesson_control_validation(lesson_id)[1],
+                    "expired",
+                )
+
+    def test_v37_drops_applications_outside_lesson_validity_window(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "out-of-window-applications-v36.db"
+            with Memory(path) as memory:
+                lesson_id, _source_prediction, _reflection = self._verified_lesson(
+                    memory,
+                    "Reuse the verified amber parser boundary.",
+                )
+                before_prediction = self._prediction(memory)
+                after_prediction = self._prediction(memory)
+                # Keep the first prediction earlier than its forged application
+                # so the row is rejected specifically because it predates the
+                # lesson observation, not because it predates the prediction.
+                memory.db.execute(
+                    "UPDATE task_predictions SET created_at=? WHERE id=?",
+                    ("1999-01-01T00:00:00+00:00", before_prediction),
+                )
+                memory.db.executemany(
+                    """INSERT INTO lesson_applications(
+                           created_at, prediction_id, memory_id, family, rank
+                       ) VALUES (?, ?, ?, 'code_fix', 1)""",
+                    (
+                        (
+                            "2000-01-01T00:00:00+00:00",
+                            before_prediction,
+                            lesson_id,
+                        ),
+                        (
+                            "2100-01-01T00:00:00+00:00",
+                            after_prediction,
+                            lesson_id,
+                        ),
+                    ),
+                )
+                self.assertEqual(
+                    memory.db.execute(
+                        "SELECT COUNT(*) FROM lesson_applications"
+                    ).fetchone()[0],
+                    2,
+                )
+                memory.db.execute("PRAGMA user_version=36")
+
+            with Memory(path) as migrated:
+                self.assertEqual(
+                    migrated.db.execute(
+                        "SELECT COUNT(*) FROM lesson_applications"
+                    ).fetchone()[0],
+                    0,
+                )
+                self.assertEqual(migrated.lesson_effectiveness("code_fix"), [])
+
+    def test_v37_drops_future_dated_unresolved_application(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "future-application-v36.db"
+            with Memory(path) as memory:
+                lesson_id, _source_prediction, _reflection = self._verified_lesson(
+                    memory,
+                    "Reuse the verified ochre parser boundary.",
+                )
+                prediction_id = self._prediction(memory)
+                future_stamp = (
+                    datetime.now(timezone.utc) + timedelta(days=1)
+                ).isoformat()
+                memory.db.execute(
+                    """INSERT INTO lesson_applications(
+                           created_at, prediction_id, memory_id, family, rank
+                       ) VALUES (?, ?, ?, 'code_fix', 1)""",
+                    (future_stamp, prediction_id, lesson_id),
+                )
+                memory.db.execute("PRAGMA user_version=36")
+
+            with Memory(path) as migrated:
+                self.assertEqual(
+                    migrated.db.execute(
+                        "SELECT COUNT(*) FROM lesson_applications"
+                    ).fetchone()[0],
+                    0,
+                )
+                self.assertEqual(migrated.lesson_effectiveness("code_fix"), [])
+
+    def test_lesson_effectiveness_ignores_forged_resolution_for_unresolved_prediction(
+        self,
+    ) -> None:
+        with Memory(Path(":memory:")) as memory:
+            lesson_id, _source_prediction, _reflection = self._verified_lesson(
+                memory,
+                "Reuse the verified violet parser boundary.",
+            )
+            prediction_id = self._prediction(memory)
+            stamp = now_iso()
+            memory.db.execute(
+                """INSERT INTO lesson_applications(
+                       created_at, prediction_id, memory_id, family, rank,
+                       resolved_at, successful
+                   ) VALUES (?, ?, ?, 'code_fix', 1, ?, 1)""",
+                (stamp, prediction_id, lesson_id, stamp),
+            )
+
+            self.assertIsNone(memory.db.execute(
+                "SELECT resolved_at FROM task_predictions WHERE id=?",
+                (prediction_id,),
+            ).fetchone()[0])
+            self.assertEqual(memory.lesson_effectiveness("code_fix"), [])
+
+    def test_v37_drops_forged_resolution_for_unresolved_prediction(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "forged-resolution-v36.db"
+            with Memory(path) as memory:
+                lesson_id, _source_prediction, _reflection = self._verified_lesson(
+                    memory,
+                    "Reuse the verified silver parser boundary.",
+                )
+                prediction_id = self._prediction(memory)
+                stamp = now_iso()
+                memory.db.execute(
+                    """INSERT INTO lesson_applications(
+                           created_at, prediction_id, memory_id, family, rank,
+                           resolved_at, successful
+                       ) VALUES (?, ?, ?, 'code_fix', 1, ?, 1)""",
+                    (stamp, prediction_id, lesson_id, stamp),
+                )
+                memory.db.execute("PRAGMA user_version=36")
+
+            with Memory(path) as migrated:
+                self.assertEqual(
+                    migrated.db.execute(
+                        "SELECT COUNT(*) FROM lesson_applications"
+                    ).fetchone()[0],
+                    0,
+                )
+                self.assertEqual(migrated.lesson_effectiveness("code_fix"), [])
+
+    def test_future_resolution_is_rejected_at_runtime_and_v37_migration(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "future-resolution-v36.db"
+            with Memory(path) as memory:
+                lesson_id, _source_prediction, _reflection = self._verified_lesson(
+                    memory,
+                    "Reuse the verified teal parser boundary.",
+                )
+                prediction_id = self._prediction(memory)
+                memory.record_lesson_applications(
+                    prediction_id, "code_fix", [lesson_id]
+                )
+                future_stamp = (
+                    datetime.now(timezone.utc) + timedelta(days=1)
+                ).isoformat()
+                memory.db.execute(
+                    """UPDATE task_predictions
+                       SET resolved_at=?, actual_status='complete', actual_steps=2,
+                           evidence_ok=1, failure_class=NULL
+                       WHERE id=?""",
+                    (future_stamp, prediction_id),
+                )
+                memory.db.execute(
+                    """UPDATE lesson_applications
+                       SET resolved_at=?, successful=1
+                       WHERE prediction_id=? AND memory_id=?""",
+                    (future_stamp, prediction_id, lesson_id),
+                )
+
+                self.assertEqual(memory.lesson_effectiveness("code_fix"), [])
+                memory.db.execute("PRAGMA user_version=36")
+
+            with Memory(path) as migrated:
+                self.assertEqual(
+                    migrated.db.execute(
+                        "SELECT COUNT(*) FROM lesson_applications"
+                    ).fetchone()[0],
+                    0,
+                )
+                self.assertEqual(migrated.lesson_effectiveness("code_fix"), [])
+
+    def test_v37_drops_malformed_non_null_resolution_timestamps(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "malformed-resolution-v36.db"
+            with Memory(path) as memory:
+                lesson_id, _source_prediction, _reflection = self._verified_lesson(
+                    memory,
+                    "Reuse the verified plum parser boundary.",
+                )
+                prediction_id = self._prediction(memory)
+                memory.record_lesson_applications(
+                    prediction_id, "code_fix", [lesson_id]
+                )
+                malformed = "not-a-canonical-timestamp"
+                memory.db.execute(
+                    """UPDATE task_predictions
+                       SET resolved_at=?, actual_status='complete', actual_steps=2,
+                           evidence_ok=1, failure_class=NULL
+                       WHERE id=?""",
+                    (malformed, prediction_id),
+                )
+                memory.db.execute(
+                    """UPDATE lesson_applications
+                       SET resolved_at=?, successful=1
+                       WHERE prediction_id=? AND memory_id=?""",
+                    (malformed, prediction_id, lesson_id),
+                )
+                memory.db.execute("PRAGMA user_version=36")
+
+            with Memory(path) as migrated:
+                self.assertEqual(
+                    migrated.db.execute(
+                        "SELECT COUNT(*) FROM lesson_applications"
+                    ).fetchone()[0],
+                    0,
+                )
+                self.assertEqual(migrated.lesson_effectiveness("code_fix"), [])
+
+    def test_v37_drops_application_rows_for_incomplete_lessons(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "incomplete-application-v36.db"
+            with Memory(path) as memory:
+                lesson_conversation = memory.new_conversation(
+                    "incomplete lesson source"
+                )
+                source_prediction = self._prediction(
+                    memory, conversation_id=lesson_conversation
+                )
+                self.assertTrue(memory.resolve_prediction(
+                    source_prediction,
+                    actual_status="incomplete",
+                    actual_steps=2,
+                    evidence_ok=False,
+                    failure_class="verification_absent",
+                ))
+                reflection_id = memory.record_reflection(
+                    status="incomplete",
+                    summary="The attempted repair did not verify.",
+                    improvements="Do not reuse the incomplete indigo repair.",
+                    conversation_id=lesson_conversation,
+                    prediction_id=source_prediction,
+                    tool_calls=2,
+                )
+                lesson = memory.db.execute(
+                    "SELECT id FROM memories WHERE reflection_id=?",
+                    (reflection_id,),
+                ).fetchone()
+                self.assertIsNotNone(lesson)
+                active_conversation = memory.new_conversation(
+                    "forged incomplete application"
+                )
+                active_prediction = self._prediction(
+                    memory, conversation_id=active_conversation
+                )
+                memory.db.execute(
+                    """INSERT INTO lesson_applications(
+                           created_at, prediction_id, memory_id, family, rank
+                       ) VALUES (?, ?, ?, 'code_fix', 1)""",
+                    (now_iso(), active_prediction, int(lesson["id"])),
+                )
+                memory.db.execute("PRAGMA user_version=36")
+
+            with Memory(path) as migrated:
+                self.assertEqual(
+                    migrated.db.execute(
+                        "SELECT COUNT(*) FROM lesson_applications"
+                    ).fetchone()[0],
+                    0,
+                )
+                self.assertEqual(migrated.lesson_effectiveness("code_fix"), [])
+
+    def test_v37_drops_forged_practice_application_rows(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "practice-application-v36.db"
+            with Memory(path) as memory:
+                lesson_id, _source_prediction, _reflection = self._verified_lesson(
+                    memory,
+                    "Reuse the verified copper application boundary.",
+                )
+                conversation_id = memory.new_conversation(
+                    "forged practice application"
+                )
+                practice_prediction = memory.record_prediction(
+                    family="code_fix",
+                    profile="practice-migration-test",
+                    model="deterministic-test",
+                    predicted_success=0.5,
+                    predicted_steps=1,
+                    predicted_verification="tool_success",
+                    origin="practice",
+                    conversation_id=conversation_id,
+                )
+                memory.db.execute(
+                    """INSERT INTO lesson_applications(
+                           created_at, prediction_id, memory_id, family, rank
+                       ) VALUES (?, ?, ?, 'code_fix', 1)""",
+                    (now_iso(), practice_prediction, lesson_id),
+                )
+                memory.db.execute("PRAGMA user_version=36")
+
+            with Memory(path) as migrated:
+                self.assertEqual(
+                    migrated.db.execute(
+                        "SELECT COUNT(*) FROM lesson_applications"
+                    ).fetchone()[0],
+                    0,
+                )
+                self.assertEqual(migrated.lesson_effectiveness("code_fix"), [])
+
+    def test_v37_never_promotes_legacy_private_identifier_lessons(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "private-v36.db"
+            with Memory(path) as memory:
+                memory_id, prediction_id, reflection_id = self._verified_lesson(
+                    memory,
+                    "Reuse the legacy privacy parser boundary.",
+                )
+                private_improvement = (
+                    "Notify example.person@example.com and inspect "
+                    "C:\\Users\\example-user\\private.txt."
+                )
+                legacy_content = memory._canonical_reflection_lesson_content(
+                    family="code_fix",
+                    outcome_status="complete",
+                    summary="Deterministic provenance fixture outcome.",
+                    mistakes="",
+                    improvements=private_improvement,
+                )
+                self.assertIsNotNone(legacy_content)
+                memory.db.execute(
+                    "UPDATE reflections SET improvements=? WHERE id=?",
+                    (private_improvement, reflection_id),
+                )
+                memory.db.execute(
+                    "UPDATE memories SET content=? WHERE id=?",
+                    (legacy_content, memory_id),
+                )
+                content_sha256 = hashlib.sha256(
+                    str(legacy_content).encode("utf-8")
+                ).hexdigest()
+                with patch(
+                    "jarvis.memory.contains_private_identifier",
+                    return_value=False,
+                ):
+                    material = memory._lesson_provenance_material(
+                        memory_id, prediction_id, reflection_id
+                    )
+                self.assertIsNotNone(material)
+                memory.db.execute(
+                    """UPDATE lesson_provenance
+                       SET content_sha256=?, provenance_sha256=?
+                       WHERE memory_id=?""",
+                    (
+                        content_sha256,
+                        memory._lesson_provenance_digest(material),
+                        memory_id,
+                    ),
+                )
+                memory.db.execute("PRAGMA user_version=36")
+
+            with Memory(path) as migrated:
+                self.assertEqual(
+                    migrated.db.execute(
+                        "SELECT COUNT(*) FROM lesson_controls WHERE memory_id=?",
+                        (memory_id,),
+                    ).fetchone()[0],
+                    0,
+                )
+                self.assertEqual(
+                    migrated.match_lessons("legacy privacy parser", "code_fix"),
+                    [],
+                )
+
+    def test_locked_reflection_path_redacts_private_identifiers(self) -> None:
+        with Memory(Path(":memory:")) as memory:
+            reflection_id = memory._record_reflection_locked(
+                stamp=now_iso(),
+                status="failed",
+                summary=(
+                    "Notify example.person@example.com about "
+                    "C:\\Users\\example-user\\private.txt."
+                ),
+                mistakes="The private path was unavailable.",
+                improvements="Use /home/example-user/private.txt next time.",
+                task_id=None,
+                conversation_id=None,
+                prediction_id=None,
+                tool_calls=0,
+            )
+            row = memory.db.execute(
+                "SELECT summary, improvements FROM reflections WHERE id=?",
+                (reflection_id,),
+            ).fetchone()
+            combined = str(row["summary"]) + "\n" + str(row["improvements"])
+            self.assertNotIn("example.person@example.com", combined)
+            self.assertNotIn("example-user", combined)
+            self.assertIn("[EMAIL]", combined)
+            self.assertIn("[USER]", combined)
 
     def test_v30_migration_rejects_sparse_legacy_schema_without_marking_current(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

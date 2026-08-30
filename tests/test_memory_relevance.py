@@ -16,7 +16,7 @@ class MemoryRelevanceTests(unittest.TestCase):
             origin="verified_import",
         )
 
-    def test_broad_coverage_outranks_newer_partial_matches(self):
+    def test_broad_coverage_outranks_and_abstains_from_weak_partial_matches(self):
         with Memory(Path(":memory:")) as memory:
             self._remember(
                 memory,
@@ -36,7 +36,7 @@ class MemoryRelevanceTests(unittest.TestCase):
                 results[0]["content"],
                 "Python services use SQLite busy retries with bounded exponential backoff.",
             )
-            self.assertEqual(len(results), 3)
+            self.assertEqual(len(results), 1)
 
     def test_exact_phrase_outranks_newer_reordered_full_match(self):
         with Memory(Path(":memory:")) as memory:
@@ -90,6 +90,62 @@ class MemoryRelevanceTests(unittest.TestCase):
             self.assertEqual(
                 [item["content"] for item in results],
                 ["Ollama retrieval sentinel 4", "Ollama retrieval sentinel 3"],
+            )
+
+    def test_common_corpus_descriptor_cannot_anchor_an_absent_fact(self):
+        with Memory(Path(":memory:")) as memory:
+            self._remember(
+                memory,
+                "At the fictional Pearl Circuit, an amber signal marks the open vault.",
+            )
+
+            self.assertEqual(
+                memory.search(
+                    "How many doors are on the fictional Amber Sigh tower?",
+                    limit=8,
+                ),
+                [],
+            )
+
+    def test_weaker_sibling_is_pruned_relative_to_the_specific_top_match(self):
+        with Memory(Path(":memory:")) as memory:
+            self._remember(
+                memory,
+                "Moonspoke Transit Aerolith quay tram stops after three bells "
+                "at Lantern Jetty.",
+            )
+            self._remember(
+                memory,
+                "Moonspoke Transit Velarium quay tram stops after five bells "
+                "at Prism Jetty.",
+            )
+
+            results = memory.search(
+                "Where does the Aerolith quay tram stop after three bells on "
+                "Moonspoke Transit?",
+                limit=8,
+            )
+
+            self.assertEqual(len(results), 1)
+            self.assertIn("Aerolith", results[0]["content"])
+
+    def test_lookalike_compound_identity_shadows_shared_boilerplate(self):
+        with Memory(Path(":memory:")) as memory:
+            self._remember(
+                memory,
+                "NorthAlderwick archive astrolabe ledger retention is eleven days.",
+            )
+            self._remember(
+                memory,
+                "NorthKestrelwick archive keystone ledger retention is forty days.",
+            )
+
+            self.assertEqual(
+                memory.search(
+                    "SouthAlderwick archive astrolabe ledger retention",
+                    limit=8,
+                ),
+                [],
             )
 
 

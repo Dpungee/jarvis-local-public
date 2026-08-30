@@ -1026,6 +1026,11 @@ class TaskContractAgentIntegrationTests(unittest.TestCase):
                 agent, client = self.make_agent([
                     FakeResponse("No feature state was changed."),
                 ])
+                existing_task_id = (
+                    self.memory.add_task(prompt)
+                    if task_id is not None
+                    else None
+                )
                 with patch.object(
                     agent,
                     "_resolve_task_contract",
@@ -1033,7 +1038,7 @@ class TaskContractAgentIntegrationTests(unittest.TestCase):
                 ):
                     agent.run(
                         prompt,
-                        task_id=task_id,
+                        task_id=existing_task_id,
                         prediction_origin=origin,
                     )
                 offered = {

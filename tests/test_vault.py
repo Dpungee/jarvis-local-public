@@ -275,16 +275,15 @@ class VaultTests(unittest.TestCase):
                 )
                 lesson_reflection = memory.record_reflection(
                     status="complete", summary="Measured boundary check passed.",
-                    improvements="", conversation_id=lesson_conversation,
+                    improvements="Reuse the measured boundary check.",
+                    conversation_id=lesson_conversation,
                     prediction_id=lesson_prediction,
                     tool_calls=1,
                 )
-                memory.remember_verified_lesson(
-                    "Reuse the measured boundary check.",
-                    family="code_fix",
-                    outcome_status="complete",
-                    reflection_id=lesson_reflection,
-                )
+                self.assertIsNotNone(memory.db.execute(
+                    "SELECT id FROM memories WHERE reflection_id=?",
+                    (lesson_reflection,),
+                ).fetchone())
                 subject_id = memory.approve_subject("Local inference")
                 backlog_id = memory.add_backlog_item("research", subject_id)
                 task_id = memory.add_task("Research local inference", backlog_id=backlog_id)
@@ -324,17 +323,15 @@ class VaultTests(unittest.TestCase):
                 reflection_id = memory.record_reflection(
                     status="complete",
                     summary="Measured boundary check passed.",
-                    improvements="",
+                    improvements="Reuse the measured boundary check only in code fixes.",
                     conversation_id=conversation_id,
                     prediction_id=prediction_id,
                     tool_calls=1,
                 )
-                lesson_id = memory.remember_verified_lesson(
-                    "Reuse the measured boundary check only in code fixes.",
-                    family="code_fix",
-                    outcome_status="complete",
-                    reflection_id=reflection_id,
-                )
+                lesson_id = int(memory.db.execute(
+                    "SELECT id FROM memories WHERE reflection_id=?",
+                    (reflection_id,),
+                ).fetchone()["id"])
                 Vault(vault_root).write_note(
                     "lessons",
                     "Human edited lesson",

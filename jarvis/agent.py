@@ -37,13 +37,15 @@ from .fast_dialogue import (
     is_local_time_request as _is_local_time_request,  # noqa: F401 - compatibility facade
     simple_fraction_comparison_reply as _simple_fraction_comparison_reply,
 )
-from .memory import Memory, ModelBudgetExceeded
+from .learning_memory_quality import learning_memory_record_allowed
+from .memory import MAX_SEARCH_QUERY_CHARS, Memory, ModelBudgetExceeded
 from .memory_embeddings import (
     EmbeddingError,
     OpenAIEmbeddingClient,
     build_memory_embedder,
     run_memory_index_batch,
 )
+from .memory_retrieval import _memory_query_targets_authority_evasion
 from .natural_language import (
     has_current_public_information_shape,
     intent_routing_text,
@@ -62,7 +64,7 @@ from .proactive import (
     self_context,
 )
 from .redaction import SECRET_VALUE as _SECRET_VALUE
-from .redaction import contains_secret, redact_secrets
+from .redaction import contains_private_identifier, contains_secret, redact_secrets
 from .research_support import (
     _DIALOGUE_DYNAMIC_TAGS,  # noqa: F401 - compatibility facade
     _DIALOGUE_MEMORY_HEADING,  # noqa: F401 - compatibility facade
@@ -5370,20 +5372,10 @@ def _source_origin(url: str) -> str:
 def _memory_record_allowed(item: dict[str, Any]) -> bool:
     if str(item.get("kind", "")).casefold() != "learning":
         return True
-    content = str(item.get("content", ""))
-    source = str(item.get("source", ""))
-    if _MEMORY_QUALITY_CONTRACT_TAG not in source.splitlines():
-        return False
-    if _research_reports_no_finding(content) or re.search(
-        r"(?i)\b(?:20\d{2}|yyyy)[-/](?:xx|mm|\d{2})[-/](?:xx|dd)\b",
-        content,
-    ):
-        return False
-    source_urls = {
-        raw.rstrip(".,;:!?)]}*_`")
-        for raw in _URL_IN_TEXT.findall(source)
-    }
-    return any(is_authoritative_source(url) for url in source_urls)
+    return learning_memory_record_allowed(
+        content=str(item.get("content", "")),
+        source=str(item.get("source", "")),
+    )
 
 
 def _training_candidate_verified(
@@ -5513,7 +5505,11 @@ def _append_verified_citations(
 
 def _should_recall_memory(query: str) -> bool:
     if (
-        _requires_web(query)
+        len(str(query)) > MAX_SEARCH_QUERY_CHARS
+        or contains_secret(query)
+        or contains_private_identifier(query)
+        or _memory_query_targets_authority_evasion(query)
+        or _requires_web(query)
         or _CASUAL_GREETING.fullmatch(query.strip())
         or _requires_coding(query)
         or _NON_TEST_EXECUTION_INTENT.search(query)
@@ -6480,15 +6476,8 @@ class Agent:
             # Keep only the newest two operator-authored records; they remain
             # tagged as untrusted data and never gain instruction authority.
             try:
-                for item in self.memory.list_memories(limit=100):
-                    source = str(item.get("source") or "").casefold()
-                    if str(item.get("kind") or "") != "preference":
-                        continue
-                    if source != "user" and "explicit user" not in source:
-                        continue
+                for item in self.memory.verified_operator_preferences(limit=2):
                     pinned_preferences.append(item)
-                    if len(pinned_preferences) >= 2:
-                        break
             except (RuntimeError, ValueError):
                 pinned_preferences = []
         recalled = [item for item in recalled_candidates if _memory_record_allowed(item)][:3]
@@ -6601,14 +6590,19 @@ class Agent:
         if (
             include_memory
             and self.specialist is None
+            and not _memory_query_targets_authority_evasion(query)
             and task_family in self.memory.PREDICTION_FAMILIES
             and self._active_prediction_id is not None
+            and self._active_project_id is not None
         ):
             try:
                 gate = calibrated_meta_gate(self.memory, str(task_family))
                 if gate["allowed"]:
                     matched_lessons = self.memory.match_lessons(
-                        query, str(task_family), limit=3
+                        query,
+                        str(task_family),
+                        limit=3,
+                        project_id=int(self._active_project_id),
                     )
                     if matched_lessons:
                         self.memory.record_lesson_applications(
@@ -11487,17 +11481,50 @@ print("safe-path adversarial contract passed")
                     prompt.strip().encode("utf-8", errors="replace")
                 ).hexdigest()[:24]
             )
-            project_id = 1
-            try:
-                if task_id is not None and hasattr(self.memory, "task_project"):
-                    project_id = int(self.memory.task_project(task_id) or 1)
-                elif conversation_id is not None and hasattr(
-                    self.memory, "conversation_project"
-                ):
-                    project = self.memory.conversation_project(conversation_id)
-                    project_id = int(project["id"]) if project is not None else 1
-            except (TypeError, ValueError):
-                project_id = 1
+            task_project_id: int | None = None
+            conversation_project_id: int | None = None
+            if task_id is not None and not hasattr(self.memory, "task_project"):
+                raise RuntimeError("Task project scope lookup is unavailable")
+            if task_id is not None:
+                try:
+                    task_project = self.memory.task_project(task_id)
+                    if task_project is None:
+                        raise ValueError("Task does not exist")
+                    task_project_id = int(task_project)
+                except (RuntimeError, sqlite3.Error, TypeError, ValueError) as exc:
+                    if isinstance(exc, ValueError) and str(exc) == "Task does not exist":
+                        raise
+                    raise RuntimeError("Task project scope could not be resolved safely") from exc
+            if conversation_id is not None and not hasattr(
+                self.memory, "conversation_project"
+            ):
+                raise RuntimeError("Conversation project scope lookup is unavailable")
+            if conversation_id is not None:
+                try:
+                    conversation_project = self.memory.conversation_project(
+                        conversation_id
+                    )
+                    if conversation_project is None:
+                        raise ValueError("Conversation does not exist")
+                    conversation_project_id = int(conversation_project["id"])
+                except (RuntimeError, sqlite3.Error, TypeError, ValueError) as exc:
+                    if (
+                        isinstance(exc, ValueError)
+                        and str(exc) == "Conversation does not exist"
+                    ):
+                        raise
+                    raise RuntimeError(
+                        "Conversation project scope could not be resolved safely"
+                    ) from exc
+            if (
+                task_project_id is not None
+                and conversation_project_id is not None
+                and task_project_id != conversation_project_id
+            ):
+                raise ValueError(
+                    "Task and conversation belong to different projects"
+                )
+            project_id = task_project_id or conversation_project_id or 1
             self._active_project_id = project_id
             try:
                 baseline_schedules = self.memory.list_scheduled_jobs(
@@ -11650,7 +11677,9 @@ print("safe-path adversarial contract passed")
         )
 
         continuing_conversation = conversation_id is not None
-        conversation_id = conversation_id or self.memory.new_conversation(prompt[:80])
+        conversation_id = conversation_id or self.memory.new_conversation(
+            prompt[:80], project_id=int(self._active_project_id or 1)
+        )
         self._active_conversation_id = conversation_id
         recent_conversation_messages = (
             self.memory.recent_messages(conversation_id, limit=24)

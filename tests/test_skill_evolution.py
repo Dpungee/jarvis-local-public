@@ -268,6 +268,7 @@ class SkillEvolutionTests(unittest.TestCase):
             predicted_verification="process_evidence",
         )
         self.agent._active_prediction_id = active
+        self.agent._active_project_id = 1
         prompt = self.agent.system_prompt("Fix the parser", task_family="code_fix")
         self.assertIn("<matched_learned_skills>", prompt)
         self.assertIn("learned-code-fix", prompt)

@@ -25,18 +25,31 @@ from .claim_clock import (
     protected_predicate,
     source_key as claim_source_key,
 )
+from .learning_memory_quality import learning_memory_record_allowed
 from .memory_retrieval import (
     MAX_MEMORY_QUERY_TERMS,  # noqa: F401 - compatibility facade
     MAX_MEMORY_SEARCH_CANDIDATES,
+    _MAX_MEMORY_QUERY_TERM_CANDIDATES,
+    _memory_candidate_terms,
+    _memory_evidence_terms,
     _memory_fts_query,
+    _memory_identity_conflict,
     _memory_like_terms,
+    _memory_query_targets_authority_evasion,
     _memory_query_terms,
+    _memory_resolve_sibling_identities,
+    _memory_term_variants,
     _memory_tokens,
     _normalize_memory_token,  # noqa: F401 - compatibility facade
     _rank_memory_rows,
 )
 from .redaction import (
-    contains_secret, is_redacted_descriptor, is_sensitive_key, redact_secrets,
+    contains_private_identifier,
+    contains_secret,
+    is_redacted_descriptor,
+    is_sensitive_key,
+    redact_private_identifiers,
+    redact_secrets,
 )
 from .run_observability import aggregate_run_metrics, sanitize_run_metrics
 from .specialists import (
@@ -69,7 +82,17 @@ def training_prompt_split(prompt: str, task_kind: str) -> str:
     return "train" if bucket < 80 else "validation" if bucket < 90 else "test"
 
 
-SCHEMA_VERSION = 36
+SCHEMA_VERSION = 37
+
+LESSON_DEFAULT_TTL_DAYS = 180
+LESSON_REUSABLE_PREDICTION_ORIGINS = frozenset({
+    "interactive", "worker", "proactive",
+})
+LESSON_EVIDENCE_REQUIRED_FAMILIES = frozenset({
+    "code_build", "code_fix", "code_refactor", "code_test", "deep_research",
+    "learning_brief", "file_ops", "desktop_file_ops", "external_publish",
+    "security_analysis",
+})
 
 
 _PERSISTENT_READ_APPROVAL_TOOLS = frozenset({
@@ -100,6 +123,132 @@ _CLAIM_AUTHORITY_WEIGHT = {
     "verified": 70,
     "operator": 100,
 }
+_CLAIM_QUERY_METADATA_TERMS = frozenset({
+    "according", "claim", "conflict", "conflicting", "current", "currently",
+    "fact", "give", "information", "known", "notice", "operator", "preference",
+    "plus", "present", "record", "recorded", "reported", "revised", "setting",
+    "store", "stored", "user", "value",
+})
+_CLAIM_DERIVATIONAL_SUFFIXES = (
+    "ations", "ation", "ators", "ator", "ating", "ated", "ates", "ate",
+    "ments", "ment", "ors", "or", "ers", "er", "ing", "ed", "age", "e",
+)
+_CLAIM_COMPOUND_PREFIXES = frozenset({
+    "anti", "counter", "inter", "intra", "macro", "micro", "multi",
+    "non", "over", "post", "pre", "re", "sub", "super", "under",
+})
+_CLAIM_IDENTITY_DESCRIPTOR_TERMS = frozenset({
+    "account", "contact", "identity", "operator", "owner", "person",
+    "profile", "user",
+})
+_MAX_SUPERSEDED_CLAIM_VERSIONS = 64
+_MAX_CLAIM_QUERY_TERMS = 32
+_LESSON_QUERY_METADATA_TERMS = frozenset({
+    "apply", "complete", "completed", "completion", "family", "lesson",
+    "project", "rule", "task",
+})
+_ORDINARY_MEMORY_IDENTITY_METADATA_TERMS = frozenset({
+    "fact", "knowledge", "learn", "learned", "memory", "note", "pull",
+    "record", "saved", "stored",
+})
+_LESSON_IDENTITY_METADATA_TERMS = frozenset({
+    *_LESSON_QUERY_METADATA_TERMS,
+    "learn", "learned", "reuse", "reused", "reusing",
+})
+
+
+def _claim_term_root(term: str) -> str:
+    """Return a conservative derivational root for claim-field matching."""
+    normalized = str(term).casefold()
+    if len(normalized) < 6:
+        return normalized
+    for suffix in _CLAIM_DERIVATIONAL_SUFFIXES:
+        if normalized.endswith(suffix):
+            root = normalized[:-len(suffix)]
+            if len(root) >= 4:
+                return root
+    return normalized
+
+
+def _claim_matched_query_terms(
+    query_terms: set[str], record_terms: set[str]
+) -> set[str]:
+    """Match bounded inflections/compounds without treating substrings as facts."""
+    matches: set[str] = set()
+    rooted_record_terms = {
+        term: _claim_term_root(term) for term in record_terms
+    }
+    for query_term in query_terms:
+        query_root = _claim_term_root(query_term)
+        for record_term, record_root in rooted_record_terms.items():
+            if query_term == record_term:
+                matches.add(query_term)
+                break
+            if query_root == record_root and query_root != query_term:
+                matches.add(query_term)
+                break
+            shorter, longer = sorted((query_term, record_term), key=len)
+            if len(shorter) >= 5 and any(
+                longer == prefix + shorter for prefix in _CLAIM_COMPOUND_PREFIXES
+            ):
+                matches.add(query_term)
+                break
+    return matches
+
+
+def _claim_query_terms(query: str) -> list[str]:
+    """Select at most 16 claim terms while preserving both identity boundaries."""
+    all_terms = [
+        term for term in _memory_tokens(query, meaningful_only=True)
+        if term not in _CLAIM_QUERY_METADATA_TERMS
+    ]
+    all_terms = list(dict.fromkeys(all_terms))
+    if len(all_terms) <= _MAX_CLAIM_QUERY_TERMS:
+        return all_terms
+    boundary_indices = {0, len(all_terms) - 1}
+    selected_indices = sorted(
+        boundary_indices
+        | set(sorted(
+            (index for index in range(1, len(all_terms) - 1)),
+            key=lambda index: (
+                any(character.isdigit() for character in all_terms[index]),
+                min(len(all_terms[index]), 16),
+                -index,
+            ),
+            reverse=True,
+        )[:_MAX_CLAIM_QUERY_TERMS - 2])
+    )
+    return [all_terms[index] for index in selected_indices]
+
+
+def _claim_subject_identity_conflict(
+    subject_head: str,
+    query_terms: set[str],
+) -> bool:
+    """Detect a look-alike namespace token without requiring every subject word."""
+    head = str(subject_head).casefold()
+    if head in query_terms or len(head) < 5:
+        return False
+    for term in query_terms:
+        candidate = str(term).casefold()
+        if len(candidate) < 5:
+            continue
+        shorter, longer = sorted((head, candidate), key=len)
+        if longer.startswith(shorter) or longer.endswith(shorter):
+            return True
+        prefix = 0
+        for left, right in zip(head, candidate, strict=False):
+            if left != right:
+                break
+            prefix += 1
+        suffix = 0
+        for left, right in zip(reversed(head), reversed(candidate), strict=False):
+            if left != right:
+                break
+            suffix += 1
+        if min(len(head), len(candidate)) >= 7 and max(prefix, suffix) >= 3:
+            return True
+    return False
 _EXPLICIT_USER_POSTAL_CODE = re.compile(
     r"(?:\bmy\s+zip(?:\s*code)?\s*(?:is|=|:)?\s*"
     r"|\bzip(?:\s*code)?\s+is\s+"
@@ -601,6 +750,9 @@ class Memory:
             if version < 36:
                 self._migrate_v36()
                 version = 36
+            if version < 37:
+                self._migrate_v37()
+                version = 37
             self.db.execute(f"PRAGMA user_version={version}")
 
     def _migrate_v1(self) -> None:
@@ -2130,6 +2282,213 @@ class Memory:
                WHERE conversation_id IN (
                    SELECT conversation_id FROM screen_companion_conversations
                ) AND origin IN ('interactive','worker','proactive')"""
+        )
+
+    def _migrate_v37(self) -> None:
+        """Bind reusable lessons to project scope and an integrity-checked lifecycle."""
+        # Version 37 was never authoritative before this migration completed.
+        # Rebuild even a partially created table before referring to its columns.
+        self.db.execute("DROP TABLE IF EXISTS lesson_controls")
+        self.db.execute(
+            """CREATE TABLE IF NOT EXISTS lesson_controls (
+                memory_id INTEGER PRIMARY KEY,
+                project_id INTEGER NOT NULL,
+                observed_at TEXT NOT NULL,
+                valid_until TEXT NOT NULL,
+                lifecycle_status TEXT NOT NULL CHECK(lifecycle_status IN
+                    ('active','contradicted','superseded','quarantined')),
+                superseded_by INTEGER,
+                recorded_at TEXT NOT NULL,
+                control_sha256 TEXT NOT NULL CHECK(
+                    length(control_sha256)=64 AND
+                    control_sha256 NOT GLOB '*[^0-9a-f]*'),
+                FOREIGN KEY(memory_id) REFERENCES memories(id) ON DELETE CASCADE,
+                FOREIGN KEY(project_id) REFERENCES agent_projects(id),
+                FOREIGN KEY(superseded_by) REFERENCES memories(id),
+                CHECK((lifecycle_status IN ('contradicted','superseded') AND
+                       superseded_by IS NOT NULL) OR
+                      (lifecycle_status IN ('active','quarantined') AND
+                       superseded_by IS NULL))
+            )"""
+        )
+        self.db.execute(
+            """CREATE INDEX IF NOT EXISTS idx_lesson_controls_scope
+               ON lesson_controls(project_id, lifecycle_status, valid_until, memory_id)"""
+        )
+        # Rebuild from the exact provenance chain so a partial/dev migration
+        # cannot keep stale scope or lifecycle receipts.
+        # Only already-valid, non-practice provenance is promoted.  Everything
+        # else remains stored for audit but receives no reusable control record.
+        rows = self.db.execute(
+            """SELECT lp.memory_id, lp.prediction_id, lp.reflection_id,
+                      lp.content_sha256, lp.provenance_sha256,
+                      r.created_at AS observed_at, p.task_id, p.conversation_id
+               FROM lesson_provenance AS lp
+               JOIN reflections AS r ON r.id=lp.reflection_id
+               JOIN task_predictions AS p ON p.id=lp.prediction_id
+               ORDER BY lp.memory_id"""
+        ).fetchall()
+        for row in rows:
+            memory_id = int(row["memory_id"])
+            if not self._lesson_provenance_validation(memory_id)[0]:
+                continue
+            project_id = self._lesson_project_for_context(
+                row["task_id"], row["conversation_id"]
+            )
+            if project_id is None:
+                continue
+            observed_at = self._canonical_utc_timestamp(row["observed_at"])
+            if observed_at is None:
+                continue
+            valid_until = (
+                datetime.fromisoformat(observed_at)
+                + timedelta(days=LESSON_DEFAULT_TTL_DAYS)
+            ).isoformat()
+            material = self._lesson_control_material(
+                memory_id=memory_id,
+                prediction_id=int(row["prediction_id"]),
+                reflection_id=int(row["reflection_id"]),
+                content_sha256=str(row["content_sha256"]),
+                provenance_sha256=str(row["provenance_sha256"] or ""),
+                project_id=project_id,
+                observed_at=observed_at,
+                valid_until=valid_until,
+                lifecycle_status="active",
+                superseded_by=None,
+            )
+            self.db.execute(
+                """INSERT OR IGNORE INTO lesson_controls(
+                       memory_id, project_id, observed_at, valid_until,
+                       lifecycle_status, superseded_by, recorded_at, control_sha256
+                   ) VALUES (?, ?, ?, ?, 'active', NULL, ?, ?)""",
+                (
+                    memory_id, project_id, observed_at, valid_until, now_iso(),
+                    self._lesson_control_digest(material),
+                ),
+            )
+        # Rebuild the application ledger with database-enforced constraints.
+        # Older rows were trusted by Python only; retain solely the rows that
+        # still prove an eligible same-family, same-project relationship.
+        family_values = ",".join(
+            "'" + family.replace("'", "''") + "'"
+            for family in sorted(self.PREDICTION_FAMILIES)
+        )
+        self.db.execute("DROP TABLE IF EXISTS lesson_applications_v37")
+        self.db.execute(
+            f"""CREATE TABLE lesson_applications_v37 (
+                id INTEGER PRIMARY KEY,
+                created_at TEXT NOT NULL,
+                prediction_id INTEGER NOT NULL,
+                memory_id INTEGER NOT NULL,
+                family TEXT NOT NULL CHECK(family IN ({family_values})),
+                rank INTEGER NOT NULL CHECK(rank BETWEEN 1 AND 10),
+                resolved_at TEXT,
+                successful INTEGER CHECK(successful IN (0, 1)),
+                UNIQUE(prediction_id, memory_id),
+                CHECK((resolved_at IS NULL AND successful IS NULL) OR
+                      (resolved_at IS NOT NULL AND successful IN (0, 1))),
+                FOREIGN KEY(prediction_id) REFERENCES task_predictions(id)
+                    ON DELETE CASCADE,
+                FOREIGN KEY(memory_id) REFERENCES memories(id) ON DELETE CASCADE
+            )"""
+        )
+        migration_at = now_iso()
+        applications = self.db.execute(
+            """SELECT id, created_at, prediction_id, memory_id, family, rank,
+                      resolved_at, successful
+               FROM lesson_applications ORDER BY id"""
+        ).fetchall()
+        for application in applications:
+            try:
+                prediction = self.db.execute(
+                    """SELECT family, origin, created_at, resolved_at,
+                              actual_status, evidence_ok, predicted_verification,
+                              task_id, conversation_id
+                       FROM task_predictions WHERE id=?""",
+                    (int(application["prediction_id"]),),
+                ).fetchone()
+                lesson = self.db.execute(
+                    """SELECT family, outcome_status FROM memories
+                       WHERE id=? AND kind='lesson'""",
+                    (int(application["memory_id"]),),
+                ).fetchone()
+                if prediction is None or lesson is None:
+                    continue
+                family = str(application["family"])
+                if (
+                    family not in self.PREDICTION_FAMILIES
+                    or str(prediction["family"]) != family
+                    or str(prediction["origin"])
+                    not in LESSON_REUSABLE_PREDICTION_ORIGINS
+                    or str(lesson["family"]) != family
+                    or str(lesson["outcome_status"] or "") != "complete"
+                ):
+                    continue
+                project_id = self._lesson_project_for_context(
+                    prediction["task_id"], prediction["conversation_id"]
+                )
+                control = self.db.execute(
+                    """SELECT observed_at, valid_until FROM lesson_controls
+                       WHERE memory_id=?""",
+                    (int(application["memory_id"]),),
+                ).fetchone()
+                normalized_application = (
+                    None if control is None else self._lesson_application_values(
+                        family=family,
+                        application_created_at=application["created_at"],
+                        application_resolved_at=application["resolved_at"],
+                        application_successful=application["successful"],
+                        prediction_created_at=prediction["created_at"],
+                        prediction_resolved_at=prediction["resolved_at"],
+                        prediction_actual_status=prediction["actual_status"],
+                        prediction_evidence_ok=prediction["evidence_ok"],
+                        prediction_verification=prediction[
+                            "predicted_verification"
+                        ],
+                        lesson_observed_at=control["observed_at"],
+                        lesson_valid_until=control["valid_until"],
+                        validation_at=migration_at,
+                    )
+                )
+                if (
+                    project_id is None
+                    or control is None
+                    or normalized_application is None
+                    or not self._lesson_provenance_validation(
+                        int(application["memory_id"])
+                    )[0]
+                    or not self._lesson_control_validation(
+                        int(application["memory_id"]),
+                        project_id=project_id,
+                        as_of=normalized_application[0],
+                    )[0]
+                ):
+                    continue
+                app_created_at, app_resolved_at, app_successful = (
+                    normalized_application
+                )
+                self.db.execute(
+                    """INSERT INTO lesson_applications_v37(
+                           id, created_at, prediction_id, memory_id, family, rank,
+                           resolved_at, successful
+                       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                    (
+                        int(application["id"]), app_created_at,
+                        int(application["prediction_id"]),
+                        int(application["memory_id"]), family,
+                        int(application["rank"]), app_resolved_at,
+                        app_successful,
+                    ),
+                )
+            except (sqlite3.DatabaseError, TypeError, ValueError):
+                continue
+        self.db.execute("DROP TABLE lesson_applications")
+        self.db.execute(
+            "ALTER TABLE lesson_applications_v37 RENAME TO lesson_applications"
+        )
+        self.db.execute(
+            """CREATE INDEX IF NOT EXISTS idx_lesson_applications_prediction
+               ON lesson_applications(prediction_id, rank)"""
         )
 
     @staticmethod
@@ -4406,7 +4765,111 @@ class Memory:
         valid, eligible, _content_mismatch, _provenance_mismatch = (
             self._ordinary_memory_provenance_validation(int(memory_id))
         )
-        return valid and eligible
+        if not valid or not eligible:
+            return False
+        row = self.db.execute(
+            "SELECT content, source, kind FROM memories "
+            "WHERE id=? AND kind NOT IN ('lesson', 'claim')",
+            (int(memory_id),),
+        ).fetchone()
+        if row is None:
+            return False
+        material = "\n".join(str(row[key] or "") for key in row.keys())
+        if contains_secret(material) or contains_private_identifier(material):
+            return False
+        if str(row["kind"]).casefold() == "learning":
+            return learning_memory_record_allowed(
+                content=str(row["content"] or ""),
+                source=str(row["source"] or ""),
+            )
+        return True
+
+    def _claim_memory_recall_eligible(self, memory_id: int) -> bool:
+        """Keep private claim material local and outside model-facing recall."""
+        row = self.db.execute(
+            """SELECT c.id AS claim_id, m.content, m.source AS memory_source,
+                      c.subject, c.predicate, c.value, c.value_sha256,
+                      c.source, c.authority
+               FROM memories AS m
+               JOIN memory_claims AS c ON c.memory_id=m.id
+               WHERE m.id=? AND m.kind='claim'
+                 AND c.status IN ('active', 'disputed')""",
+            (int(memory_id),),
+        ).fetchone()
+        if row is None:
+            return False
+        subject = str(row["subject"] or "")
+        predicate = str(row["predicate"] or "")
+        value = str(row["value"] or "")
+        source = str(row["source"] or "")
+        authority = str(row["authority"] or "")
+        canonical_content = f"{subject} {predicate}: {value}"
+        if str(row["content"] or "") != canonical_content:
+            # Claims are returned from their structured fields.  If either the
+            # structured row or its paired memory was modified independently,
+            # fail closed instead of trusting a non-canonical reconstruction.
+            return False
+        if is_sensitive_key(predicate):
+            # A structured claim whose predicate is itself a credential field
+            # must never become model-facing memory, even when its arbitrary
+            # value does not resemble a provider-specific token format.
+            return False
+        canonical_value_sha256 = hashlib.sha256(
+            " ".join(value.casefold().split()).encode("utf-8")
+        ).hexdigest()
+        if str(row["value_sha256"] or "") != canonical_value_sha256:
+            return False
+        if str(row["memory_source"] or "") != f"{authority}:{source}"[:2_000]:
+            return False
+        try:
+            evidence_rows = self.db.execute(
+                """SELECT source, authority, confidence, evidence_sha256
+                   FROM memory_claim_evidence WHERE claim_id=?""",
+                (int(row["claim_id"]),),
+            ).fetchall()
+        except sqlite3.DatabaseError:
+            return False
+        supported = False
+        for evidence in evidence_rows:
+            evidence_authority = str(evidence["authority"] or "")
+            evidence_source = str(evidence["source"] or "")
+            try:
+                evidence_confidence = float(evidence["confidence"])
+            except (TypeError, ValueError):
+                continue
+            if not math.isfinite(evidence_confidence):
+                continue
+            evidence_sha256 = hashlib.sha256(
+                json.dumps(
+                    {
+                        "authority": evidence_authority,
+                        "confidence": round(evidence_confidence, 6),
+                        "source": evidence_source,
+                        "value": canonical_value_sha256,
+                    },
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ).encode("utf-8")
+            ).hexdigest()
+            if (
+                evidence_authority == authority
+                and evidence_source == source
+                and str(evidence["evidence_sha256"] or "") == evidence_sha256
+            ):
+                supported = True
+                break
+        if not supported:
+            return False
+        # Scan fields independently.  Joining a benign predicate such as
+        # "review token" to its value with punctuation can look like a
+        # credential assignment even though neither stored field is secret.
+        # Inputs are also checked at the write boundary; this second check
+        # protects recall if the database is modified out of band.
+        return all(
+            not contains_secret(field)
+            and not contains_private_identifier(field)
+            for field in (subject, predicate, value, source)
+        )
 
     def _filter_generic_recall_rows(
         self,
@@ -4416,9 +4879,93 @@ class Memory:
         return [
             row
             for row in rows
-            if str(row["kind"]) == "claim"
-            or self._ordinary_memory_recall_eligible(int(row["id"]))
+            if (
+                self._claim_memory_recall_eligible(int(row["id"]))
+                if str(row["kind"]) == "claim"
+                else self._ordinary_memory_recall_eligible(int(row["id"]))
+            )
         ]
+
+    def _rank_generic_recall_rows(
+        self,
+        rows: list[sqlite3.Row],
+        query_terms: list[str],
+        *,
+        keep_id: bool,
+        max_results: int,
+        minimum_information_coverage: float = 0.0,
+        relative_match_floor: float = 0.0,
+        relative_information_floor: float = 0.0,
+        query_text: str | None = None,
+    ) -> tuple[list[dict[str, Any]], bool]:
+        """Rank all candidates before filtering provenance, and abstain on shadowing.
+
+        Filtering unverified ordinary memories in SQL can make a weaker verified
+        record look like the best answer to a query that actually targets an
+        unverified or tampered record. Rank the bounded candidate set first. If
+        its strongest lexical match is not recall-eligible, fail closed instead
+        of silently substituting different content.
+        """
+        rank_arguments = {
+            "keep_id": True,
+            "minimum_information_coverage": minimum_information_coverage,
+            "relative_match_floor": relative_match_floor,
+            "relative_information_floor": relative_information_floor,
+            "query_text": query_text,
+        }
+        ranked = _rank_memory_rows(
+            rows,
+            query_terms,
+            identity_conflict_shadow=True,
+            **rank_arguments,
+        )
+        if not ranked and _rank_memory_rows(
+            rows,
+            query_terms,
+            identity_conflict_shadow=False,
+            **rank_arguments,
+        ):
+            # An identity-conflicted top lexical result is a hard shadow.  Tell
+            # hybrid retrieval not to reintroduce it through vector similarity.
+            return [], True
+        if not ranked:
+            return [], False
+        eligible: list[dict[str, Any]] = []
+        shadowed = False
+        for item in ranked:
+            if len(eligible) >= max_results:
+                break
+            try:
+                recall_eligible = (
+                    self._claim_memory_recall_eligible(int(item["memory_id"]))
+                    if str(item["kind"]) == "claim"
+                    else self._ordinary_memory_recall_eligible(
+                        int(item["memory_id"])
+                    )
+                )
+            except sqlite3.DatabaseError:
+                return [], True
+            if not recall_eligible:
+                # Never jump over a stronger ineligible observation to return a
+                # weaker answer. A stronger verified prefix remains usable.
+                shadowed = True
+                break
+            eligible.append(item)
+        if not keep_id:
+            for item in eligible:
+                item.pop("memory_id", None)
+        return eligible, shadowed
+
+    def _generic_recall_query_rows(
+        self,
+        sql: str,
+        parameters: list[Any] | tuple[Any, ...],
+    ) -> list[sqlite3.Row] | None:
+        """Execute one bounded recall query, returning ``None`` on DB failure."""
+        try:
+            return list(self.db.execute(sql, parameters).fetchall())
+        except sqlite3.DatabaseError:
+            return None
 
     def _remember_ordinary(
         self,
@@ -5479,7 +6026,8 @@ class Memory:
             ).encode("utf-8")
         ).hexdigest()
         all_claims = self.db.execute(
-            """SELECT id, memory_id, value_sha256, authority, confidence, status
+            """SELECT id, memory_id, value_sha256, source, authority,
+                      confidence, status
                FROM memory_claims
                WHERE claim_key=?
                ORDER BY id""",
@@ -5488,6 +6036,24 @@ class Memory:
         live = [
             row for row in all_claims
             if str(row["status"]) in {"active", "disputed"}
+        ]
+        same_source_claim_ids: set[int] = set()
+        if source_identity is not None and self._claim_clock_ready:
+            incoming_source_key = claim_source_key(authority, source_identity)
+            same_source_claim_ids = {
+                int(row["claim_id"])
+                for row in self.db.execute(
+                    """SELECT DISTINCT claim_id
+                       FROM memory_claim_observations
+                       WHERE claim_key=? AND source_key=?""",
+                    (claim_key, incoming_source_key),
+                ).fetchall()
+            }
+        same_source_live = [
+            row for row in live if int(row["id"]) in same_source_claim_ids
+        ]
+        competing_live = [
+            row for row in live if int(row["id"]) not in same_source_claim_ids
         ]
         matching = [
             row for row in all_claims if row["value_sha256"] == value_sha256
@@ -5520,16 +6086,73 @@ class Memory:
                     - (1.0 - combined_confidence) * (1.0 - confidence * 0.5),
                 )
             promoted_authority = authority if new_weight > existing_weight else str(selected["authority"])
+            promoted_source = (
+                source
+                if new_weight >= existing_weight
+                else str(selected["source"])
+            )
             self.db.execute(
                 """UPDATE memory_claims
                    SET updated_at=?, confidence=?, authority=?, source=? WHERE id=?""",
-                (stamp, combined_confidence, promoted_authority, source, claim_id),
+                (
+                    stamp, combined_confidence, promoted_authority,
+                    promoted_source, claim_id,
+                ),
             )
             self.db.execute(
                 "UPDATE memories SET source=? WHERE id=?",
-                (f"{promoted_authority}:{source}"[:2_000], int(selected["memory_id"])),
+                (
+                    f"{promoted_authority}:{promoted_source}"[:2_000],
+                    int(selected["memory_id"]),
+                ),
             )
-            if new_weight > strongest_weight or (
+            same_source_reassertion = claim_id in same_source_claim_ids
+            if same_source_reassertion:
+                competing_weight = max(
+                    (
+                        _CLAIM_AUTHORITY_WEIGHT[str(row["authority"])]
+                        for row in competing_live
+                    ),
+                    default=-1,
+                )
+                promoted = (
+                    not competing_live
+                    or new_weight > competing_weight
+                    or (authority == "operator" and new_weight >= competing_weight)
+                )
+                self._set_claim_status_locked(
+                    claim_id,
+                    "active" if promoted else "disputed",
+                    stamp=stamp,
+                    reason="same source published a newer claim version",
+                )
+                for row in same_source_live:
+                    other_id = int(row["id"])
+                    if other_id != claim_id:
+                        self._set_claim_status_locked(
+                            other_id, "superseded", stamp=stamp,
+                            reason="superseded by a newer version from the same source",
+                            related_claim_id=claim_id,
+                        )
+                if promoted:
+                    for row in competing_live:
+                        self._set_claim_status_locked(
+                            int(row["id"]), "superseded", stamp=stamp,
+                            reason="superseded by stronger matching claim",
+                            related_claim_id=claim_id,
+                        )
+                elif new_weight == competing_weight:
+                    for row in competing_live:
+                        if (
+                            _CLAIM_AUTHORITY_WEIGHT[str(row["authority"])]
+                            == new_weight
+                        ):
+                            self._set_claim_status_locked(
+                                int(row["id"]), "disputed", stamp=stamp,
+                                reason="equal-authority values conflict",
+                                related_claim_id=claim_id,
+                            )
+            elif new_weight > strongest_weight or (
                 authority == "operator" and new_weight >= strongest_weight
             ):
                 self._set_claim_status_locked(
@@ -5558,16 +6181,26 @@ class Memory:
             ).fetchone()
             if memory_row is None:
                 raise RuntimeError("Temporal claim memory could not be persisted")
-            if not live or new_weight > strongest_weight or (
-                authority == "operator" and new_weight == strongest_weight
+            competing_weight = max(
+                (
+                    _CLAIM_AUTHORITY_WEIGHT[str(row["authority"])]
+                    for row in competing_live
+                ),
+                default=-1,
+            )
+            if not competing_live or new_weight > competing_weight or (
+                authority == "operator" and new_weight == competing_weight
             ):
                 status = "active"
             else:
                 status = "disputed"
             supersedes_id = None
-            if status == "active" and live:
+            if same_source_live:
+                predecessor = max(same_source_live, key=lambda row: int(row["id"]))
+                supersedes_id = int(predecessor["id"])
+            elif status == "active" and competing_live:
                 strongest = max(
-                    live,
+                    competing_live,
                     key=lambda row: (
                         _CLAIM_AUTHORITY_WEIGHT[str(row["authority"])], int(row["id"])
                     ),
@@ -5596,15 +6229,21 @@ class Memory:
                     supersedes_id,
                 ),
             )
+            for row in same_source_live:
+                self._set_claim_status_locked(
+                    int(row["id"]), "superseded", stamp=stamp,
+                    reason="superseded by a newer version from the same source",
+                    related_claim_id=claim_id,
+                )
             if status == "active":
-                for row in live:
+                for row in competing_live:
                     self._set_claim_status_locked(
                         int(row["id"]), "superseded", stamp=stamp,
                         reason="replaced by newer authoritative claim",
                         related_claim_id=claim_id,
                     )
-            elif new_weight == strongest_weight:
-                for row in live:
+            elif new_weight == competing_weight:
+                for row in competing_live:
                     if _CLAIM_AUTHORITY_WEIGHT[str(row["authority"])] == new_weight:
                         self._set_claim_status_locked(
                             int(row["id"]), "disputed", stamp=stamp,
@@ -5685,8 +6324,18 @@ class Memory:
     ) -> list[dict[str, Any]]:
         """Return current claims with optional shadow/enforced confidence aging."""
         self._ensure_open()
-        if contains_secret(str(query)):
+        raw_query = str(query)
+        if len(raw_query) > MAX_SEARCH_QUERY_CHARS:
+            raise ValueError(
+                f"Claim search query exceeds {MAX_SEARCH_QUERY_CHARS} characters"
+            )
+        if contains_secret(raw_query):
             raise ValueError("Potential secret detected; claim search refused")
+        if contains_private_identifier(raw_query):
+            # Claim retrieval is an information-returning boundary.  Queries
+            # containing email addresses or other private identifiers must not
+            # be allowed to use that identifier as an authority anchor.
+            return []
         clock_mode = str(clock_mode).strip().casefold()
         if clock_mode not in {"disabled", "shadow", "enforce"}:
             raise ValueError("Claim clock mode must be disabled, shadow, or enforce")
@@ -5696,43 +6345,548 @@ class Memory:
         limit = _bounded_limit(limit, 50)
         if not limit:
             return []
-        query_terms = _memory_query_terms(str(query))
-        terms = sorted(query_terms, key=lambda item: (-len(item), item))[:16]
+        query_terms = _claim_query_terms(raw_query)
+        raw_query_terms = _memory_tokens(raw_query, meaningful_only=True)
+        raw_query_term_set = set(raw_query_terms)
+        raw_query_proper_terms = {
+            _normalize_memory_token(surface)
+            for surface in re.findall(r"[^\W_]+", raw_query, re.UNICODE)
+            if surface[:1].isupper()
+        }
+        explicit_multi_fact_query = re.search(
+            r"\b(?:and|plus)\b|[&+]", raw_query, re.I
+        ) is not None
+        if raw_query.strip() and (
+            not query_terms or _memory_query_targets_authority_evasion(raw_query)
+        ):
+            return []
+        terms = _memory_like_terms(
+            raw_query,
+            _memory_candidate_terms(raw_query),
+            max_terms=_MAX_MEMORY_QUERY_TERM_CANDIDATES * 2,
+        )
         relevance_sql = ""
+        relevance_order_sql = ""
         parameters: list[Any] = []
         if terms:
             relevance_sql = " AND (" + " OR ".join(
                 "instr(lower(subject || ' ' || predicate || ' ' || value), ?) > 0"
                 for _term in terms
             ) + ")"
+            relevance_order_sql = "(" + " + ".join(
+                "CASE WHEN instr(lower(subject || ' ' || predicate || ' ' || value), ?) > 0 "
+                "THEN 1 ELSE 0 END"
+                for _term in terms
+            ) + ") DESC, "
             parameters.extend(terms)
-        parameters.append(max(200, limit * 20))
+            parameters.extend(terms)
+        parameters.append(MAX_MEMORY_SEARCH_CANDIDATES + 1)
         rows = self.db.execute(
-            f"""SELECT id AS claim_id, memory_id, created_at, updated_at,
+            f"""SELECT id AS claim_id, memory_id, claim_key, created_at, updated_at,
                        subject, predicate, value, source, authority, confidence, status
                 FROM memory_claims
                 WHERE status IN ('active', 'disputed'){relevance_sql}
-                ORDER BY CASE authority
+                ORDER BY {relevance_order_sql}CASE authority
                              WHEN 'operator' THEN 4 WHEN 'verified' THEN 3
                              WHEN 'learned' THEN 2 ELSE 1 END DESC,
                          updated_at DESC, id DESC
                 LIMIT ?""",
             parameters,
         ).fetchall()
+        if len(rows) > MAX_MEMORY_SEARCH_CANDIDATES:
+            # A bounded recency window must never hide an older, stronger
+            # conflicting identity and expose a newer weak substitute.
+            return []
         items = [dict(row) for row in rows]
         if query_terms:
-            def relevance(item: dict[str, Any]) -> tuple[int, int, str, int]:
-                tokens = set(_memory_tokens(
-                    f"{item['subject']} {item['predicate']} {item['value']}",
+            # Identity is a safety boundary, not a scoring hint.  Inspect every
+            # current claim subject against the full bounded query so an
+            # identity inserted beyond the scoring-term cap cannot disappear.
+            identity_rows_by_id: dict[int, sqlite3.Row] = {}
+            for offset in range(
+                0, len(raw_query_terms), _MAX_MEMORY_QUERY_TERM_CANDIDATES
+            ):
+                identity_terms = raw_query_terms[
+                    offset:offset + _MAX_MEMORY_QUERY_TERM_CANDIDATES
+                ]
+                identity_patterns = [
+                    f"%{_escape_like(term)}%" for term in identity_terms
+                ]
+                identity_where = " OR ".join(
+                    "lower(subject) LIKE ? ESCAPE '\\'"
+                    for _ in identity_patterns
+                )
+                identity_chunk = self.db.execute(
+                    f"""SELECT id AS claim_id, subject, predicate, value
+                        FROM memory_claims
+                        WHERE status IN ('active', 'disputed')
+                          AND ({identity_where})
+                        ORDER BY updated_at DESC, id DESC
+                        LIMIT ?""",
+                    [*identity_patterns, MAX_MEMORY_SEARCH_CANDIDATES + 1],
+                ).fetchall()
+                if len(identity_chunk) > MAX_MEMORY_SEARCH_CANDIDATES:
+                    return []
+                for identity_row in identity_chunk:
+                    identity_rows_by_id.setdefault(
+                        int(identity_row["claim_id"]), identity_row
+                    )
+                if len(identity_rows_by_id) > MAX_MEMORY_SEARCH_CANDIDATES:
+                    return []
+            raw_named_subject_heads: set[str] = set()
+            for identity_row in identity_rows_by_id.values():
+                identity_subject_terms = _memory_tokens(
+                    str(identity_row["subject"]), meaningful_only=True
+                )
+                if not identity_subject_terms:
+                    continue
+                identity_head = identity_subject_terms[0]
+                if not _claim_matched_query_terms(
+                    raw_query_term_set, {identity_head}
+                ):
+                    continue
+                proper_or_structured_head = bool(
+                    identity_head in raw_query_proper_terms
+                    or (
+                        any(character.isalpha() for character in identity_head)
+                        and any(character.isdigit() for character in identity_head)
+                    )
+                    or bool(
+                        set(identity_subject_terms[1:]).intersection(
+                            _CLAIM_IDENTITY_DESCRIPTOR_TERMS
+                        )
+                    )
+                )
+                identity_support_terms = set(identity_subject_terms[1:])
+                identity_support_terms.update(_memory_tokens(
+                    f"{identity_row['predicate']} {identity_row['value']}",
                     meaningful_only=True,
                 ))
-                return (
-                    len(tokens.intersection(query_terms)),
+                if (
+                    proper_or_structured_head
+                    or _claim_matched_query_terms(
+                        raw_query_term_set, identity_support_terms
+                    )
+                ):
+                    raw_named_subject_heads.add(identity_head)
+            if (
+                len(raw_named_subject_heads) > 1
+                and not explicit_multi_fact_query
+            ):
+                return []
+            # Two-anchor questions often ask for two independent facts (for
+            # example, "tone and port"), so one exact anchor per claim is still
+            # useful. Longer requests must match at least two non-metadata terms.
+            minimum_matches = 1 if len(query_terms) <= 2 else 2
+            scored_items: list[
+                tuple[tuple[int, int, int, int, str, int], dict[str, Any], int]
+            ] = []
+            blocked_identity_scores: list[tuple[int, int, int, int, str, int]] = []
+            query_term_set = set(query_terms)
+            candidate_tokens = {
+                int(candidate["claim_id"]): set(_memory_tokens(
+                    " ".join((
+                        str(candidate["subject"]),
+                        str(candidate["predicate"]),
+                        str(candidate["value"]),
+                    )),
+                    meaningful_only=True,
+                ))
+                for candidate in items
+            }
+            candidate_value_tokens = {
+                int(candidate["claim_id"]): set(_memory_tokens(
+                    str(candidate["value"]), meaningful_only=True
+                ))
+                for candidate in items
+            }
+            source_qualified_query = re.search(
+                r"\b(?:according\s+to|reported\s+by|observed\s+by|"
+                r"(?:source|authority)\s+(?:says|said|reports?|reported)|"
+                r"(?:operator|verified|external|learned)\s+"
+                r"(?:says|said|reports?|reported|source|statement|observation))\b",
+                raw_query,
+                re.I,
+            ) is not None
+            qualified_source_terms: set[str] = set()
+            source_match = re.search(
+                r"\b(?:according\s+to|reported\s+by|observed\s+by)\s+"
+                r"([^,;:.!?]+)",
+                raw_query,
+                re.I,
+            )
+            if source_match:
+                qualified_source_terms = set(_memory_tokens(
+                    source_match.group(1), meaningful_only=True
+                ))
+            raw_query_identity_tokens = set(_memory_tokens(
+                raw_query, meaningful_only=False
+            ))
+            ambiguous_compact_query = bool(
+                len(query_terms) == 2
+                and not explicit_multi_fact_query
+            )
+            subject_head_by_claim = {
+                int(candidate["claim_id"]): tokens[0]
+                for candidate in items
+                if (tokens := _memory_tokens(
+                    str(candidate["subject"]), meaningful_only=True
+                ))
+            }
+            named_subject_heads = raw_named_subject_heads or {
+                head for head in subject_head_by_claim.values()
+                if _claim_matched_query_terms(query_term_set, {head})
+            }
+            if len(named_subject_heads) > 1 and not explicit_multi_fact_query:
+                return []
+            candidate_query_matches = {
+                claim_id: _claim_matched_query_terms(
+                    query_term_set, record_tokens
+                )
+                for claim_id, record_tokens in candidate_tokens.items()
+            }
+            independently_relevant_claim_ids = {
+                claim_id
+                for claim_id, matches in candidate_query_matches.items()
+                if len(matches) >= minimum_matches
+            }
+            query_anchor_claims = {
+                term: {
+                    claim_id
+                    for claim_id, record_tokens in candidate_tokens.items()
+                    if (
+                        claim_id in independently_relevant_claim_ids
+                        and _claim_matched_query_terms({term}, record_tokens)
+                    )
+                }
+                for term in query_term_set
+            }
+            value_anchor_claims = {
+                term: {
+                    claim_id
+                    for claim_id, value_tokens in candidate_value_tokens.items()
+                    if _claim_matched_query_terms({term}, value_tokens)
+                }
+                for term in query_term_set
+            }
+            for item in items:
+                subject_token_list = _memory_tokens(
+                    str(item["subject"]), meaningful_only=True
+                )
+                raw_subject_token_list = _memory_tokens(
+                    str(item["subject"]), meaningful_only=False
+                )
+                subject_tokens = set(subject_token_list)
+                predicate_tokens = set(_memory_tokens(
+                    str(item["predicate"]), meaningful_only=True
+                ))
+                value_tokens = set(_memory_tokens(
+                    str(item["value"]), meaningful_only=True
+                ))
+                subject_matched = _claim_matched_query_terms(
+                    query_term_set, subject_tokens
+                )
+                predicate_matched = _claim_matched_query_terms(
+                    query_term_set, predicate_tokens
+                )
+                value_matched = _claim_matched_query_terms(
+                    query_term_set, value_tokens
+                )
+                matched = subject_matched | predicate_matched | value_matched
+                if len(matched) < minimum_matches:
+                    continue
+                subject_head = (
+                    subject_token_list[0] if subject_token_list else ""
+                )
+                head_matched = bool(subject_head) and bool(
+                    _claim_matched_query_terms(query_term_set, {subject_head})
+                )
+                raw_endpoint_identity_match = (
+                    len(raw_subject_token_list) >= 4
+                    and raw_subject_token_list[0]
+                    in raw_query_identity_tokens
+                    and raw_subject_token_list[-1]
+                    in raw_query_identity_tokens
+                )
+                tail_subject_matched = subject_matched - (
+                    {subject_head} if head_matched else set()
+                )
+                unmatched_query_terms = query_term_set - matched
+                conflicting_value_anchors = {
+                    term for term in unmatched_query_terms
+                    if value_anchor_claims.get(term, set())
+                    - {int(item["claim_id"])}
+                }
+                source_authority_tokens = set(_memory_tokens(
+                    f"{item['source']} {item['authority']}",
+                    meaningful_only=True,
+                ))
+                source_authority_matched = _claim_matched_query_terms(
+                    raw_query_term_set, source_authority_tokens
+                )
+                if source_qualified_query and (
+                    not source_authority_matched
+                    or (
+                        qualified_source_terms
+                        and not qualified_source_terms.issubset(
+                            source_authority_tokens
+                        )
+                    )
+                ):
+                    continue
+                unmatched_non_subject = (
+                    query_term_set
+                    - predicate_matched
+                    - value_matched
+                )
+                other_claim_anchors = {
+                    term
+                    for term in unmatched_non_subject
+                    if query_anchor_claims.get(term, set())
+                    - {int(item["claim_id"])}
+                }
+                identity_conflict = (
+                    (
+                        ambiguous_compact_query
+                        and len(matched) < len(query_term_set)
+                    )
+                    or (
+                        len(subject_matched) >= 1
+                        and subject_token_list
+                        and subject_token_list[0] not in subject_matched
+                        and _claim_subject_identity_conflict(
+                            subject_token_list[0], query_term_set - matched
+                        )
+                    )
+                    or (
+                        not subject_matched
+                        and bool(predicate_matched)
+                        and bool(unmatched_non_subject)
+                        and (
+                            len(query_term_set) > 2
+                            or not unmatched_non_subject.issubset(
+                                other_claim_anchors
+                            )
+                        )
+                    )
+                    or (
+                        not explicit_multi_fact_query
+                        and bool(named_subject_heads)
+                        and subject_head not in named_subject_heads
+                    )
+                    or (
+                        not head_matched
+                        and bool(tail_subject_matched)
+                        and bool(unmatched_query_terms)
+                    )
+                    or (
+                        not explicit_multi_fact_query
+                        and bool(subject_matched)
+                        and bool(predicate_matched)
+                        and bool(conflicting_value_anchors)
+                    )
+                )
+                if len(query_term_set) > 2:
+                    subject_matches = len(subject_matched)
+                    predicate_matches = len(predicate_matched)
+                    value_matches = len(value_matched)
+                    required_subject_matches = (
+                        1 if len(subject_tokens) <= 2 else 2
+                    )
+                    field_aligned = (
+                        predicate_matches >= 1
+                        and subject_matches >= required_subject_matches
+                    )
+                    compact_predicate_lookup = (
+                        len(query_term_set) <= 4
+                        and predicate_matches >= 2
+                    )
+                    predicate_value_aligned = (
+                        predicate_matches >= 1 and value_matches >= 2
+                    )
+                    subject_value_aligned = (
+                        value_matches >= 2
+                        and (
+                            (
+                                len(subject_tokens) <= 3
+                                and subject_matches == len(subject_tokens)
+                            )
+                            or (
+                                subject_matches >= 1
+                                and raw_endpoint_identity_match
+                            )
+                        )
+                    )
+                    specific_subject_lookup = (
+                        subject_matches >= 3
+                        and subject_matched == query_term_set
+                    )
+                    if not (
+                        field_aligned
+                        or compact_predicate_lookup
+                        or predicate_value_aligned
+                        or subject_value_aligned
+                        or specific_subject_lookup
+                    ):
+                        # Long natural questions contain verbs and qualifiers
+                        # that do not belong in the stored claim. Require the
+                        # query to identify both the claim subject and its
+                        # predicate instead of using raw whole-query coverage,
+                        # which rejected valid paraphrases. Predicate-only
+                        # lookups remain available when they are compact and
+                        # specific.
+                        continue
+                claim_score = (
+                    len(matched),
+                    len(predicate_matched),
+                    len(subject_matched),
                     _CLAIM_AUTHORITY_WEIGHT[str(item["authority"])],
                     str(item["updated_at"]),
                     int(item["claim_id"]),
                 )
-            items.sort(key=relevance, reverse=True)
+                recall_eligible = self._claim_memory_recall_eligible(
+                    int(item["memory_id"])
+                )
+                if identity_conflict or not recall_eligible:
+                    # Keep the rejected candidate as a shadow.  If it is the
+                    # strongest structural match, retrieval must abstain instead
+                    # of silently falling through to weaker unrelated subjects.
+                    blocked_identity_scores.append(claim_score)
+                    continue
+                scored_items.append((
+                    claim_score,
+                    item,
+                    len(matched),
+                ))
+            scored_items.sort(key=lambda pair: pair[0], reverse=True)
+            blocked_identity_scores.sort(reverse=True)
+            if blocked_identity_scores and (
+                not scored_items
+                or blocked_identity_scores[0][:3] >= scored_items[0][0][:3]
+            ):
+                return []
+            if scored_items:
+                # Return only the strongest lexical specificity tier.  This
+                # preserves equal-strength dispute pairs and compact multi-fact
+                # lookups while preventing boilerplate overlap from appending
+                # unrelated claim keys behind the actual answer.
+                strongest_relevance = (
+                    scored_items[0][0][:1]
+                    if len(query_term_set) <= 2
+                    else scored_items[0][0][:3]
+                )
+                scored_items = [
+                    pair for pair in scored_items
+                    if pair[0][:len(strongest_relevance)] == strongest_relevance
+                ]
+                if not explicit_multi_fact_query:
+                    ambiguity_items = [
+                        pair for pair in scored_items
+                        if (
+                            not named_subject_heads
+                            or subject_head_by_claim.get(
+                                int(pair[1]["claim_id"]), ""
+                            ) in named_subject_heads
+                        )
+                    ]
+                    ambiguous_keys = {
+                        str(item["claim_key"])
+                        for _score, item, _matched_count in ambiguity_items
+                    }
+                    if len(ambiguous_keys) > 1:
+                        fully_qualified_constellation = (
+                            len(query_term_set) > 2
+                            and len(ambiguity_items) <= limit
+                            and all(
+                                matched_count == len(query_term_set)
+                                for _score, _item, matched_count
+                                in ambiguity_items
+                            )
+                        )
+                        if not fully_qualified_constellation:
+                            return []
+
+            # Compare current candidates only with their own canonical history.
+            # Cap work per claim identity, and fail closed for an identity whose
+            # history exceeds that cap, so an old conflicting value can never be
+            # hidden beyond one global recency limit.
+            candidate_keys = list(dict.fromkeys(
+                str(item["claim_key"])
+                for _score, item, _matched_count in scored_items
+            ))
+            superseded_by_key: dict[str, list[set[str]]] = {}
+            truncated_history_keys: set[str] = set()
+            try:
+                for offset in range(0, len(candidate_keys), 400):
+                    key_chunk = candidate_keys[offset:offset + 400]
+                    placeholders = ",".join("?" for _key in key_chunk)
+                    historical_rows = self.db.execute(
+                        f"""SELECT claim_key, subject, predicate, value,
+                                   version_count
+                            FROM (
+                                SELECT claim_key, subject, predicate, value,
+                                       COUNT(*) OVER (
+                                           PARTITION BY claim_key
+                                       ) AS version_count,
+                                       ROW_NUMBER() OVER (
+                                           PARTITION BY claim_key
+                                           ORDER BY updated_at DESC, id DESC
+                                       ) AS version_rank
+                                FROM memory_claims
+                                WHERE status='superseded'
+                                  AND claim_key IN ({placeholders})
+                            )
+                            WHERE version_rank<=?""",
+                        [*key_chunk, _MAX_SUPERSEDED_CLAIM_VERSIONS],
+                    ).fetchall()
+                    for historical in historical_rows:
+                        key = str(historical["claim_key"])
+                        if int(historical["version_count"]) > (
+                            _MAX_SUPERSEDED_CLAIM_VERSIONS
+                        ):
+                            truncated_history_keys.add(key)
+                        historical_tokens = set(_memory_tokens(
+                            " ".join((
+                                str(historical["subject"]),
+                                str(historical["predicate"]),
+                                str(historical["value"]),
+                            )),
+                            meaningful_only=True,
+                        ))
+                        superseded_by_key.setdefault(key, []).append(
+                            historical_tokens
+                        )
+            except sqlite3.DatabaseError:
+                return []
+
+            relevant_items: list[
+                tuple[tuple[int, int, int, int, str, int], dict[str, Any]]
+            ] = []
+            for score, item, matched_count in scored_items:
+                key = str(item["claim_key"])
+                if key in truncated_history_keys:
+                    continue
+                historical_versions = superseded_by_key.get(key, ())
+                if any(
+                    len(_claim_matched_query_terms(
+                        query_term_set, historical_tokens
+                    ))
+                    > matched_count
+                    for historical_tokens in historical_versions
+                ):
+                    # The query fits an older value better than the current
+                    # value. Abstain instead of substituting the newer fact and
+                    # pretending it answered the operator's exact question.
+                    continue
+                relevant_items.append((score, item))
+            items = [item for _score, item in relevant_items]
+        else:
+            items = [
+                item for item in items
+                if self._claim_memory_recall_eligible(int(item["memory_id"]))
+            ]
+        for item in items:
+            item.pop("claim_key", None)
         items = items[:limit]
         if clock_mode == "disabled":
             return items
@@ -6054,9 +7208,10 @@ class Memory:
         ).fetchall()
         pending: list[dict[str, Any]] = []
         for row in rows:
-            if (
-                str(row["kind"]) != "claim"
-                and not self._ordinary_memory_recall_eligible(int(row["id"]))
+            if not (
+                self._claim_memory_recall_eligible(int(row["id"]))
+                if str(row["kind"]) == "claim"
+                else self._ordinary_memory_recall_eligible(int(row["id"]))
             ):
                 continue
             content = str(row["content"])
@@ -6120,9 +7275,10 @@ class Memory:
                 ),
             ).fetchall()
             for row in rows:
-                if (
-                    str(row["kind"]) != "claim"
-                    and not self._ordinary_memory_recall_eligible(int(row["id"]))
+                if not (
+                    self._claim_memory_recall_eligible(int(row["id"]))
+                    if str(row["kind"]) == "claim"
+                    else self._ordinary_memory_recall_eligible(int(row["id"]))
                 ):
                     continue
                 content = str(row["content"])
@@ -6190,9 +7346,10 @@ class Memory:
                 ).fetchone()
                 if row is None or str(row["kind"]) == "lesson":
                     continue
-                if (
-                    str(row["kind"]) != "claim"
-                    and not self._ordinary_memory_recall_eligible(memory_id)
+                if not (
+                    self._claim_memory_recall_eligible(memory_id)
+                    if str(row["kind"]) == "claim"
+                    else self._ordinary_memory_recall_eligible(memory_id)
                 ):
                     continue
                 content = str(row["content"])
@@ -6309,14 +7466,19 @@ class Memory:
                      WHERE omp.memory_id=m.id AND omp.eligible=1
                  ))
                ORDER BY m.id DESC LIMIT ?""",
-            (safe_model, len(query), MAX_MEMORY_SEARCH_CANDIDATES),
+            (safe_model, len(query), MAX_MEMORY_SEARCH_CANDIDATES + 1),
         ).fetchall()
+        if len(rows) > MAX_MEMORY_SEARCH_CANDIDATES:
+            # Never rank a truncated recency window: an omitted older vector
+            # could be the authoritative or identity-conflicting best match.
+            return []
         scored: list[tuple[float, int, dict[str, Any]]] = []
         for raw in rows:
             row = dict(raw)
-            if (
-                str(row["kind"]) != "claim"
-                and not self._ordinary_memory_recall_eligible(int(row["id"]))
+            if not (
+                self._claim_memory_recall_eligible(int(row["id"]))
+                if str(row["kind"]) == "claim"
+                else self._ordinary_memory_recall_eligible(int(row["id"]))
             ):
                 continue
             try:
@@ -6365,16 +7527,21 @@ class Memory:
         if len(query) > MAX_SEARCH_QUERY_CHARS:
             raise ValueError(f"Memory search query exceeds {MAX_SEARCH_QUERY_CHARS} characters")
         limit = _bounded_limit(limit, 100)
-        if not limit:
+        if (
+            not limit
+            or contains_secret(query)
+            or contains_private_identifier(query)
+            or _memory_query_targets_authority_evasion(query)
+        ):
             return []
         query_terms = _memory_query_terms(query)
         like_terms = _memory_like_terms(query, query_terms)
         lexical: list[dict[str, Any]] = []
         if query_terms and like_terms:
-            candidate_limit = min(MAX_MEMORY_SEARCH_CANDIDATES, max(64, limit * 32))
+            candidate_limit = MAX_MEMORY_SEARCH_CANDIDATES
             fts_query = _memory_fts_query(query, query_terms)
             if fts_query is not None:
-                rows = self.db.execute(
+                rows = self._generic_recall_query_rows(
                     """SELECT m.id, m.created_at, m.kind, m.content, m.source,
                               c.status AS claim_status, c.authority AS claim_authority
                        FROM memory_fts
@@ -6383,13 +7550,9 @@ class Memory:
                        WHERE memory_fts MATCH ?
                          AND m.kind<>'lesson'
                          AND (m.kind<>'claim' OR c.status IN ('active', 'disputed'))
-                         AND (m.kind='claim' OR EXISTS (
-                             SELECT 1 FROM ordinary_memory_provenance AS omp
-                             WHERE omp.memory_id=m.id AND omp.eligible=1
-                         ))
                        ORDER BY memory_fts.rank, m.id DESC LIMIT ?""",
-                    (fts_query, candidate_limit),
-                ).fetchall()
+                    (fts_query, candidate_limit + 1),
+                )
             else:
                 patterns = [f"%{_escape_like(term)}%" for term in like_terms]
                 where = " OR ".join(
@@ -6399,7 +7562,7 @@ class Memory:
                     "CASE WHEN lower(m.content) LIKE ? ESCAPE '\\' THEN 1 ELSE 0 END"
                     for _ in patterns
                 )
-                rows = self.db.execute(
+                rows = self._generic_recall_query_rows(
                     f"""SELECT m.id, m.created_at, m.kind, m.content, m.source,
                                c.status AS claim_status, c.authority AS claim_authority
                         FROM memories AS m
@@ -6407,18 +7570,39 @@ class Memory:
                         WHERE ({where})
                           AND m.kind<>'lesson'
                           AND (m.kind<>'claim' OR c.status IN ('active', 'disputed'))
-                          AND (m.kind='claim' OR EXISTS (
-                              SELECT 1 FROM ordinary_memory_provenance AS omp
-                              WHERE omp.memory_id=m.id AND omp.eligible=1
-                          ))
                         ORDER BY ({match_count}) DESC, m.id DESC LIMIT ?""",
-                    [*patterns, *patterns, candidate_limit],
-                ).fetchall()
-            rows = self._filter_generic_recall_rows(list(rows))
-            lexical = _rank_memory_rows(rows, query_terms, keep_id=True)[: max(limit * 4, 24)]
+                    [*patterns, *patterns, candidate_limit + 1],
+                )
+            if rows is None:
+                return []
+            if len(rows) > candidate_limit:
+                return []
+            lexical_limit = max(limit * 4, 24)
+            lexical, shadowed = self._rank_generic_recall_rows(
+                list(rows), query_terms, keep_id=True, max_results=lexical_limit
+            )
+            if shadowed:
+                return [
+                    {**item, "retrieval_channel": "lexical"}
+                    for item in lexical[:limit]
+                ]
+            lexical = lexical[:lexical_limit]
         semantic = self.semantic_memory_search(
             query_vector, model, limit=max(limit * 4, 24)
         )
+        if query_terms:
+            identity_safe_semantic: list[dict[str, Any]] = []
+            for item in semantic:
+                tokens = _memory_tokens(
+                    str(item.get("content") or ""), meaningful_only=False
+                )
+                matched = [
+                    term for term in query_terms
+                    if set(_memory_term_variants(term)).intersection(tokens)
+                ]
+                if not _memory_identity_conflict(query_terms, tokens, matched):
+                    identity_safe_semantic.append(item)
+            semantic = identity_safe_semantic
         fused: dict[int, dict[str, Any]] = {}
         for channel, items in (("lexical", lexical), ("semantic", semantic)):
             for rank, item in enumerate(items, 1):
@@ -6487,7 +7671,8 @@ class Memory:
         inserted = 0
         with self._immediate_transaction():
             prediction = self.db.execute(
-                "SELECT family, resolved_at FROM task_predictions WHERE id=?",
+                """SELECT family, resolved_at, task_id, conversation_id
+                   FROM task_predictions WHERE id=?""",
                 (normalized_prediction,),
             ).fetchone()
             if (
@@ -6512,9 +7697,10 @@ class Memory:
                     raise ValueError(
                         "Verified lessons require the dedicated provenance retrieval path"
                     )
-                if (
-                    str(valid["kind"]) != "claim"
-                    and not self._ordinary_memory_recall_eligible(memory_id)
+                if not (
+                    self._claim_memory_recall_eligible(memory_id)
+                    if str(valid["kind"]) == "claim"
+                    else self._ordinary_memory_recall_eligible(memory_id)
                 ):
                     raise ValueError(
                         "Memory retrieval references an ineligible ordinary memory"
@@ -6606,8 +7792,10 @@ class Memory:
             ).fetchall()
         }
         valid_lesson_ids: set[int] = set()
+        eligible_lesson_ids: set[int] = set()
         hash_mismatch_ids: set[int] = set()
         digest_mismatch_ids: set[int] = set()
+        lesson_control_reasons: Counter[str] = Counter()
         for memory_id in lesson_ids:
             valid, content_mismatch, digest_mismatch = (
                 self._lesson_provenance_validation(memory_id)
@@ -6618,6 +7806,11 @@ class Memory:
                 hash_mismatch_ids.add(memory_id)
             if digest_mismatch:
                 digest_mismatch_ids.add(memory_id)
+            control_valid, control_reason = self._lesson_control_validation(memory_id)
+            if valid and control_valid:
+                eligible_lesson_ids.add(memory_id)
+            else:
+                lesson_control_reasons[control_reason] += 1
         ordinary_ids = {
             int(row["id"])
             for row in self.db.execute(
@@ -6659,6 +7852,14 @@ class Memory:
             "provenance_quarantined_lessons": len(lesson_ids - valid_lesson_ids),
             "provenance_hash_mismatches": len(hash_mismatch_ids),
             "provenance_digest_mismatches": len(digest_mismatch_ids),
+            "lesson_recall_eligible": len(eligible_lesson_ids),
+            "lesson_control_quarantined": len(lesson_ids - eligible_lesson_ids),
+            "lesson_expired": lesson_control_reasons["expired"],
+            "lesson_contradicted": lesson_control_reasons["contradicted"],
+            "lesson_superseded": lesson_control_reasons["superseded"],
+            "lesson_control_digest_mismatches": lesson_control_reasons[
+                "control_digest_mismatch"
+            ],
         })
         return {
             "totals": measured_totals,
@@ -6669,6 +7870,282 @@ class Memory:
                 or int(row["memory_id"]) in eligible_ordinary_ids
             ],
         }
+
+    @staticmethod
+    def _canonical_utc_timestamp(value: Any) -> str | None:
+        try:
+            parsed = datetime.fromisoformat(str(value))
+        except (TypeError, ValueError):
+            return None
+        if parsed.tzinfo is None or parsed.utcoffset() is None:
+            return None
+        return parsed.astimezone(timezone.utc).isoformat()
+
+    def _lesson_project_for_context(
+        self,
+        task_id: Any,
+        conversation_id: Any,
+    ) -> int | None:
+        try:
+            if task_id is not None:
+                row = self.db.execute(
+                    "SELECT project_id FROM tasks WHERE id=?", (int(task_id),)
+                ).fetchone()
+            elif conversation_id is not None:
+                row = self.db.execute(
+                    "SELECT project_id FROM conversations WHERE id=?",
+                    (int(conversation_id),),
+                ).fetchone()
+            else:
+                return None
+        except (sqlite3.DatabaseError, TypeError, ValueError):
+            return None
+        if row is None:
+            return None
+        try:
+            return self._project_id(int(row["project_id"] or 1))
+        except (TypeError, ValueError):
+            return None
+
+    @staticmethod
+    def _lesson_control_material(
+        *,
+        memory_id: int,
+        prediction_id: int,
+        reflection_id: int,
+        content_sha256: str,
+        provenance_sha256: str,
+        project_id: int,
+        observed_at: str,
+        valid_until: str,
+        lifecycle_status: str,
+        superseded_by: int | None,
+    ) -> dict[str, Any]:
+        return {
+            "schema": "jarvis.lesson-control.v1",
+            "memory_id": int(memory_id),
+            "prediction_id": int(prediction_id),
+            "reflection_id": int(reflection_id),
+            "content_sha256": str(content_sha256),
+            "provenance_sha256": str(provenance_sha256),
+            "project_id": int(project_id),
+            "observed_at": str(observed_at),
+            "valid_until": str(valid_until),
+            "lifecycle_status": str(lifecycle_status),
+            "superseded_by": (
+                None if superseded_by is None else int(superseded_by)
+            ),
+        }
+
+    @staticmethod
+    def _lesson_control_digest(material: dict[str, Any]) -> str:
+        canonical = json.dumps(
+            material,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+    def _lesson_control_validation(
+        self,
+        memory_id: int,
+        *,
+        project_id: int | None = None,
+        as_of: str | None = None,
+    ) -> tuple[bool, str]:
+        """Validate project, freshness, lifecycle, and an internal integrity receipt."""
+        try:
+            row = self.db.execute(
+                """SELECT lc.memory_id, lc.project_id, lc.observed_at,
+                          lc.valid_until, lc.lifecycle_status, lc.superseded_by,
+                          lc.control_sha256, lp.prediction_id, lp.reflection_id,
+                          lp.content_sha256, lp.provenance_sha256
+                   FROM lesson_controls AS lc
+                   JOIN lesson_provenance AS lp ON lp.memory_id=lc.memory_id
+                   WHERE lc.memory_id=?
+                   ORDER BY lp.verified_at DESC, lp.prediction_id DESC LIMIT 1""",
+                (int(memory_id),),
+            ).fetchone()
+        except (sqlite3.DatabaseError, TypeError, ValueError):
+            return False, "control_unavailable"
+        if row is None:
+            return False, "control_missing"
+        try:
+            normalized_project = (
+                None if project_id is None else self._project_id(project_id)
+            )
+            observed_at = self._canonical_utc_timestamp(row["observed_at"])
+            valid_until = self._canonical_utc_timestamp(row["valid_until"])
+            current_at = self._canonical_utc_timestamp(as_of or now_iso())
+            if None in {observed_at, valid_until, current_at}:
+                return False, "timestamp_invalid"
+            observed = datetime.fromisoformat(str(observed_at))
+            expires = datetime.fromisoformat(str(valid_until))
+            current = datetime.fromisoformat(str(current_at))
+            if observed > current + timedelta(minutes=5):
+                return False, "observed_in_future"
+            if expires <= observed:
+                return False, "validity_invalid"
+            if current > expires:
+                return False, "expired"
+            if expires - observed > timedelta(days=LESSON_DEFAULT_TTL_DAYS):
+                # Every trusted write path bounds validity to the default TTL
+                # window from observation.  A longer window can only come from
+                # tampering, even when the unkeyed integrity digest was
+                # recomputed to match, so fail closed instead of honoring it.
+                return False, "validity_invalid"
+            if normalized_project is not None and int(row["project_id"]) != normalized_project:
+                return False, "project_mismatch"
+            status = str(row["lifecycle_status"])
+            superseded_by = row["superseded_by"]
+            if status != "active" or superseded_by is not None:
+                return False, status
+            material = self._lesson_control_material(
+                memory_id=int(row["memory_id"]),
+                prediction_id=int(row["prediction_id"]),
+                reflection_id=int(row["reflection_id"]),
+                content_sha256=str(row["content_sha256"]),
+                provenance_sha256=str(row["provenance_sha256"] or ""),
+                project_id=int(row["project_id"]),
+                observed_at=str(observed_at),
+                valid_until=str(valid_until),
+                lifecycle_status=status,
+                superseded_by=(
+                    None if superseded_by is None else int(superseded_by)
+                ),
+            )
+            if str(row["control_sha256"] or "") != self._lesson_control_digest(material):
+                return False, "control_digest_mismatch"
+        except (OverflowError, TypeError, ValueError):
+            return False, "control_invalid"
+        return True, "active"
+
+    def _lesson_application_values(
+        self,
+        *,
+        family: str,
+        application_created_at: Any,
+        application_resolved_at: Any,
+        application_successful: Any,
+        prediction_created_at: Any,
+        prediction_resolved_at: Any,
+        prediction_actual_status: Any,
+        prediction_evidence_ok: Any,
+        prediction_verification: Any,
+        lesson_observed_at: Any,
+        lesson_valid_until: Any,
+        validation_at: Any = None,
+    ) -> tuple[str, str | None, int | None] | None:
+        """Reconcile one application row with its prediction and lesson window.
+
+        The application ledger is derived evidence, never an authority of its
+        own.  A row is usable only when its timestamps fit the observation and
+        prediction timelines and its terminal fields exactly mirror the bound
+        prediction.  Returning canonical values also prevents textual timestamp
+        variants from surviving a migration as distinct claims.
+        """
+        if family not in self.PREDICTION_FAMILIES:
+            return None
+        verification = str(prediction_verification or "")
+        if verification not in self.PREDICTION_VERIFICATION:
+            return None
+        if (
+            family in LESSON_EVIDENCE_REQUIRED_FAMILIES
+            and verification == "not_applicable"
+        ):
+            return None
+        app_created_at = self._canonical_utc_timestamp(application_created_at)
+        prediction_created_at = self._canonical_utc_timestamp(
+            prediction_created_at
+        )
+        lesson_observed_at = self._canonical_utc_timestamp(lesson_observed_at)
+        lesson_valid_until = self._canonical_utc_timestamp(lesson_valid_until)
+        validation_at = self._canonical_utc_timestamp(validation_at or now_iso())
+        if None in {
+            app_created_at,
+            prediction_created_at,
+            lesson_observed_at,
+            lesson_valid_until,
+            validation_at,
+        }:
+            return None
+        try:
+            app_created = datetime.fromisoformat(str(app_created_at))
+            prediction_created = datetime.fromisoformat(str(prediction_created_at))
+            lesson_observed = datetime.fromisoformat(str(lesson_observed_at))
+            lesson_expires = datetime.fromisoformat(str(lesson_valid_until))
+            validation_time = datetime.fromisoformat(str(validation_at))
+        except (TypeError, ValueError):
+            return None
+        if (
+            lesson_expires <= lesson_observed
+            or app_created < lesson_observed
+            or app_created > lesson_expires
+            or app_created < prediction_created
+            or app_created > validation_time + timedelta(minutes=5)
+        ):
+            return None
+
+        raw_prediction_resolved_at = prediction_resolved_at
+        raw_application_resolved_at = application_resolved_at
+        prediction_resolved_at = (
+            None
+            if raw_prediction_resolved_at is None
+            else self._canonical_utc_timestamp(raw_prediction_resolved_at)
+        )
+        application_resolved_at = (
+            None
+            if raw_application_resolved_at is None
+            else self._canonical_utc_timestamp(raw_application_resolved_at)
+        )
+        if (
+            raw_prediction_resolved_at is not None
+            and prediction_resolved_at is None
+        ) or (
+            raw_application_resolved_at is not None
+            and application_resolved_at is None
+        ):
+            return None
+        if prediction_resolved_at is None:
+            if (
+                prediction_actual_status is not None
+                or prediction_evidence_ok is not None
+                or application_resolved_at is not None
+                or application_successful is not None
+            ):
+                return None
+            return str(app_created_at), None, None
+
+        status = str(prediction_actual_status or "")
+        if (
+            application_resolved_at is None
+            or str(application_resolved_at) != str(prediction_resolved_at)
+            or status not in {"complete", "incomplete", "failed"}
+            or isinstance(application_successful, bool)
+            or not isinstance(application_successful, int)
+            or application_successful not in {0, 1}
+            or int(application_successful) != int(status == "complete")
+        ):
+            return None
+        try:
+            resolved = datetime.fromisoformat(str(application_resolved_at))
+        except (TypeError, ValueError):
+            return None
+        if resolved < app_created or resolved < prediction_created:
+            return None
+        if resolved > validation_time + timedelta(minutes=5):
+            return None
+        if prediction_evidence_ok not in {None, 0, 1}:
+            return None
+        if status == "complete" and verification != "not_applicable":
+            if prediction_evidence_ok != 1:
+                return None
+        return (
+            str(app_created_at),
+            str(application_resolved_at),
+            int(application_successful),
+        )
 
     def _prediction_family_for_context(
         self,
@@ -6703,11 +8180,15 @@ class Memory:
         summary: str,
         mistakes: str,
         improvements: str,
+        project_id: int | None = None,
+        reflection_id: int | None = None,
     ) -> str | None:
-        """Reconstruct the sole lesson text emitted by the legacy runtime."""
+        """Reconstruct canonical lesson text, optionally bound to one observation."""
         reusable = str(improvements).strip()
         if not reusable:
             return None
+        if (project_id is None) != (reflection_id is None):
+            raise ValueError("Lesson scope requires both project and reflection IDs")
         parts = [
             f"Task family: {family}.",
             f"Observed outcome: {outcome_status}.",
@@ -6716,6 +8197,11 @@ class Memory:
             parts.append(f"Observed result: {summary}")
         if str(mistakes):
             parts.append(f"Observed blocker: {mistakes}")
+        if project_id is not None and reflection_id is not None:
+            parts.append(
+                f"Evidence scope: project {int(project_id)}; "
+                f"reflection {int(reflection_id)}."
+            )
         parts.append(f"Reusable lesson: {reusable}")
         return "\n".join(parts)
 
@@ -6761,8 +8247,41 @@ class Memory:
         ).fetchone()
         if row is None or str(row["lesson_kind"]) != "lesson":
             return None
+        durable_text = "\n".join((
+            str(row["lesson_content"] or ""),
+            str(row["reflection_summary"] or ""),
+            str(row["reflection_mistakes"] or ""),
+            str(row["reflection_improvements"] or ""),
+        ))
+        if contains_secret(durable_text) or contains_private_identifier(durable_text):
+            return None
+        project_id = self._lesson_project_for_context(
+            row["prediction_task_id"], row["prediction_conversation_id"]
+        )
+        if project_id is None:
+            return None
+        legacy_expected_content = self._canonical_reflection_lesson_content(
+            family=str(row["prediction_family"] or ""),
+            outcome_status=str(row["reflection_status"] or ""),
+            summary=str(row["reflection_summary"] or ""),
+            mistakes=str(row["reflection_mistakes"] or ""),
+            improvements=str(row["reflection_improvements"] or ""),
+        )
+        scoped_expected_content = self._canonical_reflection_lesson_content(
+            family=str(row["prediction_family"] or ""),
+            outcome_status=str(row["reflection_status"] or ""),
+            summary=str(row["reflection_summary"] or ""),
+            mistakes=str(row["reflection_mistakes"] or ""),
+            improvements=str(row["reflection_improvements"] or ""),
+            project_id=project_id,
+            reflection_id=int(reflection_id),
+        )
         if (
-            row["lesson_reflection_id"] is None
+            legacy_expected_content is None
+            or scoped_expected_content is None
+            or str(row["lesson_content"])
+            not in {legacy_expected_content, scoped_expected_content}
+            or row["lesson_reflection_id"] is None
             or int(row["lesson_reflection_id"]) != int(reflection_id)
             or row["reflection_prediction_id"] is None
             or int(row["reflection_prediction_id"]) != int(prediction_id)
@@ -6778,7 +8297,12 @@ class Memory:
             or int(row["prediction_actual_steps"])
             != int(row["reflection_tool_calls"])
             or str(row["prediction_origin"])
-            in self.SCREEN_COMPANION_PREDICTION_ORIGINS
+            not in LESSON_REUSABLE_PREDICTION_ORIGINS
+            or (
+                str(row["prediction_family"])
+                in LESSON_EVIDENCE_REQUIRED_FAMILIES
+                and str(row["predicted_verification"]) == "not_applicable"
+            )
         ):
             return None
         if row["reflection_task_id"] is not None:
@@ -6863,17 +8387,20 @@ class Memory:
         memory_id: int,
     ) -> tuple[bool, bool, bool]:
         """Return (valid, content mismatch, chain/digest mismatch)."""
-        rows = self.db.execute(
-            """SELECT prediction_id, memory_id, reflection_id, content_sha256,
-                      provenance_sha256
-               FROM lesson_provenance WHERE memory_id=?
-               ORDER BY verified_at DESC, prediction_id DESC""",
-            (int(memory_id),),
-        ).fetchall()
-        content_row = self.db.execute(
-            "SELECT content FROM memories WHERE id=? AND kind='lesson'",
-            (int(memory_id),),
-        ).fetchone()
+        try:
+            rows = self.db.execute(
+                """SELECT prediction_id, memory_id, reflection_id, content_sha256,
+                          provenance_sha256
+                   FROM lesson_provenance WHERE memory_id=?
+                   ORDER BY verified_at DESC, prediction_id DESC""",
+                (int(memory_id),),
+            ).fetchall()
+            content_row = self.db.execute(
+                "SELECT content FROM memories WHERE id=? AND kind='lesson'",
+                (int(memory_id),),
+            ).fetchone()
+        except (sqlite3.DatabaseError, TypeError, ValueError):
+            return False, False, True
         if content_row is None:
             return False, False, bool(rows)
         observed_content_hash = hashlib.sha256(
@@ -6951,11 +8478,15 @@ class Memory:
             exact_candidates = [
                 candidate for candidate in candidates
                 if str(candidate["origin"])
-                not in self.SCREEN_COMPANION_PREDICTION_ORIGINS
+                in LESSON_REUSABLE_PREDICTION_ORIGINS
                 and str(candidate["family"]) == family
                 and str(candidate["actual_status"]) == outcome_status
                 and candidate["actual_steps"] is not None
                 and int(candidate["actual_steps"]) == int(reflection["tool_calls"])
+                and not (
+                    family in LESSON_EVIDENCE_REQUIRED_FAMILIES
+                    and str(candidate["predicted_verification"]) == "not_applicable"
+                )
                 and (
                     outcome_status != "complete"
                     or str(candidate["predicted_verification"]) == "not_applicable"
@@ -6991,7 +8522,7 @@ class Memory:
         ).fetchone()
         if prediction is None:
             return None
-        if str(prediction["origin"]) in self.SCREEN_COMPANION_PREDICTION_ORIGINS:
+        if str(prediction["origin"]) not in LESSON_REUSABLE_PREDICTION_ORIGINS:
             return None
         if str(prediction["resolved_at"]) > str(reflection["created_at"]):
             return None
@@ -7008,6 +8539,11 @@ class Memory:
         else:
             return None
         if str(prediction["family"]) != family:
+            return None
+        if (
+            family in LESSON_EVIDENCE_REQUIRED_FAMILIES
+            and str(prediction["predicted_verification"]) == "not_applicable"
+        ):
             return None
         if str(prediction["actual_status"]) != outcome_status:
             return None
@@ -7035,7 +8571,9 @@ class Memory:
         if outcome_status not in {"complete", "incomplete", "failed"}:
             raise ValueError("Unknown lesson outcome status")
         safe = _bounded_persisted_text(
-            redact_secrets(str(content).strip()), 8_000, "verified lesson"
+            redact_private_identifiers(str(content).strip()),
+            8_000,
+            "verified lesson",
         )
         if not safe:
             raise ValueError("Verified lesson must not be empty")
@@ -7051,6 +8589,36 @@ class Memory:
             raise ValueError(
                 "Verified lesson requires an exact resolved reflection/prediction outcome"
             )
+        reflection = self.db.execute(
+            """SELECT created_at, summary, mistakes, improvements
+               FROM reflections WHERE id=?""",
+            (int(normalized_reflection),),
+        ).fetchone()
+        if reflection is None:
+            raise ValueError("Verified lesson reflection is unavailable")
+        project_id = self._lesson_project_for_context(
+            prediction["task_id"], prediction["conversation_id"]
+        )
+        observed_at = self._canonical_utc_timestamp(reflection["created_at"])
+        if project_id is None or observed_at is None:
+            raise ValueError("Verified lesson lacks a valid project or observation time")
+        expected_content = self._canonical_reflection_lesson_content(
+            family=family,
+            outcome_status=outcome_status,
+            summary=str(reflection["summary"] or ""),
+            mistakes=str(reflection["mistakes"] or ""),
+            improvements=str(reflection["improvements"] or ""),
+            project_id=project_id,
+            reflection_id=int(normalized_reflection),
+        )
+        if expected_content is None or safe != expected_content:
+            raise ValueError(
+                "Verified lesson must be exactly derived from its bound reflection"
+            )
+        valid_until = (
+            datetime.fromisoformat(observed_at)
+            + timedelta(days=LESSON_DEFAULT_TTL_DAYS)
+        ).isoformat()
         source = (
             f"verified reflection:{normalized_reflection};"
             f"prediction:{int(prediction['id'])}"
@@ -7117,6 +8685,46 @@ class Memory:
                     != provenance_sha256
                 ):
                     raise ValueError("Prediction is already bound to different lesson provenance")
+                control_material = self._lesson_control_material(
+                    memory_id=int(row["id"]),
+                    prediction_id=int(prediction["id"]),
+                    reflection_id=int(normalized_reflection),
+                    content_sha256=content_sha256,
+                    provenance_sha256=provenance_sha256,
+                    project_id=project_id,
+                    observed_at=observed_at,
+                    valid_until=valid_until,
+                    lifecycle_status="active",
+                    superseded_by=None,
+                )
+                control_sha256 = self._lesson_control_digest(control_material)
+                existing_control = self.db.execute(
+                    """SELECT project_id, observed_at, valid_until,
+                              lifecycle_status, superseded_by, control_sha256
+                       FROM lesson_controls WHERE memory_id=?""",
+                    (int(row["id"]),),
+                ).fetchone()
+                if existing_control is None:
+                    self.db.execute(
+                        """INSERT INTO lesson_controls(
+                               memory_id, project_id, observed_at, valid_until,
+                               lifecycle_status, superseded_by, recorded_at,
+                               control_sha256
+                           ) VALUES (?, ?, ?, ?, 'active', NULL, ?, ?)""",
+                        (
+                            int(row["id"]), project_id, observed_at, valid_until,
+                            now_iso(), control_sha256,
+                        ),
+                    )
+                elif (
+                    int(existing_control["project_id"]) != project_id
+                    or str(existing_control["observed_at"]) != observed_at
+                    or str(existing_control["valid_until"]) != valid_until
+                    or str(existing_control["lifecycle_status"]) != "active"
+                    or existing_control["superseded_by"] is not None
+                    or str(existing_control["control_sha256"]) != control_sha256
+                ):
+                    raise ValueError("Lesson is already bound to different reuse controls")
         if row is None:
             raise RuntimeError("Verified lesson could not be persisted")
         lesson_id = int(row["id"])
@@ -7136,51 +8744,371 @@ class Memory:
         family: str,
         *,
         limit: int = 3,
+        project_id: int | None = None,
     ) -> list[dict[str, Any]]:
-        """Match only successful, reflection-derived lessons in the same family."""
+        """Match fresh proven lessons inside one project, or fail closed."""
         if family not in self.PREDICTION_FAMILIES:
             raise ValueError(f"Unknown lesson family: {family}")
         if contains_secret(str(query)):
             raise ValueError("Potential secret detected; lesson matching refused")
-        limit = _bounded_limit(limit, 10)
-        query_terms = _memory_query_terms(str(query))
-        like_terms = _memory_like_terms(str(query), query_terms)
-        if not limit or not query_terms or not like_terms:
+        if contains_private_identifier(str(query)):
             return []
-        patterns = [f"%{_escape_like(term)}%" for term in like_terms]
-        where = " OR ".join("lower(m.content) LIKE ? ESCAPE '\\'" for _ in patterns)
-        match_count = " + ".join(
-            "CASE WHEN lower(m.content) LIKE ? ESCAPE '\\' THEN 1 ELSE 0 END"
-            for _ in patterns
-        )
-        rows = self.db.execute(
-            f"""SELECT m.id, m.created_at, m.kind, m.content, m.source, m.family,
-                       m.outcome_status, m.reflection_id,
-                       COALESCE(a.resolved, 0) AS utility_resolved,
-                       COALESCE(a.successes, 0) AS utility_successes
-                FROM memories AS m
-                LEFT JOIN (
-                    SELECT memory_id,
-                           SUM(CASE WHEN resolved_at IS NOT NULL THEN 1 ELSE 0 END)
-                               AS resolved,
-                           COALESCE(SUM(CASE WHEN resolved_at IS NOT NULL
-                                             THEN successful ELSE 0 END), 0)
-                               AS successes
-                    FROM lesson_applications GROUP BY memory_id
-                ) AS a ON a.memory_id=m.id
-                WHERE m.kind='lesson' AND m.family=? AND m.outcome_status='complete'
-                  AND EXISTS (
-                      SELECT 1 FROM lesson_provenance AS lp WHERE lp.memory_id=m.id
-                  )
-                  AND ({where})
-                ORDER BY ({match_count}) DESC, m.id DESC LIMIT ?""",
-            [family, *patterns, *patterns, min(320, max(32, limit * 24))],
-        ).fetchall()
-        verified_rows = [
-            row for row in rows
-            if self._lesson_provenance_validation(int(row["id"]))[0]
+        if project_id is None:
+            enabled_projects = self.db.execute(
+                "SELECT id FROM agent_projects WHERE enabled=1 ORDER BY id LIMIT 2"
+            ).fetchall()
+            if len(enabled_projects) != 1:
+                # A missing scope is unambiguous only before the operator creates
+                # another enabled project. Never silently fall back to project 1
+                # in a multi-project database.
+                return []
+            normalized_project = int(enabled_projects[0]["id"])
+        else:
+            normalized_project = self._project_id(project_id)
+        limit = _bounded_limit(limit, 10)
+        if _memory_query_targets_authority_evasion(str(query)):
+            return []
+        discovery_terms = [
+            term for term in _memory_tokens(str(query), meaningful_only=True)
+            if term not in _LESSON_QUERY_METADATA_TERMS
         ]
-        return _rank_memory_rows(verified_rows, query_terms, keep_id=True)[:limit]
+        query_terms = [
+            term for term in _memory_query_terms(str(query))
+            if term not in _LESSON_QUERY_METADATA_TERMS
+        ]
+        structured_query_terms = {
+            term for term in discovery_terms
+            if any(character.isalpha() for character in term)
+            and any(character.isdigit() for character in term)
+        }
+        namespaced_query = bool(
+            structured_query_terms
+            or re.search(r"\b[A-Z][a-z]+[A-Z][A-Za-z0-9]*\b", str(query))
+        )
+        if not limit or not discovery_terms:
+            return []
+        # An explicit alphanumeric identifier is a hard target for lesson
+        # retrieval.  Use it for the bounded SQL candidate set rather than
+        # allowing generic recovery words to overflow the pool and hide the
+        # exact target.  Both requested- and other-family rows remain visible,
+        # so provenance and family-conflict checks still fail closed.
+        lesson_text = (
+            "CASE WHEN instr(lower(m.content), 'reusable lesson:') > 0 "
+            "THEN substr(m.content, instr(lower(m.content), 'reusable lesson:') "
+            "+ length('reusable lesson:')) ELSE m.content END"
+        )
+        retrieval_text = (
+            "CASE WHEN r.id IS NOT NULL "
+            "THEN COALESCE(r.summary, '') || ' ' || COALESCE(r.improvements, '') "
+            f"ELSE {lesson_text} END"
+        )
+        improvement_text = (
+            "CASE WHEN r.id IS NOT NULL THEN COALESCE(r.improvements, '') "
+            f"ELSE {lesson_text} END"
+        )
+        candidate_limit = 320
+        if structured_query_terms:
+            term_groups = [sorted(structured_query_terms)]
+        elif len(discovery_terms) <= _MAX_MEMORY_QUERY_TERM_CANDIDATES:
+            # Preserve the established high-precision candidate pool for normal
+            # requests.  Chunked full-query discovery is only needed when an
+            # input actually exceeds the bounded pool.
+            term_groups = [query_terms]
+        else:
+            term_groups = [
+                discovery_terms[offset:offset + _MAX_MEMORY_QUERY_TERM_CANDIDATES]
+                for offset in range(
+                    0, len(discovery_terms), _MAX_MEMORY_QUERY_TERM_CANDIDATES
+                )
+            ]
+        collected_rows: dict[int, sqlite3.Row] = {}
+        collected_shadow_rows: dict[int, sqlite3.Row] = {}
+        try:
+            for term_group in term_groups:
+                candidate_like_terms = _memory_like_terms(
+                    str(query),
+                    term_group,
+                    max_terms=_MAX_MEMORY_QUERY_TERM_CANDIDATES * 2,
+                )
+                if not candidate_like_terms:
+                    continue
+                patterns = [
+                    f"%{_escape_like(term)}%" for term in candidate_like_terms
+                ]
+                where = " OR ".join(
+                    f"lower({retrieval_text}) LIKE ? ESCAPE '\\'" for _ in patterns
+                )
+                match_count = " + ".join(
+                    f"CASE WHEN lower({retrieval_text}) LIKE ? ESCAPE '\\' THEN 1 ELSE 0 END"
+                    for _ in patterns
+                )
+                chunk_rows = self.db.execute(
+                    f"""SELECT m.id, m.created_at, m.kind, m.content, m.source, m.family,
+                           m.outcome_status, m.reflection_id,
+                           lc.project_id AS lesson_project_id,
+                           {retrieval_text} AS retrieval_content,
+                           {improvement_text} AS improvement_content,
+                           0 AS utility_resolved, 0 AS utility_successes
+                    FROM memories AS m
+                    LEFT JOIN reflections AS r ON r.id=m.reflection_id
+                    LEFT JOIN lesson_controls AS lc ON lc.memory_id=m.id
+                    WHERE m.kind='lesson' AND m.family=? AND ({where})
+                    ORDER BY ({match_count}) DESC, m.id DESC LIMIT ?""",
+                [
+                    family, *patterns, *patterns, candidate_limit + 1,
+                ],
+                ).fetchall()
+                chunk_shadow_rows = self.db.execute(
+                    f"""SELECT m.id, m.created_at, m.kind, m.content, m.source, m.family,
+                           m.outcome_status, m.reflection_id,
+                           lc.project_id AS lesson_project_id,
+                           {retrieval_text} AS retrieval_content,
+                           {improvement_text} AS improvement_content,
+                           0 AS utility_resolved, 0 AS utility_successes
+                    FROM memories AS m
+                    LEFT JOIN reflections AS r ON r.id=m.reflection_id
+                    LEFT JOIN lesson_controls AS lc ON lc.memory_id=m.id
+                    WHERE m.kind='lesson' AND m.family<>? AND ({where})
+                    ORDER BY ({match_count}) DESC, m.id DESC LIMIT ?""",
+                [
+                    family, *patterns, *patterns, candidate_limit + 1,
+                ],
+                ).fetchall()
+                if (
+                    len(chunk_rows) > candidate_limit
+                    or len(chunk_shadow_rows) > candidate_limit
+                ):
+                    return []
+                for row in chunk_rows:
+                    collected_rows.setdefault(int(row["id"]), row)
+                for row in chunk_shadow_rows:
+                    collected_shadow_rows.setdefault(int(row["id"]), row)
+                if (
+                    len(collected_rows) > candidate_limit
+                    or len(collected_shadow_rows) > candidate_limit
+                ):
+                    return []
+        except sqlite3.DatabaseError:
+            return []
+        rows = list(collected_rows.values())
+        shadow_rows = list(collected_shadow_rows.values())
+        discovery_variant_sets = [
+            set(_memory_term_variants(term))
+            for term in (
+                discovery_terms
+                if len(discovery_terms) > _MAX_MEMORY_QUERY_TERM_CANDIDATES
+                else query_terms
+            )
+        ]
+        advice_anchored_rows: list[sqlite3.Row] = []
+        for row in [*rows, *shadow_rows]:
+            improvement_tokens = set(_memory_tokens(
+                str(row["improvement_content"]), meaningful_only=False
+            ))
+            if any(
+                variants.intersection(improvement_tokens)
+                for variants in discovery_variant_sets
+            ):
+                advice_anchored_rows.append(row)
+        requested_family_rows = [
+            row for row in advice_anchored_rows
+            if str(row["family"] or "") == family
+        ]
+        if not requested_family_rows:
+            return []
+        requested_family_rows = _memory_resolve_sibling_identities(
+            list(requested_family_rows),
+            str(query),
+            content_key="improvement_content",
+            identity_ignored_terms=_LESSON_IDENTITY_METADATA_TERMS,
+            unknown_identity_minimum_matches=1,
+            explicit_subject_identity=True,
+        )
+        if not requested_family_rows:
+            return []
+        if not query_terms:
+            return []
+        query_variant_sets = [
+            set(_memory_term_variants(term)) for term in query_terms
+        ]
+        requested_signatures = {
+            " ".join(_memory_tokens(
+                str(row["improvement_content"]), meaningful_only=False
+            ))
+            for row in requested_family_rows
+        }
+
+        def family_shadow_score(row: sqlite3.Row) -> int:
+            tokens = set(_memory_tokens(
+                str(row["improvement_content"]), meaningful_only=False
+            ))
+            return sum(
+                bool(variants.intersection(tokens))
+                for variants in query_variant_sets
+            )
+
+        best_requested_score = max(
+            family_shadow_score(row) for row in requested_family_rows
+        )
+        for row in advice_anchored_rows:
+            if str(row["family"] or "") == family:
+                continue
+            signature = " ".join(_memory_tokens(
+                str(row["improvement_content"]), meaningful_only=False
+            ))
+            if signature and signature in requested_signatures:
+                continue
+            row_tokens = set(_memory_tokens(
+                str(row["improvement_content"]), meaningful_only=False
+            ))
+            row_score = family_shadow_score(row)
+            if (
+                structured_query_terms.intersection(row_tokens)
+                or (
+                    row_score > best_requested_score
+                    and (
+                        namespaced_query
+                        or row_score == len(query_terms)
+                        # A two-anchor margin is decisive specificity even in
+                        # plain prose, mirroring the ranking convention of
+                        # ``specificity_gap_prunes_weaker``.  A one-anchor
+                        # margin stays treated as wording noise.
+                        or row_score - best_requested_score >= 2
+                    )
+                )
+            ):
+                # A stronger exact target exists under a different task family.
+                # Do not replace it with weaker advice from the requested family.
+                return []
+        in_project_rows = [
+            row for row in requested_family_rows
+            if int(row["lesson_project_id"] or -1) == normalized_project
+        ]
+        if not in_project_rows:
+            return []
+        in_project_signatures = {
+            " ".join(_memory_tokens(
+                str(row["improvement_content"]), meaningful_only=False
+            ))
+            for row in in_project_rows
+        }
+        best_in_project_score = max(
+            family_shadow_score(row) for row in in_project_rows
+        )
+        for row in requested_family_rows:
+            if int(row["lesson_project_id"] or -1) == normalized_project:
+                continue
+            signature = " ".join(_memory_tokens(
+                str(row["improvement_content"]), meaningful_only=False
+            ))
+            if signature and signature in in_project_signatures:
+                continue
+            if (
+                family_shadow_score(row) > best_in_project_score
+                and (
+                    namespaced_query
+                    or family_shadow_score(row) == len(query_terms)
+                )
+            ):
+                return []
+        rows = requested_family_rows
+        eligible_rows = [
+            row for row in rows
+            if (
+                str(row["outcome_status"] or "") == "complete"
+                and self._lesson_provenance_validation(int(row["id"]))[0]
+                and self._lesson_control_validation(
+                    int(row["id"]), project_id=normalized_project
+                )[0]
+            )
+        ]
+        if not eligible_rows:
+            return []
+        eligible_token_union = set().union(*(
+            set(_memory_tokens(
+                str(row["improvement_content"]), meaningful_only=False
+            ))
+            for row in eligible_rows
+        ))
+        best_eligible_score = max(
+            family_shadow_score(row) for row in eligible_rows
+        )
+        for row in rows:
+            if row in eligible_rows:
+                continue
+            row_tokens = set(_memory_tokens(
+                str(row["improvement_content"]), meaningful_only=False
+            ))
+            shared = {
+                term for term in query_terms
+                if len(term) >= 6
+                and term in row_tokens
+                and term in eligible_token_union
+            }
+            unique = {
+                term for term in query_terms
+                if len(term) >= 4
+                and term in row_tokens
+                and term not in eligible_token_union
+            }
+            if shared and unique and family_shadow_score(row) >= best_eligible_score:
+                return []
+        ranked = _rank_memory_rows(
+            list(rows),
+            query_terms,
+            keep_id=True,
+            content_key="retrieval_content",
+            family_scope_single_anchor=True,
+            family_single_anchor_min_chars=7,
+            family_single_anchor_requires_identifier=False,
+            identity_conflict_shadow=True,
+            require_structured_identifier_match=True,
+            specificity_gap_prunes_weaker=2,
+            relative_match_floor=0.85,
+            relative_information_floor=0.85,
+        )
+        eligibility: dict[int, bool] = {}
+        eligible_signatures: set[str] = set()
+        for item in ranked:
+            memory_id = int(item["memory_id"])
+            valid = (
+                str(item.get("family") or "") == family
+                and str(item.get("outcome_status") or "") == "complete"
+                and self._lesson_provenance_validation(memory_id)[0]
+                and self._lesson_control_validation(
+                    memory_id, project_id=normalized_project
+                )[0]
+            )
+            eligibility[memory_id] = valid
+            if valid:
+                eligible_signatures.add(" ".join(_memory_tokens(
+                    str(item.get("improvement_content") or ""),
+                    meaningful_only=False,
+                )))
+
+        eligible_prefix: list[dict[str, Any]] = []
+        for item in ranked:
+            memory_id = int(item["memory_id"])
+            signature = " ".join(_memory_tokens(
+                str(item.get("improvement_content") or ""),
+                meaningful_only=False,
+            ))
+            item.pop("improvement_content", None)
+            if not eligibility[memory_id]:
+                if signature and signature in eligible_signatures:
+                    # Identical authenticated advice may be stored separately in
+                    # multiple projects. Prefer the in-scope copy instead of
+                    # letting row recency turn the duplicate into a denial.
+                    continue
+                # If the best-matching observation is incomplete, failed,
+                # unproven, expired, or belongs elsewhere, do not silently
+                # substitute weaker successful advice. Only an eligible ranked
+                # prefix can condition a response.
+                break
+            eligible_prefix.append(item)
+            if len(eligible_prefix) >= limit:
+                break
+        return eligible_prefix
 
     def record_lesson_applications(
         self,
@@ -7201,46 +9129,259 @@ class Memory:
         stamp = now_iso()
         with self._immediate_transaction():
             prediction = self.db.execute(
-                "SELECT family, resolved_at FROM task_predictions WHERE id=?",
+                """SELECT family, origin, created_at, resolved_at, actual_status,
+                          evidence_ok, predicted_verification,
+                          task_id, conversation_id
+                   FROM task_predictions WHERE id=?""",
                 (normalized_prediction,),
             ).fetchone()
             if (
                 prediction is None
                 or prediction["family"] != family
+                or str(prediction["origin"])
+                not in LESSON_REUSABLE_PREDICTION_ORIGINS
                 or prediction["resolved_at"] is not None
+                or (
+                    family in LESSON_EVIDENCE_REQUIRED_FAMILIES
+                    and str(prediction["predicted_verification"])
+                    == "not_applicable"
+                )
             ):
                 raise ValueError("Lesson application must bind to the active matching prediction")
+            project_id = self._lesson_project_for_context(
+                prediction["task_id"], prediction["conversation_id"]
+            )
+            if project_id is None:
+                raise ValueError("Lesson application lacks a valid project scope")
             for rank, memory_id in enumerate(bounded_ids, 1):
                 valid = self.db.execute(
-                    """SELECT 1 FROM memories
-                       WHERE id=? AND kind='lesson' AND family=?
-                         AND outcome_status='complete'""",
+                    """SELECT lc.observed_at, lc.valid_until
+                       FROM memories AS m
+                       JOIN lesson_controls AS lc ON lc.memory_id=m.id
+                       WHERE m.id=? AND m.kind='lesson' AND m.family=?
+                         AND m.outcome_status='complete'""",
                     (memory_id, family),
                 ).fetchone()
-                if valid is None or not self._lesson_provenance_validation(memory_id)[0]:
+                application_values = (
+                    None if valid is None else self._lesson_application_values(
+                        family=family,
+                        application_created_at=stamp,
+                        application_resolved_at=None,
+                        application_successful=None,
+                        prediction_created_at=prediction["created_at"],
+                        prediction_resolved_at=prediction["resolved_at"],
+                        prediction_actual_status=prediction["actual_status"],
+                        prediction_evidence_ok=prediction["evidence_ok"],
+                        prediction_verification=prediction[
+                            "predicted_verification"
+                        ],
+                        lesson_observed_at=valid["observed_at"],
+                        lesson_valid_until=valid["valid_until"],
+                        validation_at=stamp,
+                    )
+                )
+                if (
+                    valid is None
+                    or application_values is None
+                    or not self._lesson_provenance_validation(memory_id)[0]
+                    or not self._lesson_control_validation(
+                        memory_id,
+                        project_id=project_id,
+                        as_of=application_values[0],
+                    )[0]
+                ):
                     raise ValueError("Lesson application references an ineligible lesson")
                 self.db.execute(
                     """INSERT OR IGNORE INTO lesson_applications(
                            created_at, prediction_id, memory_id, family, rank
                        ) VALUES (?, ?, ?, ?, ?)""",
-                    (stamp, normalized_prediction, memory_id, family, rank),
+                    (
+                        application_values[0], normalized_prediction,
+                        memory_id, family, rank,
+                    ),
                 )
 
     def lesson_effectiveness(self, family: str | None = None) -> list[dict[str, Any]]:
         if family is not None and family not in self.PREDICTION_FAMILIES:
             raise ValueError(f"Unknown lesson family: {family}")
-        clause = "AND a.family=?" if family else ""
+        clause = "WHERE a.family=?" if family else ""
         parameters: tuple[Any, ...] = (family,) if family else ()
-        rows = self.db.execute(
-            f"""SELECT a.family, COUNT(*) AS applications,
-                       SUM(CASE WHEN a.resolved_at IS NOT NULL THEN 1 ELSE 0 END) AS resolved,
-                       AVG(CASE WHEN a.resolved_at IS NOT NULL THEN a.successful END)
-                           AS success_rate
-                FROM lesson_applications a WHERE 1=1 {clause}
-                GROUP BY a.family ORDER BY a.family""",
-            parameters,
-        ).fetchall()
-        return [dict(row) for row in rows]
+        try:
+            rows = self.db.execute(
+                f"""SELECT a.family, a.memory_id,
+                           a.created_at AS application_created_at,
+                           a.resolved_at AS application_resolved_at,
+                           a.successful AS application_successful,
+                           p.family AS prediction_family,
+                           p.origin AS prediction_origin,
+                           p.created_at AS prediction_created_at,
+                           p.resolved_at AS prediction_resolved_at,
+                           p.actual_status AS prediction_actual_status,
+                           p.evidence_ok AS prediction_evidence_ok,
+                           p.predicted_verification,
+                           p.task_id, p.conversation_id,
+                           m.family AS lesson_family,
+                           m.outcome_status AS lesson_outcome_status,
+                           lc.observed_at AS lesson_observed_at,
+                           lc.valid_until AS lesson_valid_until
+                    FROM lesson_applications AS a
+                    JOIN task_predictions AS p ON p.id=a.prediction_id
+                    JOIN memories AS m ON m.id=a.memory_id
+                    JOIN lesson_controls AS lc ON lc.memory_id=a.memory_id
+                    {clause}
+                    ORDER BY a.family, a.id""",
+                parameters,
+            ).fetchall()
+        except sqlite3.DatabaseError:
+            return []
+        totals: dict[str, dict[str, Any]] = {}
+        evaluation_at = now_iso()
+        for row in rows:
+            row_family = str(row["family"])
+            if (
+                row_family not in self.PREDICTION_FAMILIES
+                or str(row["prediction_family"]) != row_family
+                or str(row["prediction_origin"])
+                not in LESSON_REUSABLE_PREDICTION_ORIGINS
+                or str(row["lesson_family"]) != row_family
+                or str(row["lesson_outcome_status"] or "") != "complete"
+            ):
+                continue
+            project_id = self._lesson_project_for_context(
+                row["task_id"], row["conversation_id"]
+            )
+            memory_id = int(row["memory_id"])
+            application_values = self._lesson_application_values(
+                family=row_family,
+                application_created_at=row["application_created_at"],
+                application_resolved_at=row["application_resolved_at"],
+                application_successful=row["application_successful"],
+                prediction_created_at=row["prediction_created_at"],
+                prediction_resolved_at=row["prediction_resolved_at"],
+                prediction_actual_status=row["prediction_actual_status"],
+                prediction_evidence_ok=row["prediction_evidence_ok"],
+                prediction_verification=row["predicted_verification"],
+                lesson_observed_at=row["lesson_observed_at"],
+                lesson_valid_until=row["lesson_valid_until"],
+                validation_at=evaluation_at,
+            )
+            if (
+                project_id is None
+                or application_values is None
+                or not self._lesson_provenance_validation(memory_id)[0]
+                or not self._lesson_control_validation(
+                    memory_id, project_id=project_id
+                )[0]
+            ):
+                continue
+            aggregate = totals.setdefault(row_family, {
+                "family": row_family,
+                "applications": 0,
+                "resolved": 0,
+                "successes": 0,
+            })
+            aggregate["applications"] += 1
+            if application_values[1] is not None:
+                aggregate["resolved"] += 1
+                aggregate["successes"] += int(application_values[2] or 0)
+        result: list[dict[str, Any]] = []
+        for row_family in sorted(totals):
+            aggregate = totals[row_family]
+            resolved = int(aggregate.pop("resolved"))
+            successes = int(aggregate.pop("successes"))
+            aggregate["resolved"] = resolved
+            aggregate["success_rate"] = (
+                successes / resolved if resolved else None
+            )
+            result.append(aggregate)
+        return result
+
+    def supersede_verified_lesson(
+        self,
+        memory_id: int,
+        replacement_memory_id: int,
+        *,
+        contradiction: bool = False,
+    ) -> None:
+        """Retire one lesson only in favor of newer proven same-scope evidence."""
+        original_id = self._prediction_optional_id(memory_id, "memory_id")
+        replacement_id = self._prediction_optional_id(
+            replacement_memory_id, "replacement_memory_id"
+        )
+        if original_id == replacement_id:
+            raise ValueError("A lesson cannot supersede itself")
+        with self._immediate_transaction():
+            rows = self.db.execute(
+                """SELECT m.id, m.family, lc.project_id, lc.observed_at,
+                          lc.valid_until, lc.lifecycle_status, lc.superseded_by,
+                          lp.prediction_id, lp.reflection_id, lp.content_sha256,
+                          lp.provenance_sha256
+                   FROM memories AS m
+                   JOIN lesson_controls AS lc ON lc.memory_id=m.id
+                   JOIN lesson_provenance AS lp ON lp.memory_id=m.id
+                   WHERE m.id IN (?, ?)
+                   ORDER BY m.id""",
+                (original_id, replacement_id),
+            ).fetchall()
+            by_id = {int(row["id"]): row for row in rows}
+            original = by_id.get(original_id)
+            replacement = by_id.get(replacement_id)
+            if original is None or replacement is None:
+                raise ValueError("Both lessons require integrity-checked reuse controls")
+            if (
+                str(original["family"]) != str(replacement["family"])
+                or int(original["project_id"]) != int(replacement["project_id"])
+            ):
+                raise ValueError("Replacement lesson must have the same family and project")
+            if not self._lesson_provenance_validation(replacement_id)[0] or not (
+                self._lesson_control_validation(
+                    replacement_id, project_id=int(replacement["project_id"])
+                )[0]
+            ):
+                raise ValueError("Replacement lesson is not currently eligible")
+            if not self._lesson_provenance_validation(original_id)[0] or not (
+                self._lesson_control_validation(
+                    original_id, project_id=int(original["project_id"])
+                )[0]
+            ):
+                raise ValueError("Original lesson is not currently eligible")
+            original_observed = self._canonical_utc_timestamp(original["observed_at"])
+            replacement_observed = self._canonical_utc_timestamp(
+                replacement["observed_at"]
+            )
+            if (
+                original_observed is None
+                or replacement_observed is None
+                or datetime.fromisoformat(replacement_observed)
+                <= datetime.fromisoformat(original_observed)
+            ):
+                raise ValueError("Replacement evidence must be newer than the original")
+            status = "contradicted" if contradiction else "superseded"
+            material = self._lesson_control_material(
+                memory_id=original_id,
+                prediction_id=int(original["prediction_id"]),
+                reflection_id=int(original["reflection_id"]),
+                content_sha256=str(original["content_sha256"]),
+                provenance_sha256=str(original["provenance_sha256"] or ""),
+                project_id=int(original["project_id"]),
+                observed_at=str(original_observed),
+                valid_until=str(original["valid_until"]),
+                lifecycle_status=status,
+                superseded_by=replacement_id,
+            )
+            updated = self.db.execute(
+                """UPDATE lesson_controls
+                   SET lifecycle_status=?, superseded_by=?, recorded_at=?,
+                       control_sha256=?
+                   WHERE memory_id=? AND lifecycle_status='active'
+                     AND superseded_by IS NULL""",
+                (
+                    status, replacement_id, now_iso(),
+                    self._lesson_control_digest(material), original_id,
+                ),
+            )
+            if updated.rowcount != 1:
+                raise ValueError("Lesson lifecycle changed concurrently")
 
     def search(
         self,
@@ -7254,56 +9395,230 @@ class Memory:
         if len(query) > MAX_SEARCH_QUERY_CHARS:
             raise ValueError(f"Memory search query exceeds {MAX_SEARCH_QUERY_CHARS} characters")
         limit = _bounded_limit(limit, 100)
-        query_terms = _memory_query_terms(query)
-        like_terms = _memory_like_terms(query, query_terms)
-        if not query_terms or not like_terms or not limit:
+        if (
+            contains_secret(query)
+            or contains_private_identifier(query)
+            or _memory_query_targets_authority_evasion(query)
+        ):
             return []
-        patterns = [f"%{_escape_like(term)}%" for term in like_terms]
-        where = " OR ".join("lower(m.content) LIKE ? ESCAPE '\\'" for _ in patterns)
-        match_count = " + ".join(
-            "CASE WHEN lower(m.content) LIKE ? ESCAPE '\\' THEN 1 ELSE 0 END"
-            for _ in patterns
+        discovery_terms = _memory_tokens(query, meaningful_only=True)
+        if not discovery_terms or not limit:
+            return []
+        candidate_limit = MAX_MEMORY_SEARCH_CANDIDATES
+        collected_rows: dict[int, sqlite3.Row] = {}
+        for offset in range(0, len(discovery_terms), _MAX_MEMORY_QUERY_TERM_CANDIDATES):
+            candidate_terms = discovery_terms[
+                offset:offset + _MAX_MEMORY_QUERY_TERM_CANDIDATES
+            ]
+            like_terms = _memory_like_terms(
+                query,
+                candidate_terms,
+                max_terms=_MAX_MEMORY_QUERY_TERM_CANDIDATES * 2,
+            )
+            if not like_terms:
+                continue
+            fts_query = _memory_fts_query(
+                query,
+                candidate_terms,
+                max_index_terms=_MAX_MEMORY_QUERY_TERM_CANDIDATES * 3,
+            )
+            if fts_query is not None:
+                chunk_rows = self._generic_recall_query_rows(
+                    """SELECT m.id, m.created_at, m.kind, m.content, m.source,
+                              c.status AS claim_status, c.authority AS claim_authority
+                       FROM memory_fts
+                       JOIN memories AS m ON m.id=memory_fts.rowid
+                       LEFT JOIN memory_claims AS c ON c.memory_id=m.id
+                       WHERE memory_fts MATCH ?
+                         AND m.kind<>'lesson'
+                         AND (m.kind<>'claim' OR c.status IN ('active', 'disputed'))
+                       ORDER BY memory_fts.rank, m.id DESC LIMIT ?""",
+                    (fts_query, candidate_limit + 1),
+                )
+            else:
+                patterns = [f"%{_escape_like(term)}%" for term in like_terms]
+                where = " OR ".join(
+                    "lower(m.content) LIKE ? ESCAPE '\\'" for _ in patterns
+                )
+                match_count = " + ".join(
+                    "CASE WHEN lower(m.content) LIKE ? ESCAPE '\\' THEN 1 ELSE 0 END"
+                    for _ in patterns
+                )
+                chunk_rows = self._generic_recall_query_rows(
+                    f"""SELECT m.id, m.created_at, m.kind, m.content, m.source,
+                               c.status AS claim_status, c.authority AS claim_authority
+                        FROM memories AS m
+                        LEFT JOIN memory_claims AS c ON c.memory_id=m.id
+                        WHERE ({where})
+                          AND m.kind<>'lesson'
+                          AND (m.kind<>'claim' OR c.status IN ('active', 'disputed'))
+                        ORDER BY ({match_count}) DESC, m.id DESC LIMIT ?""",
+                    [*patterns, *patterns, candidate_limit + 1],
+                )
+            if chunk_rows is None or len(chunk_rows) > candidate_limit:
+                return []
+            for row in chunk_rows:
+                collected_rows.setdefault(int(row["id"]), row)
+            if len(collected_rows) > candidate_limit:
+                return []
+        rows = list(collected_rows.values())
+        rows = _memory_resolve_sibling_identities(
+            list(rows),
+            query,
+            identity_ignored_terms=_ORDINARY_MEMORY_IDENTITY_METADATA_TERMS,
+            capitalized_subject_identity=True,
         )
-        candidate_limit = min(
-            MAX_MEMORY_SEARCH_CANDIDATES,
-            max(64, limit * 32),
+        if not rows:
+            return []
+        evidence_terms = _memory_evidence_terms(query, rows)
+        structured_terms = [
+            term for term in discovery_terms
+            if any(character.isalpha() for character in term)
+            and any(character.isdigit() for character in term)
+        ]
+        query_terms = list(dict.fromkeys([
+            *structured_terms,
+            *evidence_terms,
+        ]))
+        for term in _memory_query_terms(query):
+            if term not in query_terms:
+                query_terms.append(term)
+            if len(query_terms) >= MAX_MEMORY_QUERY_TERMS:
+                break
+        query_terms = query_terms[:MAX_MEMORY_QUERY_TERMS]
+        if not query_terms:
+            return []
+        explicit_multi_fact_query = re.search(
+            r"\b(?:and|plus)\b|[&+]", query, re.I
+        ) is not None
+        surface_terms = re.findall(r"[^\W_]+", query, flags=re.UNICODE)
+        meaningful_surfaces = [
+            surface for surface in surface_terms
+            if _normalize_memory_token(surface) in set(query_terms)
+        ]
+        proper_name_pair = bool(
+            len(query_terms) == 2
+            and len(meaningful_surfaces) == 2
+            and all(surface[:1].isupper() for surface in meaningful_surfaces)
         )
-        fts_query = _memory_fts_query(query, query_terms)
-        if fts_query is not None:
-            rows = self.db.execute(
-                """SELECT m.id, m.created_at, m.kind, m.content, m.source,
-                          c.status AS claim_status, c.authority AS claim_authority
-                   FROM memory_fts
-                   JOIN memories AS m ON m.id=memory_fts.rowid
-                   LEFT JOIN memory_claims AS c ON c.memory_id=m.id
-                   WHERE memory_fts MATCH ?
-                     AND m.kind<>'lesson'
-                     AND (m.kind<>'claim' OR c.status IN ('active', 'disputed'))
-                     AND (m.kind='claim' OR EXISTS (
-                         SELECT 1 FROM ordinary_memory_provenance AS omp
-                         WHERE omp.memory_id=m.id AND omp.eligible=1
-                     ))
-                   ORDER BY memory_fts.rank, m.id DESC LIMIT ?""",
-                (fts_query, candidate_limit),
-            ).fetchall()
-        else:
-            rows = self.db.execute(
-                f"""SELECT m.id, m.created_at, m.kind, m.content, m.source,
-                           c.status AS claim_status, c.authority AS claim_authority
-                    FROM memories AS m
-                    LEFT JOIN memory_claims AS c ON c.memory_id=m.id
-                    WHERE ({where})
-                      AND m.kind<>'lesson'
-                      AND (m.kind<>'claim' OR c.status IN ('active', 'disputed'))
-                      AND (m.kind='claim' OR EXISTS (
-                          SELECT 1 FROM ordinary_memory_provenance AS omp
-                          WHERE omp.memory_id=m.id AND omp.eligible=1
-                      ))
-                    ORDER BY ({match_count}) DESC, m.id DESC LIMIT ?""",
-                [*patterns, *patterns, candidate_limit],
-            ).fetchall()
-        rows = self._filter_generic_recall_rows(list(rows))
-        return _rank_memory_rows(rows, query_terms, keep_id=bool(include_id))[:limit]
+        ambiguous_compact_query = bool(
+            len(query_terms) == 2
+            and not explicit_multi_fact_query
+            and (len(surface_terms) == 2 or proper_name_pair)
+        )
+        if ambiguous_compact_query:
+            # A compact pair is ambiguous when each identity only selects a
+            # different record. Require at least one record to satisfy both
+            # anchors; explicit connectors retain the intentional multi-fact
+            # path. Keep the full candidate set for ranking so legitimate
+            # versioned notes can still be returned newest-first.
+            variant_sets = [
+                set(_memory_term_variants(term)) for term in query_terms
+            ]
+            full_match_rows = [
+                row for row in rows
+                if all(
+                    variants.intersection(set(_memory_tokens(
+                        str(row["content"]), meaningful_only=False
+                    )))
+                    for variants in variant_sets
+                )
+            ]
+            if not full_match_rows:
+                return []
+        ranked, _shadowed = self._rank_generic_recall_rows(
+            list(rows),
+            query_terms,
+            keep_id=bool(include_id),
+            max_results=limit,
+            minimum_information_coverage=0.30,
+            relative_match_floor=0.85,
+            relative_information_floor=0.85,
+            query_text=query,
+        )
+        if ambiguous_compact_query and len(ranked) > 1:
+            query_variants = set().union(*(
+                set(_memory_term_variants(term)) for term in query_terms
+            ))
+            token_sets = [
+                set(_memory_tokens(
+                    str(item.get("content") or ""), meaningful_only=True
+                ))
+                for item in ranked[:2]
+            ]
+            match_counts = [
+                sum(
+                    bool(set(_memory_term_variants(term)).intersection(tokens))
+                    for term in query_terms
+                )
+                for tokens in token_sets
+            ]
+            residuals = [
+                {
+                    token for token in tokens
+                    if not query_variants.intersection(
+                        _memory_term_variants(token)
+                    )
+                }
+                for tokens in token_sets
+            ]
+            # Sibling records that each satisfy every anchor are legitimate
+            # versioned or multi-fact notes, not ambiguity; only records
+            # covering different proper subsets of the request stay ambiguous.
+            if (
+                min(match_counts) < len(query_terms)
+                and all(residuals)
+                and residuals[0].isdisjoint(residuals[1])
+            ):
+                return []
+        if (
+            not explicit_multi_fact_query
+            and len(query_terms) <= 3
+            and len(ranked) > 1
+        ):
+            query_variants = set().union(*(
+                set(_memory_term_variants(term)) for term in query_terms
+            ))
+            token_sets = [
+                set(_memory_tokens(
+                    str(item.get("content") or ""), meaningful_only=True
+                ))
+                for item in ranked[:2]
+            ]
+            match_counts = [
+                sum(
+                    bool(set(_memory_term_variants(term)).intersection(tokens))
+                    for term in query_terms
+                )
+                for tokens in token_sets
+            ]
+            residuals = [
+                {
+                    token for token in tokens
+                    if not query_variants.intersection(
+                        _memory_term_variants(token)
+                    )
+                }
+                for tokens in token_sets
+            ]
+            # Records that all satisfy every anchor are versioned or
+            # multi-fact notes about one topic; abstention is only for equal
+            # partial coverage over unrelated content.
+            if (
+                all(residuals)
+                and match_counts[0] == match_counts[1]
+                and match_counts[0] < len(query_terms)
+            ):
+                overlap = len(residuals[0].intersection(residuals[1]))
+                union = len(residuals[0].union(residuals[1]))
+                if union and overlap / union < 0.5:
+                    return []
+        return _memory_resolve_sibling_identities(
+            ranked,
+            query,
+            identity_ignored_terms=_ORDINARY_MEMORY_IDENTITY_METADATA_TERMS,
+            capitalized_subject_identity=True,
+        )[:limit]
 
     def list_memories(self, limit: int = 20) -> list[dict[str, Any]]:
         self._ensure_open()
@@ -7314,6 +9629,40 @@ class Memory:
             "SELECT created_at, kind, content, source FROM memories ORDER BY id DESC LIMIT ?", (limit,)
         ).fetchall()
         return [dict(row) for row in rows]
+
+    def verified_operator_preferences(self, limit: int = 2) -> list[dict[str, Any]]:
+        """Return newest explicitly stored preferences with valid provenance."""
+        self._ensure_open()
+        limit = _bounded_limit(limit, 20)
+        if not limit:
+            return []
+        candidate_limit = min(1_000, max(32, limit * 16))
+        try:
+            rows = self.db.execute(
+                """SELECT m.id, m.created_at, m.kind, m.content, m.source
+                   FROM memories AS m
+                   JOIN ordinary_memory_provenance AS omp
+                     ON omp.memory_id=m.id
+                   WHERE m.kind='preference'
+                     AND omp.eligible=1
+                     AND omp.origin='explicit_operator_memory'
+                   ORDER BY m.id DESC LIMIT ?""",
+                (candidate_limit + 1,),
+            ).fetchall()
+        except sqlite3.DatabaseError:
+            return []
+        if len(rows) > candidate_limit:
+            return []
+        verified: list[dict[str, Any]] = []
+        for row in rows:
+            if not self._ordinary_memory_recall_eligible(int(row["id"])):
+                continue
+            item = dict(row)
+            item.pop("id", None)
+            verified.append(item)
+            if len(verified) >= limit:
+                break
+        return verified
 
     def _insert_task_locked(
         self,
@@ -8726,9 +11075,9 @@ class Memory:
     ) -> int:
         """Persist reflection-linked terminal bookkeeping inside an active transaction."""
         status_text = _validated_nonsecret_metadata(status, "Reflection status")[:30]
-        summary = redact_secrets(str(summary))
-        mistakes = redact_secrets(str(mistakes))
-        improvements = redact_secrets(str(improvements))
+        summary = redact_private_identifiers(str(summary))
+        mistakes = redact_private_identifiers(str(mistakes))
+        improvements = redact_private_identifiers(str(improvements))
         tool_call_count = max(0, int(tool_calls))
         cur = self.db.execute(
             """INSERT INTO reflections(
@@ -8814,29 +11163,37 @@ class Memory:
         tool_calls: int = 0,
     ) -> int:
         summary = _bounded_persisted_text(
-            redact_secrets(str(summary).strip()), 4_000, "reflection summary"
+            redact_private_identifiers(str(summary).strip()),
+            4_000,
+            "reflection summary",
         )
         mistakes = _bounded_persisted_text(
-            redact_secrets(str(mistakes).strip()), 4_000, "reflection mistakes"
+            redact_private_identifiers(str(mistakes).strip()),
+            4_000,
+            "reflection mistakes",
         )
         improvements = _bounded_persisted_text(
-            redact_secrets(str(improvements).strip()), 4_000, "reflection improvements"
+            redact_private_identifiers(str(improvements).strip()),
+            4_000,
+            "reflection improvements",
         )
         if not summary:
             raise ValueError("Reflection summary must not be empty")
         normalized_prediction: int | None = None
+        bound_family: str | None = None
         if prediction_id is not None:
             normalized_prediction = self._prediction_optional_id(
                 prediction_id, "prediction_id"
             )
             prediction = self.db.execute(
-                """SELECT task_id, conversation_id, predicted_verification,
+                """SELECT task_id, conversation_id, family, predicted_verification,
                           actual_status, actual_steps, evidence_ok, resolved_at
                    FROM task_predictions WHERE id=?""",
                 (normalized_prediction,),
             ).fetchone()
             if prediction is None or prediction["resolved_at"] is None:
                 raise ValueError("Reflection requires an already resolved prediction")
+            bound_family = str(prediction["family"])
             if task_id is not None:
                 if (
                     prediction["task_id"] is None
@@ -8877,27 +11234,58 @@ class Memory:
                 prediction_id=normalized_prediction,
                 tool_calls=tool_calls,
             )
-        family = self._prediction_family_for_context(task_id, conversation_id)
+        family = bound_family or self._prediction_family_for_context(
+            task_id, conversation_id
+        )
         if improvements and family is not None:
-            lesson_content = self._canonical_reflection_lesson_content(
-                family=family,
-                outcome_status=status,
-                summary=summary,
-                mistakes=mistakes,
-                improvements=improvements,
+            lesson_project_id = self._lesson_project_for_context(
+                task_id, conversation_id
             )
             try:
+                if lesson_project_id is None:
+                    raise ValueError("Verified lesson lacks a project scope")
+                lesson_content = self._canonical_reflection_lesson_content(
+                    family=family,
+                    outcome_status=status,
+                    summary=summary,
+                    mistakes=mistakes,
+                    improvements=improvements,
+                    project_id=lesson_project_id,
+                    reflection_id=reflection_id,
+                )
+                if lesson_content is None:
+                    raise ValueError("Verified lesson content is unavailable")
                 self.remember_verified_lesson(
-                    str(lesson_content),
+                    lesson_content,
                     family=family,
                     outcome_status=status,
                     reflection_id=reflection_id,
                 )
-            except (RuntimeError, ValueError):
+            except (RuntimeError, ValueError) as error:
                 # A reflection remains useful audit evidence, but a reusable
                 # lesson must fail closed when its exact resolved prediction
                 # cannot be proven. Never fall back to an unbound lesson row.
-                pass
+                try:
+                    with self._immediate_transaction():
+                        self.db.execute(
+                            """INSERT INTO activity_log(
+                                   created_at, category, action, status,
+                                   details_json
+                               ) VALUES (?, 'memory', 'lesson_persist', 'failed', ?)""",
+                            (
+                                now_iso(),
+                                json.dumps(
+                                    {
+                                        "reflection_id": reflection_id,
+                                        "error_type": type(error).__name__,
+                                    },
+                                    sort_keys=True,
+                                    separators=(",", ":"),
+                                ),
+                            ),
+                        )
+                except sqlite3.DatabaseError:
+                    pass
         return reflection_id
 
     def list_reflections(self, limit: int = 50) -> list[dict[str, Any]]:

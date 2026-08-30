@@ -242,6 +242,18 @@ class CapabilityGatewayTests(unittest.TestCase):
                 with self.assertRaises(ConnectorError):
                     self.gateway.validate_manifest_document(json.dumps(manifest))
 
+    def test_namespaced_credential_parameter_is_rejected(self):
+        manifest = connector_manifest()
+        manifest["actions"][0]["parameters"]["properties"]["openai_api_key"] = {
+            "type": "string"
+        }
+        manifest["actions"][0]["parameters"]["required"].append(
+            "openai_api_key"
+        )
+
+        with self.assertRaisesRegex(ConnectorError, "credentials?|secrets?"):
+            self.gateway.validate_manifest_document(json.dumps(manifest))
+
     def test_malformed_workspace_manifest_is_rejected_at_file_boundary(self):
         self.manifest_path.write_text("{not valid json", encoding="utf-8")
 

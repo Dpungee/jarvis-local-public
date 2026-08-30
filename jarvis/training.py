@@ -10,13 +10,13 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
 
+from .learning_memory_quality import TRAINING_QUALITY_CONTRACT_VERSION
 from .memory import Memory, training_prompt_split
 from .redaction import is_sensitive_key, redact_secrets
 from .source_quality import authoritative_sources
 
 
 DATASET_FORMAT_VERSION = 4
-TRAINING_QUALITY_CONTRACT_VERSION = 1
 READINESS_MIN_QUALITY = 0.8
 READINESS_MIN_VERIFIED_EXAMPLES = 100
 READINESS_MIN_TRAIN_EXAMPLES = 70

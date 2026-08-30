@@ -398,6 +398,10 @@ class _EphemeralTranscriptMemory:
     def current_claims(self, *_args: Any, **_kwargs: Any) -> list[dict[str, Any]]:
         return []
 
+    def match_lessons(self, *_args: Any, **_kwargs: Any) -> list[dict[str, Any]]:
+        """Never condition ephemeral Companion actions on durable lessons."""
+        return []
+
     def cached_query_embedding(self, *_args: Any, **_kwargs: Any) -> None:
         return None
 

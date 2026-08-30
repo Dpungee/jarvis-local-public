@@ -45,12 +45,18 @@ python -B scripts/check_public_publish_source.py `
   --mode candidate `
   --version-tag $versionTag `
   --remote-url $publicUrl
+
+python -B scripts/check_public_release.py
+gitleaks dir --redact --no-banner .
+gitleaks git --redact --no-banner .
 ```
 
 The guard rejects a dirty tree, an unapproved or multiple history root, merge history,
 any extra local or remote-tracking ref, any extra remote, a mismatched destination,
 alternate object storage, unreachable objects, configured push refspecs, and broad
 push modes. A successful check prints the one exact candidate ref that was reviewed.
+The privacy and Gitleaks scans are mandatory pre-push gates; CI repeats them after the
+candidate branch is published. Never rely on the post-push checks as the first scan.
 
 ## Publish the candidate through branch protection
 

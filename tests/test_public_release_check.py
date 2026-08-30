@@ -8,7 +8,11 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from scripts.check_public_release import check_release
+from scripts.check_public_release import (
+    _content_findings,
+    _path_findings,
+    check_release,
+)
 
 
 class PublicReleaseCheckTests(unittest.TestCase):
@@ -17,6 +21,20 @@ class PublicReleaseCheckTests(unittest.TestCase):
         # Assemble the adversarial fixture at runtime so the release-checker's own
         # source remains publishable without exempting test files from inspection.
         return "maintainer" + "@" + "personal.invalid"
+
+    def test_content_findings_reject_obfuscated_sensitive_assignments(self) -> None:
+        opaque = "opaque" + "value" + "123"
+        probes = (
+            "passw" + chr(0x0301) + "ord=" + opaque,
+            "pass" + "." + "word=" + opaque,
+            "api" + "/" + "key=" + opaque,
+        )
+        for probe in probes:
+            with self.subTest(probe=probe):
+                self.assertIn(
+                    "Unicode-obfuscated credential or secret material",
+                    _content_findings(probe),
+                )
 
     def setUp(self) -> None:
         self.temporary = tempfile.TemporaryDirectory(
@@ -346,6 +364,249 @@ class PublicReleaseCheckTests(unittest.TestCase):
             findings,
         )
         self.assertNotIn("private-person", "\n".join(findings))
+
+    def test_spaced_home_segment_cannot_hide_behind_allowed_prefix(self) -> None:
+        private_paths = "\n".join((
+            "\\".join(("C:", "Users", "test private", "record.txt")),
+            "/".join(("", "home", "test private", "record.txt")),
+        ))
+        (self.repo / "paths.txt").write_text(private_paths, encoding="utf-8")
+        self._git("add", "paths.txt")
+        self._commit("12345+release-tester@users.noreply.github.com")
+
+        findings = check_release(self.repo)
+
+        self.assertTrue(
+            any("concrete Windows user-home path" in item for item in findings),
+            findings,
+        )
+        self.assertTrue(
+            any("concrete POSIX user-home path" in item for item in findings),
+            findings,
+        )
+
+    def test_concrete_unc_user_home_blocks_release(self) -> None:
+        private_path = (
+            "\\\\" + "private-server" + "\\Users\\private-person\\record.txt"
+        )
+        (self.repo / "unc.txt").write_text(private_path, encoding="utf-8")
+        self._git("add", "unc.txt")
+        self._commit("12345+release-tester@users.noreply.github.com")
+
+        findings = check_release(self.repo)
+
+        self.assertTrue(
+            any("concrete UNC user-home path" in item for item in findings),
+            findings,
+        )
+
+    def test_internationalized_personal_email_blocks_release(self) -> None:
+        private_email = "josé" + "@" + "personal.invalid"
+        (self.repo / "contact.txt").write_text(private_email, encoding="utf-8")
+        self._git("add", "contact.txt")
+        self._commit("12345+release-tester@users.noreply.github.com")
+
+        findings = check_release(self.repo)
+
+        self.assertTrue(
+            any("non-example email address" in item for item in findings),
+            findings,
+        )
+
+    def test_decomposed_internationalized_email_blocks_release(self) -> None:
+        private_email = "jose\u0301" + "@" + "personal.invalid"
+        (self.repo / "contact.txt").write_text(private_email, encoding="utf-8")
+        self._git("add", "contact.txt")
+        self._commit("12345+release-tester@users.noreply.github.com")
+
+        findings = check_release(self.repo)
+
+        self.assertTrue(
+            any("non-example email address" in item for item in findings),
+            findings,
+        )
+
+    def test_unicode_email_obfuscation_blocks_release(self) -> None:
+        safe_email = "12345+release-tester@users.noreply.github.com"
+        variants = (
+            "maintainer" + "\u200b" + "@" + "personal.invalid",
+            "maintainer" + "@" + "\u200b" + "personal.invalid",
+            "maintainer" + "\uff20" + "personal.invalid",
+            "maintainer" + "@" + "personal" + "\u3002" + "invalid",
+            "maintainer" + "@" + "personal" + "\uff0e" + "invalid",
+            "maintainer" + "@" + "\u034f" + "personal.invalid",
+            "maintainer" + "@" + "personal" + "\ufe0f" + ".invalid",
+            "jose" + "\u200d\u0301" + "@" + "personal.invalid",
+            "\u0909\u092a\u092f\u094b\u0917\u0915\u0930\u094d\u0924\u093e"
+            + "@"
+            + "\u0928\u093f\u091c\u0940.\u092d\u093e\u0930\u0924",
+        )
+        for index, private_email in enumerate(variants):
+            with self.subTest(private_email=private_email):
+                path = self.repo / f"contact-{index}.txt"
+                path.write_text(private_email, encoding="utf-8")
+                self._git("add", path.name)
+                self._commit(safe_email, message=f"unicode fixture {index}")
+                findings = check_release(self.repo)
+                self.assertTrue(
+                    any("non-example email address" in item for item in findings),
+                    findings,
+                )
+                self._git("rm", "--quiet", path.name)
+                self._commit(safe_email, message=f"remove unicode fixture {index}")
+
+    def test_unicode_obfuscation_cannot_hide_private_paths_or_file_types(self) -> None:
+        for path in (
+            ".\uff45nv",
+            "re\u200bports/private.txt",
+            ".se\u034fcrets/token.txt",
+            "private.p\ufe0fdf",
+            ".еnv",
+            "repоrts/private.txt",
+            ".ѕecrets/token.txt",
+            ".env.exam\u034fple",
+            "data/.git\ufe0fkeep",
+            ".env.exam\x01ple",
+            "data/.git\x01keep",
+        ):
+            with self.subTest(path=path):
+                self.assertTrue(_path_findings(path), path)
+
+        safe_email = "12345+release-tester@users.noreply.github.com"
+        paths = "\n".join((
+            "C:\\U\u034fsers\\private-person\\record.txt",
+            "/ho\u034fme/private-person/record.txt",
+            "\\\\server\\U\ufe0fsers\\private-person\\record.txt",
+        ))
+        (self.repo / "obfuscated-paths.txt").write_text(paths, encoding="utf-8")
+        self._git("add", "obfuscated-paths.txt")
+        self._commit(safe_email, message="unicode path privacy fixture")
+
+        findings = check_release(self.repo)
+        self.assertTrue(
+            any("user-home path" in finding for finding in findings),
+            findings,
+        )
+
+    def test_unicode_obfuscation_cannot_hide_credentials_from_release_scan(self) -> None:
+        opaque_value = "release-secret-fixture-value"
+        fullwidth = lambda value: "".join(
+            chr(ord(character) + 0xFEE0)
+            if 0x21 <= ord(character) <= 0x7E
+            else character
+            for character in value
+        )
+        for value in (
+            fullwidth("API_KEY=" + opaque_value),
+            "API\u200b_KEY=" + opaque_value,
+            "API_KEY" + fullwidth("=") + opaque_value,
+        ):
+            with self.subTest(value=value):
+                findings = _content_findings(value)
+                self.assertIn(
+                    "Unicode-obfuscated credential or secret material",
+                    findings,
+                )
+                self.assertNotIn(opaque_value, "\n".join(findings))
+
+    def test_normalization_never_grants_an_identity_or_placeholder_exception(self) -> None:
+        obfuscated_allowed_emails = (
+            "git\u0301" + "@" + "github.com",
+            "support" + "@" + "github\u0301.com",
+            "12345+release-tester\u034f"
+            + "@"
+            + "users.noreply.github.com",
+            "git\x01" + "@" + "github.com",
+            "support" + "@" + "github\x01.com",
+        )
+        for value in obfuscated_allowed_emails:
+            with self.subTest(value=value):
+                self.assertIn("non-example email address", _content_findings(value))
+
+        windows_home = "\\".join(("C:", "Users"))
+        posix_home = "/" + "/".join(("home",))
+        unc_home = "//" + "/".join(("ser\u034fver", "Users"))
+        obfuscated_placeholders = (
+            windows_home + "\\exa\u034fmple\\record.txt",
+            posix_home + "/exa\ufe0fmple/record.txt",
+            unc_home + "/exa\u034fmple/record.txt",
+            windows_home + "\\exa\x01mple\\record.txt",
+        )
+        for value in obfuscated_placeholders:
+            with self.subTest(value=value):
+                self.assertTrue(
+                    any(
+                        "user-home path" in finding
+                        for finding in _content_findings(value)
+                    )
+                )
+
+        self.assertEqual(_content_findings("git" + "@" + "github.com"), [])
+        self.assertEqual(
+            _content_findings("C:\\Users\\example\\record.txt"),
+            [],
+        )
+
+    def test_slash_prefixed_personal_email_blocks_release(self) -> None:
+        private_text = "contacts/jose" + "@" + "personal.invalid"
+        (self.repo / "contact-path.txt").write_text(private_text, encoding="utf-8")
+        self._git("add", "contact-path.txt")
+        self._commit("12345+release-tester@users.noreply.github.com")
+
+        findings = check_release(self.repo)
+
+        self.assertTrue(
+            any("non-example email address" in item for item in findings),
+            findings,
+        )
+
+    def test_package_versions_and_ip_userinfo_are_not_emails(self) -> None:
+        safe_text = "\n".join((
+            "vendor/package-with-a-long-version" + "@" + "1.2.3-beta.4",
+            "example" + "@" + "1.0.0",
+            "safe-scope/registry-package" + "@" + "1.2.3",
+            "pass" + "@" + "192.168.50.2",
+        ))
+        (self.repo / "package-specs.txt").write_text(safe_text, encoding="utf-8")
+        self._git("add", "package-specs.txt")
+        self._commit("12345+release-tester@users.noreply.github.com")
+
+        self.assertEqual(check_release(self.repo), [])
+
+    def test_non_utf8_and_nul_blobs_are_blocked(self) -> None:
+        for filename, payload in (
+            ("opaque.bin", b"\xff\xfeprivate"),
+            ("embedded-zero.txt", b"public\0private"),
+            ("late-zero.txt", b"a" * 8192 + b"\0tail"),
+        ):
+            with self.subTest(filename=filename):
+                path = self.repo / filename
+                path.write_bytes(payload)
+                self._git("add", filename)
+                self._commit("12345+release-tester@users.noreply.github.com")
+                findings = check_release(self.repo)
+                self.assertTrue(
+                    any(
+                        "non-UTF-8 or NUL-containing tracked content is blocked"
+                        in item
+                        for item in findings
+                    ),
+                    findings,
+                )
+                self._git("rm", filename)
+                self._commit("12345+release-tester@users.noreply.github.com")
+
+    def test_redacted_home_placeholders_remain_publishable(self) -> None:
+        safe_paths = "\n".join((
+            "\\".join(("C:", "Users", "[USER]", "record.txt")),
+            "/".join(("", "home", "[USER]", "record.txt")),
+            "\\\\" + "[HOST]" + "\\Users\\[USER]\\record.txt",
+        ))
+        (self.repo / "safe-paths.txt").write_text(safe_paths, encoding="utf-8")
+        self._git("add", "safe-paths.txt")
+        self._commit("12345+release-tester@users.noreply.github.com")
+
+        self.assertEqual(check_release(self.repo), [])
 
     def test_personal_annotated_tag_email_blocks_release(self) -> None:
         self._commit("12345+release-tester@users.noreply.github.com")

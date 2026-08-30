@@ -1620,10 +1620,11 @@ class AgentHardeningTests(unittest.TestCase):
         conversation = self.memory.new_conversation("normal chat")
         self.memory.add_message(conversation, "user", "How is your day going?")
         self.memory.add_message(conversation, "assistant", "Going well. How is yours?")
-        self.memory.remember(
+        self.memory.remember_verified(
             "The operator prefers concise natural replies.",
             kind="preference",
             source="user",
+            origin="explicit_operator_memory",
         )
         agent, client = self.make_agent([
             FakeResponse(content="Nice—sketching and gardening sounds like a balanced mix."),

@@ -19,12 +19,19 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
+from jarvis.redaction import (
+    contains_obfuscated_secret,
+    normalize_private_identifier_text,
+    private_email_addresses,
+    private_identifier_text_was_obfuscated,
+)
 from jarvis.trusted_executables import trusted_path_executable
 
 
 MAX_TRACKED_FILE_BYTES = 5 * 1024 * 1024
 
 _ALLOWED_PLACEHOLDER_USERS = {
+    "[user]",
     "codex",
     "example",
     "example-user",
@@ -38,6 +45,14 @@ _ALLOWED_PLACEHOLDER_USERS = {
     "username",
     "victim",
     "your-name",
+}
+
+_ALLOWED_PLACEHOLDER_HOSTS = {
+    "[host]",
+    "example",
+    "example-server",
+    "server",
+    "test",
 }
 
 _DISALLOWED_TOP_LEVEL_DIRECTORIES = {
@@ -88,11 +103,15 @@ _ENV_FILE_RE = re.compile(r"(?i)^\.env(?:\..+)?$")
 _CODEX_TRANSCRIPT_RE = re.compile(r"(?i)^jarvis-codex-.*\.(?:schema|response)\.json$")
 
 _WINDOWS_HOME_RE = re.compile(
-    r"(?i)\b[A-Z]:(?:[\\/]+)Users(?:[\\/]+)([^\\/\s\"'<>]+)"
+    r"(?i)\b[A-Z]:(?:[\\/]+)Users(?:[\\/]+)([^\\/:\"'<>|\r\n\t]+)"
 )
-_POSIX_HOME_RE = re.compile(r"(?i)(?:^|[^\w])/(?:home|Users)/([^/\s\"'<>]+)")
-_EMAIL_RE = re.compile(r"(?i)\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b")
-
+_POSIX_HOME_RE = re.compile(
+    r"(?i)(?:^|[^\w])/(?:home|Users)/([^/\"'<>|\r\n\t]+)"
+)
+_UNC_HOME_RE = re.compile(
+    r"(?i)(?:^|[^\w])(?:\\\\|//)([^\\/\s:\"'<>|]+)[\\/]"
+    r"+(?:Users|home|homes)[\\/]+([^\\/:\"'<>|\r\n\t]+)"
+)
 _ALLOWED_EMAIL_DOMAINS = {
     "example.com",
     "example.net",
@@ -158,12 +177,17 @@ def _indexed_files(git_executable: Path, repo: Path) -> list[tuple[str, str, str
 
 
 def _path_findings(path: str) -> list[str]:
-    normalized = str(PurePosixPath(path))
+    path_was_obfuscated = private_identifier_text_was_obfuscated(path)
+    normalized = str(PurePosixPath(normalize_private_identifier_text(path)))
     parts = PurePosixPath(normalized).parts
     if not parts:
         return ["empty tracked path"]
 
     findings: list[str] = []
+    if path_was_obfuscated or any(
+        not character.isascii() for character in normalized
+    ):
+        findings.append("Unicode-obfuscated tracked path is not publishable")
     top = parts[0].casefold()
     name = parts[-1].casefold()
 
@@ -198,7 +222,7 @@ def _path_findings(path: str) -> list[str]:
 
 
 def _decode_text(data: bytes) -> str | None:
-    if b"\0" in data[:8192]:
+    if b"\0" in data:
         return None
     try:
         return data.decode("utf-8")
@@ -207,7 +231,18 @@ def _decode_text(data: bytes) -> str | None:
 
 
 def _content_findings(text: str) -> list[str]:
+    text_was_obfuscated = private_identifier_text_was_obfuscated(text)
+    obfuscated_secret = contains_obfuscated_secret(text)
+    text = normalize_private_identifier_text(text)
     findings: list[str] = []
+
+    if obfuscated_secret:
+        # Report only the finding class. Never echo matched secret material to
+        # release logs, CI annotations, or terminal output. Ordinary ASCII
+        # credentials remain the dedicated secret scanner's responsibility;
+        # this closes the Unicode-normalization gap without classifying source
+        # examples and placeholder configuration as live credentials.
+        findings.append("Unicode-obfuscated credential or secret material")
 
     for pattern, label in (
         (_WINDOWS_HOME_RE, "Windows user-home path"),
@@ -215,18 +250,42 @@ def _content_findings(text: str) -> list[str]:
     ):
         for match in pattern.finditer(text):
             username = match.group(1).casefold().rstrip(".,;:)")
-            if username not in _ALLOWED_PLACEHOLDER_USERS:
+            if (
+                username not in _ALLOWED_PLACEHOLDER_USERS
+                or text_was_obfuscated
+            ):
                 findings.append(f"concrete {label}")
 
-    for match in _EMAIL_RE.finditer(text):
-        address = match.group(0).casefold()
-        domain = address.rsplit("@", 1)[1]
+    for match in _UNC_HOME_RE.finditer(text):
+        hostname = match.group(1).casefold().rstrip(".,;:)")
+        username = match.group(2).casefold().rstrip(".,;:)")
+        if (
+            hostname not in _ALLOWED_PLACEHOLDER_HOSTS
+            or username not in _ALLOWED_PLACEHOLDER_USERS
+            or text_was_obfuscated
+        ):
+            findings.append("concrete UNC user-home path")
+
+    for candidate in private_email_addresses(text):
+        address = candidate.casefold()
+        local_part, domain = address.rsplit("@", 1)
+        final_label = domain.rsplit(".", 1)[-1]
+        if re.fullmatch(r"\{[a-z0-9_-]+\}", local_part) is not None:
+            continue
+        if not (final_label.isalpha() or final_label.startswith("xn--")):
+            # Package versions and IPv4 user-info look email-shaped but do not
+            # have a syntactically plausible alphabetic/IDN top-level label.
+            continue
         is_reserved_example = domain == "example" or domain.endswith(".example")
         if (
             address not in _ALLOWED_EMAIL_ADDRESSES
             and domain not in _ALLOWED_EMAIL_DOMAINS
             and not is_reserved_example
         ):
+            findings.append("non-example email address")
+        elif text_was_obfuscated:
+            # Canonicalization is for detection only. It must never transform
+            # an attacker-controlled lookalike into an allowlisted identity.
             findings.append("non-example email address")
 
     return sorted(set(findings))
@@ -432,7 +491,12 @@ def check_release(
             )
         else:
             indexed_text = _decode_text(indexed)
-            if indexed_text is not None:
+            if indexed_text is None:
+                findings.append(
+                    f"{path} [index]: non-UTF-8 or NUL-containing tracked content "
+                    "is blocked"
+                )
+            else:
                 for reason in _content_findings(indexed_text):
                     findings.append(f"{path} [index]: {reason}")
 
@@ -447,7 +511,12 @@ def check_release(
                     )
                 else:
                     worktree_text = _decode_text(worktree)
-                    if worktree_text is not None:
+                    if worktree_text is None:
+                        findings.append(
+                            f"{path} [worktree]: non-UTF-8 or NUL-containing "
+                            "tracked content is blocked"
+                        )
+                    else:
                         for reason in _content_findings(worktree_text):
                             findings.append(f"{path} [worktree]: {reason}")
 

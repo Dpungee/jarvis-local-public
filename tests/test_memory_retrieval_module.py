@@ -35,7 +35,7 @@ class MemoryRetrievalModuleTests(unittest.TestCase):
 
         self.assertEqual(
             terms,
-            ["alpha", "beta", "policy", "gamma", "delta", "epsilon", "zeta", "eta"],
+            ["alpha", "beta", "policy", "gamma", "delta", "epsilon", "zeta", "theta"],
         )
         self.assertEqual(
             memory_retrieval._memory_like_terms(query, terms),
@@ -48,13 +48,13 @@ class MemoryRetrievalModuleTests(unittest.TestCase):
                 "delta",
                 "epsilon",
                 "zeta",
-                "eta",
+                "theta",
             ],
         )
         self.assertIsNone(memory_retrieval._memory_fts_query(query, terms))
         self.assertEqual(
             memory_retrieval._memory_fts_query("alpha beta", ["alpha", "beta"]),
-            '"alpha" OR "beta"',
+            '"alpha" OR "alphas" OR "beta" OR "betas"',
         )
 
     def test_ranker_preserves_exact_phrase_utility_and_newer_tie_breaking(self) -> None:

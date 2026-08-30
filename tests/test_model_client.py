@@ -265,7 +265,7 @@ class ClaudeCLIProviderTests(unittest.TestCase):
             working_directory=".",
             generation_timeout=10,
         )
-        prompt = "Weather: 21°C • 雪 🌧️"
+        prompt = "Weather: 21\xb0C \u2022 \u96ea \U0001f327\ufe0f"
 
         completed = client._run_cli(
             [

@@ -11,7 +11,7 @@ from unittest.mock import patch
 
 from jarvis.attachments import ImageAttachment
 from jarvis.config import Config
-from jarvis.memory import Memory
+from jarvis.memory import Memory, SCHEMA_VERSION
 from jarvis.presence import (
     PresenceJob,
     PresenceRuntime,
@@ -392,6 +392,12 @@ class CompanionLearningPresenceTests(unittest.TestCase):
                 self.assertEqual(ephemeral.search("preference"), [])
                 self.assertEqual(ephemeral.list_memories(limit=20), [])
                 self.assertEqual(ephemeral.current_claims("preference"), [])
+                self.assertEqual(
+                    ephemeral.match_lessons(
+                        "private durable lesson", "conversation"
+                    ),
+                    [],
+                )
                 self.assertIn(
                     "do not write ordinary long-term memory",
                     ephemeral.remember_verified(
@@ -432,7 +438,8 @@ class CompanionLearningPresenceTests(unittest.TestCase):
 
             with Memory(database) as memory:
                 self.assertEqual(
-                    int(memory.db.execute("PRAGMA user_version").fetchone()[0]), 36
+                    int(memory.db.execute("PRAGMA user_version").fetchone()[0]),
+                    SCHEMA_VERSION,
                 )
                 self.assertFalse(memory.is_screen_companion_conversation(normal_id))
                 self.assertTrue(memory.is_screen_companion_conversation(internal_id))

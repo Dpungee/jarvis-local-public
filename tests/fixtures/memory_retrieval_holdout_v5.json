@@ -1,0 +1,2336 @@
+{
+  "schema_version": 1,
+  "holdout": "memory_retrieval_holdout_v5",
+  "public_safe": true,
+  "fictional_only": true,
+  "domain": "Moonmoth Conservatory of the invented Orison Archipelago",
+  "note": "Fresh synthetic evaluation data; every institution, exhibit, label, and event is fictional.",
+  "thresholds": {
+    "precision": 0.85,
+    "recall": 0.8,
+    "no_hit_rate": 0.95,
+    "leakage": 0
+  },
+  "expected_counts": {
+    "records": 120,
+    "cases": 144,
+    "positive_cases": 87,
+    "no_hit_cases": 57,
+    "globally_forbidden_records": 48,
+    "complete_lesson_families": 6
+  },
+  "records": [
+    {
+      "id": "g01",
+      "channel": "general",
+      "kind": "fact",
+      "content": "At the wholly invented Moonmoth Conservatory, catalog word virmalune labels the east lantern shelf.",
+      "source": "synthetic holdout v5 fictional catalog",
+      "globally_forbidden": false
+    },
+    {
+      "id": "g02",
+      "channel": "general",
+      "kind": "fact",
+      "content": "At the wholly invented Moonmoth Conservatory, catalog word caldrivane labels the spiral seed cabinet.",
+      "source": "synthetic holdout v5 fictional catalog",
+      "globally_forbidden": false
+    },
+    {
+      "id": "g03",
+      "channel": "general",
+      "kind": "fact",
+      "content": "At the wholly invented Moonmoth Conservatory, catalog word osprelith labels the upper rain balcony.",
+      "source": "synthetic holdout v5 fictional catalog",
+      "globally_forbidden": false
+    },
+    {
+      "id": "g04",
+      "channel": "general",
+      "kind": "fact",
+      "content": "At the wholly invented Moonmoth Conservatory, catalog word nectarune labels the amber pollen drawer.",
+      "source": "synthetic holdout v5 fictional catalog",
+      "globally_forbidden": false
+    },
+    {
+      "id": "g05",
+      "channel": "general",
+      "kind": "fact",
+      "content": "At the wholly invented Moonmoth Conservatory, catalog word halcyvane labels the quiet wing alcove.",
+      "source": "synthetic holdout v5 fictional catalog",
+      "globally_forbidden": false
+    },
+    {
+      "id": "g06",
+      "channel": "general",
+      "kind": "fact",
+      "content": "At the wholly invented Moonmoth Conservatory, catalog word mirelune labels the blue moss ledger.",
+      "source": "synthetic holdout v5 fictional catalog",
+      "globally_forbidden": false
+    },
+    {
+      "id": "g07",
+      "channel": "general",
+      "kind": "fact",
+      "content": "At the wholly invented Moonmoth Conservatory, catalog word cressadine labels the seventh glass perch.",
+      "source": "synthetic holdout v5 fictional catalog",
+      "globally_forbidden": false
+    },
+    {
+      "id": "g08",
+      "channel": "general",
+      "kind": "fact",
+      "content": "At the wholly invented Moonmoth Conservatory, catalog word opalivern labels the round dusk gallery.",
+      "source": "synthetic holdout v5 fictional catalog",
+      "globally_forbidden": false
+    },
+    {
+      "id": "g09",
+      "channel": "general",
+      "kind": "fact",
+      "content": "At the wholly invented Moonmoth Conservatory, catalog word thistrelume labels the woven breeze archive.",
+      "source": "synthetic holdout v5 fictional catalog",
+      "globally_forbidden": false
+    },
+    {
+      "id": "g10",
+      "channel": "general",
+      "kind": "fact",
+      "content": "At the wholly invented Moonmoth Conservatory, catalog word brindlequay labels the low silver walkway.",
+      "source": "synthetic holdout v5 fictional catalog",
+      "globally_forbidden": false
+    },
+    {
+      "id": "g11",
+      "channel": "general",
+      "kind": "fact",
+      "content": "At the wholly invented Moonmoth Conservatory, catalog word sorrelune labels the crescent map folio.",
+      "source": "synthetic holdout v5 fictional catalog",
+      "globally_forbidden": false
+    },
+    {
+      "id": "g12",
+      "channel": "general",
+      "kind": "fact",
+      "content": "At the wholly invented Moonmoth Conservatory, catalog word wisporaine labels the western chime room.",
+      "source": "synthetic holdout v5 fictional catalog",
+      "globally_forbidden": false
+    },
+    {
+      "id": "g13",
+      "channel": "general",
+      "kind": "fact",
+      "content": "At the wholly invented Moonmoth Conservatory, catalog word ambercairn labels the sunlit cocoon case.",
+      "source": "synthetic holdout v5 fictional catalog",
+      "globally_forbidden": false
+    },
+    {
+      "id": "g14",
+      "channel": "general",
+      "kind": "fact",
+      "content": "At the wholly invented Moonmoth Conservatory, catalog word lilacurrent labels the narrow cloud corridor.",
+      "source": "synthetic holdout v5 fictional catalog",
+      "globally_forbidden": false
+    },
+    {
+      "id": "g15",
+      "channel": "general",
+      "kind": "fact",
+      "content": "At the wholly invented Moonmoth Conservatory, catalog word moonquince labels the pearled nectar bench.",
+      "source": "synthetic holdout v5 fictional catalog",
+      "globally_forbidden": false
+    },
+    {
+      "id": "g16",
+      "channel": "general",
+      "kind": "fact",
+      "content": "At the wholly invented Moonmoth Conservatory, catalog word driftmarrow labels the floating reed cradle.",
+      "source": "synthetic holdout v5 fictional catalog",
+      "globally_forbidden": false
+    },
+    {
+      "id": "g17",
+      "channel": "general",
+      "kind": "fact",
+      "content": "At the wholly invented Moonmoth Conservatory, catalog word pearlglisten labels the ivory scale cabinet.",
+      "source": "synthetic holdout v5 fictional catalog",
+      "globally_forbidden": false
+    },
+    {
+      "id": "g18",
+      "channel": "general",
+      "kind": "fact",
+      "content": "At the wholly invented Moonmoth Conservatory, catalog word starlingrove labels the north moth terrace.",
+      "source": "synthetic holdout v5 fictional catalog",
+      "globally_forbidden": false
+    },
+    {
+      "id": "g19",
+      "channel": "general",
+      "kind": "fact",
+      "content": "At the wholly invented Moonmoth Conservatory, catalog word velvetern labels the plum observation nook.",
+      "source": "synthetic holdout v5 fictional catalog",
+      "globally_forbidden": false
+    },
+    {
+      "id": "g20",
+      "channel": "general",
+      "kind": "fact",
+      "content": "At the wholly invented Moonmoth Conservatory, catalog word galesaffron labels the windward herb rack.",
+      "source": "synthetic holdout v5 fictional catalog",
+      "globally_forbidden": false
+    },
+    {
+      "id": "g21",
+      "channel": "general",
+      "kind": "fact",
+      "content": "At the wholly invented Moonmoth Conservatory, catalog word rainmorrow labels the mist bell vestibule.",
+      "source": "synthetic holdout v5 fictional catalog",
+      "globally_forbidden": false
+    },
+    {
+      "id": "g22",
+      "channel": "general",
+      "kind": "fact",
+      "content": "At the wholly invented Moonmoth Conservatory, catalog word cobaltide labels the indigo specimen table.",
+      "source": "synthetic holdout v5 fictional catalog",
+      "globally_forbidden": false
+    },
+    {
+      "id": "g23",
+      "channel": "general",
+      "kind": "fact",
+      "content": "At the wholly invented Moonmoth Conservatory, catalog word fablefern labels the storyleaf catalog bay.",
+      "source": "synthetic holdout v5 fictional catalog",
+      "globally_forbidden": false
+    },
+    {
+      "id": "g24",
+      "channel": "general",
+      "kind": "fact",
+      "content": "At the wholly invented Moonmoth Conservatory, catalog word hushwillow labels the silent lantern rotunda.",
+      "source": "synthetic holdout v5 fictional catalog",
+      "globally_forbidden": false
+    },
+    {
+      "id": "gx01",
+      "channel": "general",
+      "kind": "fact",
+      "content": "At the wholly invented Moonmoth Conservatory, retired draft word quoravine labels a discarded catalog slip.",
+      "source": "synthetic holdout v5 fictional retired draft",
+      "globally_forbidden": true
+    },
+    {
+      "id": "gx02",
+      "channel": "general",
+      "kind": "fact",
+      "content": "At the wholly invented Moonmoth Conservatory, retired draft word duskellum labels a discarded catalog slip.",
+      "source": "synthetic holdout v5 fictional retired draft",
+      "globally_forbidden": true
+    },
+    {
+      "id": "gx03",
+      "channel": "general",
+      "kind": "fact",
+      "content": "At the wholly invented Moonmoth Conservatory, retired draft word brineoracle labels a discarded catalog slip.",
+      "source": "synthetic holdout v5 fictional retired draft",
+      "globally_forbidden": true
+    },
+    {
+      "id": "gx04",
+      "channel": "general",
+      "kind": "fact",
+      "content": "At the wholly invented Moonmoth Conservatory, retired draft word mistcinder labels a discarded catalog slip.",
+      "source": "synthetic holdout v5 fictional retired draft",
+      "globally_forbidden": true
+    },
+    {
+      "id": "gx05",
+      "channel": "general",
+      "kind": "fact",
+      "content": "At the wholly invented Moonmoth Conservatory, retired draft word alderhalo labels a discarded catalog slip.",
+      "source": "synthetic holdout v5 fictional retired draft",
+      "globally_forbidden": true
+    },
+    {
+      "id": "gx06",
+      "channel": "general",
+      "kind": "fact",
+      "content": "At the wholly invented Moonmoth Conservatory, retired draft word umberquill labels a discarded catalog slip.",
+      "source": "synthetic holdout v5 fictional retired draft",
+      "globally_forbidden": true
+    },
+    {
+      "id": "gx07",
+      "channel": "general",
+      "kind": "fact",
+      "content": "At the wholly invented Moonmoth Conservatory, retired draft word noonsable labels a discarded catalog slip.",
+      "source": "synthetic holdout v5 fictional retired draft",
+      "globally_forbidden": true
+    },
+    {
+      "id": "gx08",
+      "channel": "general",
+      "kind": "fact",
+      "content": "At the wholly invented Moonmoth Conservatory, retired draft word rivermica labels a discarded catalog slip.",
+      "source": "synthetic holdout v5 fictional retired draft",
+      "globally_forbidden": true
+    },
+    {
+      "id": "gx09",
+      "channel": "general",
+      "kind": "fact",
+      "content": "At the wholly invented Moonmoth Conservatory, retired draft word cloudthimble labels a discarded catalog slip.",
+      "source": "synthetic holdout v5 fictional retired draft",
+      "globally_forbidden": true
+    },
+    {
+      "id": "gx10",
+      "channel": "general",
+      "kind": "fact",
+      "content": "At the wholly invented Moonmoth Conservatory, retired draft word mosscomet labels a discarded catalog slip.",
+      "source": "synthetic holdout v5 fictional retired draft",
+      "globally_forbidden": true
+    },
+    {
+      "id": "gx11",
+      "channel": "general",
+      "kind": "fact",
+      "content": "At the wholly invented Moonmoth Conservatory, retired draft word silverreed labels a discarded catalog slip.",
+      "source": "synthetic holdout v5 fictional retired draft",
+      "globally_forbidden": true
+    },
+    {
+      "id": "gx12",
+      "channel": "general",
+      "kind": "fact",
+      "content": "At the wholly invented Moonmoth Conservatory, retired draft word plumetide labels a discarded catalog slip.",
+      "source": "synthetic holdout v5 fictional retired draft",
+      "globally_forbidden": true
+    },
+    {
+      "id": "gx13",
+      "channel": "general",
+      "kind": "fact",
+      "content": "At the wholly invented Moonmoth Conservatory, retired draft word frostpetal labels a discarded catalog slip.",
+      "source": "synthetic holdout v5 fictional retired draft",
+      "globally_forbidden": true
+    },
+    {
+      "id": "gx14",
+      "channel": "general",
+      "kind": "fact",
+      "content": "At the wholly invented Moonmoth Conservatory, retired draft word ochregull labels a discarded catalog slip.",
+      "source": "synthetic holdout v5 fictional retired draft",
+      "globally_forbidden": true
+    },
+    {
+      "id": "gx15",
+      "channel": "general",
+      "kind": "fact",
+      "content": "At the wholly invented Moonmoth Conservatory, retired draft word dawnlichen labels a discarded catalog slip.",
+      "source": "synthetic holdout v5 fictional retired draft",
+      "globally_forbidden": true
+    },
+    {
+      "id": "gx16",
+      "channel": "general",
+      "kind": "fact",
+      "content": "At the wholly invented Moonmoth Conservatory, retired draft word quiettopaz labels a discarded catalog slip.",
+      "source": "synthetic holdout v5 fictional retired draft",
+      "globally_forbidden": true
+    },
+    {
+      "id": "l01",
+      "channel": "lesson",
+      "family": "file_ops",
+      "outcome": "complete",
+      "content": "For the fictional windglass task sablemetry, preserve the numbered moth-wing sequence and verify the final chime before closing.",
+      "source": "synthetic holdout v5 fictional verified lesson",
+      "globally_forbidden": false
+    },
+    {
+      "id": "l02",
+      "channel": "lesson",
+      "family": "file_ops",
+      "outcome": "complete",
+      "content": "For the fictional windglass task choralfold, preserve the numbered moth-wing sequence and verify the final chime before closing.",
+      "source": "synthetic holdout v5 fictional verified lesson",
+      "globally_forbidden": false
+    },
+    {
+      "id": "l03",
+      "channel": "lesson",
+      "family": "file_ops",
+      "outcome": "complete",
+      "content": "For the fictional windglass task lunarknot, preserve the numbered moth-wing sequence and verify the final chime before closing.",
+      "source": "synthetic holdout v5 fictional verified lesson",
+      "globally_forbidden": false
+    },
+    {
+      "id": "l04",
+      "channel": "lesson",
+      "family": "file_ops",
+      "outcome": "complete",
+      "content": "For the fictional windglass task reedcipher, preserve the numbered moth-wing sequence and verify the final chime before closing.",
+      "source": "synthetic holdout v5 fictional verified lesson",
+      "globally_forbidden": false
+    },
+    {
+      "id": "l05",
+      "channel": "lesson",
+      "family": "learning_brief",
+      "outcome": "complete",
+      "content": "For the fictional windglass task aviaryloom, preserve the numbered moth-wing sequence and verify the final chime before closing.",
+      "source": "synthetic holdout v5 fictional verified lesson",
+      "globally_forbidden": false
+    },
+    {
+      "id": "l06",
+      "channel": "lesson",
+      "family": "learning_brief",
+      "outcome": "complete",
+      "content": "For the fictional windglass task gossamerpath, preserve the numbered moth-wing sequence and verify the final chime before closing.",
+      "source": "synthetic holdout v5 fictional verified lesson",
+      "globally_forbidden": false
+    },
+    {
+      "id": "l07",
+      "channel": "lesson",
+      "family": "learning_brief",
+      "outcome": "complete",
+      "content": "For the fictional windglass task tideabacus, preserve the numbered moth-wing sequence and verify the final chime before closing.",
+      "source": "synthetic holdout v5 fictional verified lesson",
+      "globally_forbidden": false
+    },
+    {
+      "id": "l08",
+      "channel": "lesson",
+      "family": "learning_brief",
+      "outcome": "complete",
+      "content": "For the fictional windglass task mothquorum, preserve the numbered moth-wing sequence and verify the final chime before closing.",
+      "source": "synthetic holdout v5 fictional verified lesson",
+      "globally_forbidden": false
+    },
+    {
+      "id": "l09",
+      "channel": "lesson",
+      "family": "conversation",
+      "outcome": "complete",
+      "content": "For the fictional windglass task glimmerindex, preserve the numbered moth-wing sequence and verify the final chime before closing.",
+      "source": "synthetic holdout v5 fictional verified lesson",
+      "globally_forbidden": false
+    },
+    {
+      "id": "l10",
+      "channel": "lesson",
+      "family": "conversation",
+      "outcome": "complete",
+      "content": "For the fictional windglass task willowproof, preserve the numbered moth-wing sequence and verify the final chime before closing.",
+      "source": "synthetic holdout v5 fictional verified lesson",
+      "globally_forbidden": false
+    },
+    {
+      "id": "l11",
+      "channel": "lesson",
+      "family": "conversation",
+      "outcome": "complete",
+      "content": "For the fictional windglass task bramblecheck, preserve the numbered moth-wing sequence and verify the final chime before closing.",
+      "source": "synthetic holdout v5 fictional verified lesson",
+      "globally_forbidden": false
+    },
+    {
+      "id": "l12",
+      "channel": "lesson",
+      "family": "conversation",
+      "outcome": "complete",
+      "content": "For the fictional windglass task aurorastep, preserve the numbered moth-wing sequence and verify the final chime before closing.",
+      "source": "synthetic holdout v5 fictional verified lesson",
+      "globally_forbidden": false
+    },
+    {
+      "id": "l13",
+      "channel": "lesson",
+      "family": "research",
+      "outcome": "complete",
+      "content": "For the fictional windglass task petalcompass, preserve the numbered moth-wing sequence and verify the final chime before closing.",
+      "source": "synthetic holdout v5 fictional verified lesson",
+      "globally_forbidden": false
+    },
+    {
+      "id": "l14",
+      "channel": "lesson",
+      "family": "research",
+      "outcome": "complete",
+      "content": "For the fictional windglass task cloudledger, preserve the numbered moth-wing sequence and verify the final chime before closing.",
+      "source": "synthetic holdout v5 fictional verified lesson",
+      "globally_forbidden": false
+    },
+    {
+      "id": "l15",
+      "channel": "lesson",
+      "family": "research",
+      "outcome": "complete",
+      "content": "For the fictional windglass task rainschema, preserve the numbered moth-wing sequence and verify the final chime before closing.",
+      "source": "synthetic holdout v5 fictional verified lesson",
+      "globally_forbidden": false
+    },
+    {
+      "id": "l16",
+      "channel": "lesson",
+      "family": "research",
+      "outcome": "complete",
+      "content": "For the fictional windglass task driftprotocol, preserve the numbered moth-wing sequence and verify the final chime before closing.",
+      "source": "synthetic holdout v5 fictional verified lesson",
+      "globally_forbidden": false
+    },
+    {
+      "id": "l17",
+      "channel": "lesson",
+      "family": "code_fix",
+      "outcome": "complete",
+      "content": "For the fictional windglass task heathermethod, preserve the numbered moth-wing sequence and verify the final chime before closing.",
+      "source": "synthetic holdout v5 fictional verified lesson",
+      "globally_forbidden": false
+    },
+    {
+      "id": "l18",
+      "channel": "lesson",
+      "family": "code_fix",
+      "outcome": "complete",
+      "content": "For the fictional windglass task quillroutine, preserve the numbered moth-wing sequence and verify the final chime before closing.",
+      "source": "synthetic holdout v5 fictional verified lesson",
+      "globally_forbidden": false
+    },
+    {
+      "id": "l19",
+      "channel": "lesson",
+      "family": "code_fix",
+      "outcome": "complete",
+      "content": "For the fictional windglass task saffronverify, preserve the numbered moth-wing sequence and verify the final chime before closing.",
+      "source": "synthetic holdout v5 fictional verified lesson",
+      "globally_forbidden": false
+    },
+    {
+      "id": "l20",
+      "channel": "lesson",
+      "family": "code_fix",
+      "outcome": "complete",
+      "content": "For the fictional windglass task marshsequence, preserve the numbered moth-wing sequence and verify the final chime before closing.",
+      "source": "synthetic holdout v5 fictional verified lesson",
+      "globally_forbidden": false
+    },
+    {
+      "id": "l21",
+      "channel": "lesson",
+      "family": "code_test",
+      "outcome": "complete",
+      "content": "For the fictional windglass task opalbenchmark, preserve the numbered moth-wing sequence and verify the final chime before closing.",
+      "source": "synthetic holdout v5 fictional verified lesson",
+      "globally_forbidden": false
+    },
+    {
+      "id": "l22",
+      "channel": "lesson",
+      "family": "code_test",
+      "outcome": "complete",
+      "content": "For the fictional windglass task cindertrace, preserve the numbered moth-wing sequence and verify the final chime before closing.",
+      "source": "synthetic holdout v5 fictional verified lesson",
+      "globally_forbidden": false
+    },
+    {
+      "id": "l23",
+      "channel": "lesson",
+      "family": "code_test",
+      "outcome": "complete",
+      "content": "For the fictional windglass task frostwitness, preserve the numbered moth-wing sequence and verify the final chime before closing.",
+      "source": "synthetic holdout v5 fictional verified lesson",
+      "globally_forbidden": false
+    },
+    {
+      "id": "l24",
+      "channel": "lesson",
+      "family": "code_test",
+      "outcome": "complete",
+      "content": "For the fictional windglass task dawnassert, preserve the numbered moth-wing sequence and verify the final chime before closing.",
+      "source": "synthetic holdout v5 fictional verified lesson",
+      "globally_forbidden": false
+    },
+    {
+      "id": "lx01",
+      "channel": "lesson",
+      "family": "file_ops",
+      "outcome": "failed",
+      "content": "The rejected fictional windglass attempt shadowskip skipped the final chime, so its advice must remain quarantined.",
+      "source": "synthetic holdout v5 fictional failed lesson",
+      "globally_forbidden": true
+    },
+    {
+      "id": "lx02",
+      "channel": "lesson",
+      "family": "file_ops",
+      "outcome": "failed",
+      "content": "The rejected fictional windglass attempt mirthbypass skipped the final chime, so its advice must remain quarantined.",
+      "source": "synthetic holdout v5 fictional failed lesson",
+      "globally_forbidden": true
+    },
+    {
+      "id": "lx03",
+      "channel": "lesson",
+      "family": "file_ops",
+      "outcome": "failed",
+      "content": "The rejected fictional windglass attempt hollowguess skipped the final chime, so its advice must remain quarantined.",
+      "source": "synthetic holdout v5 fictional failed lesson",
+      "globally_forbidden": true
+    },
+    {
+      "id": "lx04",
+      "channel": "lesson",
+      "family": "learning_brief",
+      "outcome": "failed",
+      "content": "The rejected fictional windglass attempt vaguepatch skipped the final chime, so its advice must remain quarantined.",
+      "source": "synthetic holdout v5 fictional failed lesson",
+      "globally_forbidden": true
+    },
+    {
+      "id": "lx05",
+      "channel": "lesson",
+      "family": "learning_brief",
+      "outcome": "failed",
+      "content": "The rejected fictional windglass attempt rushedomit skipped the final chime, so its advice must remain quarantined.",
+      "source": "synthetic holdout v5 fictional failed lesson",
+      "globally_forbidden": true
+    },
+    {
+      "id": "lx06",
+      "channel": "lesson",
+      "family": "learning_brief",
+      "outcome": "failed",
+      "content": "The rejected fictional windglass attempt blindswap skipped the final chime, so its advice must remain quarantined.",
+      "source": "synthetic holdout v5 fictional failed lesson",
+      "globally_forbidden": true
+    },
+    {
+      "id": "lx07",
+      "channel": "lesson",
+      "family": "conversation",
+      "outcome": "failed",
+      "content": "The rejected fictional windglass attempt fragileleap skipped the final chime, so its advice must remain quarantined.",
+      "source": "synthetic holdout v5 fictional failed lesson",
+      "globally_forbidden": true
+    },
+    {
+      "id": "lx08",
+      "channel": "lesson",
+      "family": "conversation",
+      "outcome": "failed",
+      "content": "The rejected fictional windglass attempt silentassume skipped the final chime, so its advice must remain quarantined.",
+      "source": "synthetic holdout v5 fictional failed lesson",
+      "globally_forbidden": true
+    },
+    {
+      "id": "lx09",
+      "channel": "lesson",
+      "family": "conversation",
+      "outcome": "failed",
+      "content": "The rejected fictional windglass attempt looseending skipped the final chime, so its advice must remain quarantined.",
+      "source": "synthetic holdout v5 fictional failed lesson",
+      "globally_forbidden": true
+    },
+    {
+      "id": "lx10",
+      "channel": "lesson",
+      "family": "research",
+      "outcome": "failed",
+      "content": "The rejected fictional windglass attempt dimshortcut skipped the final chime, so its advice must remain quarantined.",
+      "source": "synthetic holdout v5 fictional failed lesson",
+      "globally_forbidden": true
+    },
+    {
+      "id": "lx11",
+      "channel": "lesson",
+      "family": "research",
+      "outcome": "failed",
+      "content": "The rejected fictional windglass attempt wildrewrite skipped the final chime, so its advice must remain quarantined.",
+      "source": "synthetic holdout v5 fictional failed lesson",
+      "globally_forbidden": true
+    },
+    {
+      "id": "lx12",
+      "channel": "lesson",
+      "family": "research",
+      "outcome": "failed",
+      "content": "The rejected fictional windglass attempt unreadresult skipped the final chime, so its advice must remain quarantined.",
+      "source": "synthetic holdout v5 fictional failed lesson",
+      "globally_forbidden": true
+    },
+    {
+      "id": "lx13",
+      "channel": "lesson",
+      "family": "code_fix",
+      "outcome": "failed",
+      "content": "The rejected fictional windglass attempt blankcheck skipped the final chime, so its advice must remain quarantined.",
+      "source": "synthetic holdout v5 fictional failed lesson",
+      "globally_forbidden": true
+    },
+    {
+      "id": "lx14",
+      "channel": "lesson",
+      "family": "code_fix",
+      "outcome": "failed",
+      "content": "The rejected fictional windglass attempt hastyclose skipped the final chime, so its advice must remain quarantined.",
+      "source": "synthetic holdout v5 fictional failed lesson",
+      "globally_forbidden": true
+    },
+    {
+      "id": "lx15",
+      "channel": "lesson",
+      "family": "code_test",
+      "outcome": "failed",
+      "content": "The rejected fictional windglass attempt softfailure skipped the final chime, so its advice must remain quarantined.",
+      "source": "synthetic holdout v5 fictional failed lesson",
+      "globally_forbidden": true
+    },
+    {
+      "id": "lx16",
+      "channel": "lesson",
+      "family": "code_test",
+      "outcome": "failed",
+      "content": "The rejected fictional windglass attempt lostevidence skipped the final chime, so its advice must remain quarantined.",
+      "source": "synthetic holdout v5 fictional failed lesson",
+      "globally_forbidden": true
+    },
+    {
+      "id": "cx01",
+      "channel": "claim",
+      "subject": "fictional Moonmoth exhibit bellispark",
+      "predicate": "current bellword",
+      "value": "umber hush",
+      "authority": "external",
+      "source": "synthetic holdout v5 fictional superseded notice",
+      "globally_forbidden": true
+    },
+    {
+      "id": "c01",
+      "channel": "claim",
+      "subject": "fictional Moonmoth exhibit bellispark",
+      "predicate": "current bellword",
+      "value": "opal chorus",
+      "authority": "operator",
+      "source": "synthetic holdout v5 fictional current notice",
+      "globally_forbidden": false
+    },
+    {
+      "id": "cx02",
+      "channel": "claim",
+      "subject": "fictional Moonmoth exhibit cairnwhistle",
+      "predicate": "current bellword",
+      "value": "moss refrain",
+      "authority": "external",
+      "source": "synthetic holdout v5 fictional superseded notice",
+      "globally_forbidden": true
+    },
+    {
+      "id": "c02",
+      "channel": "claim",
+      "subject": "fictional Moonmoth exhibit cairnwhistle",
+      "predicate": "current bellword",
+      "value": "lilac cadence",
+      "authority": "operator",
+      "source": "synthetic holdout v5 fictional current notice",
+      "globally_forbidden": false
+    },
+    {
+      "id": "cx03",
+      "channel": "claim",
+      "subject": "fictional Moonmoth exhibit dappleflute",
+      "predicate": "current bellword",
+      "value": "pewter murmur",
+      "authority": "external",
+      "source": "synthetic holdout v5 fictional superseded notice",
+      "globally_forbidden": true
+    },
+    {
+      "id": "c03",
+      "channel": "claim",
+      "subject": "fictional Moonmoth exhibit dappleflute",
+      "predicate": "current bellword",
+      "value": "amber trill",
+      "authority": "operator",
+      "source": "synthetic holdout v5 fictional current notice",
+      "globally_forbidden": false
+    },
+    {
+      "id": "cx04",
+      "channel": "claim",
+      "subject": "fictional Moonmoth exhibit emberharp",
+      "predicate": "current bellword",
+      "value": "dusk ripple",
+      "authority": "external",
+      "source": "synthetic holdout v5 fictional superseded notice",
+      "globally_forbidden": true
+    },
+    {
+      "id": "c04",
+      "channel": "claim",
+      "subject": "fictional Moonmoth exhibit emberharp",
+      "predicate": "current bellword",
+      "value": "ivory measure",
+      "authority": "operator",
+      "source": "synthetic holdout v5 fictional current notice",
+      "globally_forbidden": false
+    },
+    {
+      "id": "cx05",
+      "channel": "claim",
+      "subject": "fictional Moonmoth exhibit fallowdrum",
+      "predicate": "current bellword",
+      "value": "reed whisper",
+      "authority": "external",
+      "source": "synthetic holdout v5 fictional superseded notice",
+      "globally_forbidden": true
+    },
+    {
+      "id": "c05",
+      "channel": "claim",
+      "subject": "fictional Moonmoth exhibit fallowdrum",
+      "predicate": "current bellword",
+      "value": "saffron beat",
+      "authority": "operator",
+      "source": "synthetic holdout v5 fictional current notice",
+      "globally_forbidden": false
+    },
+    {
+      "id": "cx06",
+      "channel": "claim",
+      "subject": "fictional Moonmoth exhibit gildedreed",
+      "predicate": "current bellword",
+      "value": "cloud pause",
+      "authority": "external",
+      "source": "synthetic holdout v5 fictional superseded notice",
+      "globally_forbidden": true
+    },
+    {
+      "id": "c06",
+      "channel": "claim",
+      "subject": "fictional Moonmoth exhibit gildedreed",
+      "predicate": "current bellword",
+      "value": "cobalt descant",
+      "authority": "operator",
+      "source": "synthetic holdout v5 fictional current notice",
+      "globally_forbidden": false
+    },
+    {
+      "id": "cx07",
+      "channel": "claim",
+      "subject": "fictional Moonmoth exhibit honeychime",
+      "predicate": "current bellword",
+      "value": "frost echo",
+      "authority": "external",
+      "source": "synthetic holdout v5 fictional superseded notice",
+      "globally_forbidden": true
+    },
+    {
+      "id": "c07",
+      "channel": "claim",
+      "subject": "fictional Moonmoth exhibit honeychime",
+      "predicate": "current bellword",
+      "value": "velvet peal",
+      "authority": "operator",
+      "source": "synthetic holdout v5 fictional current notice",
+      "globally_forbidden": false
+    },
+    {
+      "id": "cx08",
+      "channel": "claim",
+      "subject": "fictional Moonmoth exhibit isletviol",
+      "predicate": "current bellword",
+      "value": "quiet drone",
+      "authority": "external",
+      "source": "synthetic holdout v5 fictional superseded notice",
+      "globally_forbidden": true
+    },
+    {
+      "id": "c08",
+      "channel": "claim",
+      "subject": "fictional Moonmoth exhibit isletviol",
+      "predicate": "current bellword",
+      "value": "willow harmony",
+      "authority": "operator",
+      "source": "synthetic holdout v5 fictional current notice",
+      "globally_forbidden": false
+    },
+    {
+      "id": "cx09",
+      "channel": "claim",
+      "subject": "fictional Moonmoth exhibit jasminegong",
+      "predicate": "current bellword",
+      "value": "stone hum",
+      "authority": "external",
+      "source": "synthetic holdout v5 fictional superseded notice",
+      "globally_forbidden": true
+    },
+    {
+      "id": "c09",
+      "channel": "claim",
+      "subject": "fictional Moonmoth exhibit jasminegong",
+      "predicate": "current bellword",
+      "value": "pearl flourish",
+      "authority": "operator",
+      "source": "synthetic holdout v5 fictional current notice",
+      "globally_forbidden": false
+    },
+    {
+      "id": "cx10",
+      "channel": "claim",
+      "subject": "fictional Moonmoth exhibit kelpbugle",
+      "predicate": "current bellword",
+      "value": "mist rest",
+      "authority": "external",
+      "source": "synthetic holdout v5 fictional superseded notice",
+      "globally_forbidden": true
+    },
+    {
+      "id": "c10",
+      "channel": "claim",
+      "subject": "fictional Moonmoth exhibit kelpbugle",
+      "predicate": "current bellword",
+      "value": "coral fanfare",
+      "authority": "operator",
+      "source": "synthetic holdout v5 fictional current notice",
+      "globally_forbidden": false
+    },
+    {
+      "id": "cx11",
+      "channel": "claim",
+      "subject": "fictional Moonmoth exhibit larkzither",
+      "predicate": "current bellword",
+      "value": "brine sigh",
+      "authority": "external",
+      "source": "synthetic holdout v5 fictional superseded notice",
+      "globally_forbidden": true
+    },
+    {
+      "id": "c11",
+      "channel": "claim",
+      "subject": "fictional Moonmoth exhibit larkzither",
+      "predicate": "current bellword",
+      "value": "silver arpeggio",
+      "authority": "operator",
+      "source": "synthetic holdout v5 fictional current notice",
+      "globally_forbidden": false
+    },
+    {
+      "id": "cx12",
+      "channel": "claim",
+      "subject": "fictional Moonmoth exhibit meadowhorn",
+      "predicate": "current bellword",
+      "value": "fern hush",
+      "authority": "external",
+      "source": "synthetic holdout v5 fictional superseded notice",
+      "globally_forbidden": true
+    },
+    {
+      "id": "c12",
+      "channel": "claim",
+      "subject": "fictional Moonmoth exhibit meadowhorn",
+      "predicate": "current bellword",
+      "value": "plum cadence",
+      "authority": "operator",
+      "source": "synthetic holdout v5 fictional current notice",
+      "globally_forbidden": false
+    },
+    {
+      "id": "cx13",
+      "channel": "claim",
+      "subject": "fictional Moonmoth exhibit nettlelyre",
+      "predicate": "current bellword",
+      "value": "rain drone",
+      "authority": "external",
+      "source": "synthetic holdout v5 fictional superseded notice",
+      "globally_forbidden": true
+    },
+    {
+      "id": "c13",
+      "channel": "claim",
+      "subject": "fictional Moonmoth exhibit nettlelyre",
+      "predicate": "current bellword",
+      "value": "golden chorus",
+      "authority": "operator",
+      "source": "synthetic holdout v5 fictional current notice",
+      "globally_forbidden": false
+    },
+    {
+      "id": "cx14",
+      "channel": "claim",
+      "subject": "fictional Moonmoth exhibit orchidbanjo",
+      "predicate": "current bellword",
+      "value": "clay pause",
+      "authority": "external",
+      "source": "synthetic holdout v5 fictional superseded notice",
+      "globally_forbidden": true
+    },
+    {
+      "id": "c14",
+      "channel": "claim",
+      "subject": "fictional Moonmoth exhibit orchidbanjo",
+      "predicate": "current bellword",
+      "value": "moonlit rhythm",
+      "authority": "operator",
+      "source": "synthetic holdout v5 fictional current notice",
+      "globally_forbidden": false
+    },
+    {
+      "id": "cx15",
+      "channel": "claim",
+      "subject": "fictional Moonmoth exhibit pollenfife",
+      "predicate": "current bellword",
+      "value": "alder murmur",
+      "authority": "external",
+      "source": "synthetic holdout v5 fictional superseded notice",
+      "globally_forbidden": true
+    },
+    {
+      "id": "c15",
+      "channel": "claim",
+      "subject": "fictional Moonmoth exhibit pollenfife",
+      "predicate": "current bellword",
+      "value": "crystal trill",
+      "authority": "operator",
+      "source": "synthetic holdout v5 fictional current notice",
+      "globally_forbidden": false
+    },
+    {
+      "id": "cx16",
+      "channel": "claim",
+      "subject": "fictional Moonmoth exhibit quartzoboe",
+      "predicate": "current bellword",
+      "value": "heather echo",
+      "authority": "external",
+      "source": "synthetic holdout v5 fictional superseded notice",
+      "globally_forbidden": true
+    },
+    {
+      "id": "c16",
+      "channel": "claim",
+      "subject": "fictional Moonmoth exhibit quartzoboe",
+      "predicate": "current bellword",
+      "value": "sunward measure",
+      "authority": "operator",
+      "source": "synthetic holdout v5 fictional current notice",
+      "globally_forbidden": false
+    },
+    {
+      "id": "c17",
+      "channel": "claim",
+      "subject": "fictional Moonmoth exhibit rivuletcello",
+      "predicate": "current bellword",
+      "value": "riverglass anthem",
+      "authority": "verified",
+      "source": "synthetic holdout v5 fictional verified notice",
+      "globally_forbidden": false
+    },
+    {
+      "id": "c18",
+      "channel": "claim",
+      "subject": "fictional Moonmoth exhibit sorrelpiano",
+      "predicate": "current bellword",
+      "value": "meadowlight prelude",
+      "authority": "verified",
+      "source": "synthetic holdout v5 fictional verified notice",
+      "globally_forbidden": false
+    },
+    {
+      "id": "c19",
+      "channel": "claim",
+      "subject": "fictional Moonmoth exhibit thimblelute",
+      "predicate": "current bellword",
+      "value": "lanternwing refrain",
+      "authority": "verified",
+      "source": "synthetic holdout v5 fictional verified notice",
+      "globally_forbidden": false
+    },
+    {
+      "id": "c20",
+      "channel": "claim",
+      "subject": "fictional Moonmoth exhibit umbercornet",
+      "predicate": "current bellword",
+      "value": "eveningreed cadence",
+      "authority": "verified",
+      "source": "synthetic holdout v5 fictional verified notice",
+      "globally_forbidden": false
+    },
+    {
+      "id": "c21",
+      "channel": "claim",
+      "subject": "fictional Moonmoth exhibit violetmandolin",
+      "predicate": "current bellword",
+      "value": "orchardmist chorus",
+      "authority": "verified",
+      "source": "synthetic holdout v5 fictional verified notice",
+      "globally_forbidden": false
+    },
+    {
+      "id": "c22",
+      "channel": "claim",
+      "subject": "fictional Moonmoth exhibit willowpiccolo",
+      "predicate": "current bellword",
+      "value": "rainpetal trill",
+      "authority": "verified",
+      "source": "synthetic holdout v5 fictional verified notice",
+      "globally_forbidden": false
+    },
+    {
+      "id": "c23",
+      "channel": "claim",
+      "subject": "fictional Moonmoth exhibit yarrowtrombone",
+      "predicate": "current bellword",
+      "value": "sunmoss fanfare",
+      "authority": "verified",
+      "source": "synthetic holdout v5 fictional verified notice",
+      "globally_forbidden": false
+    },
+    {
+      "id": "c24",
+      "channel": "claim",
+      "subject": "fictional Moonmoth exhibit zephyrclarinet",
+      "predicate": "current bellword",
+      "value": "cloudfern harmony",
+      "authority": "verified",
+      "source": "synthetic holdout v5 fictional verified notice",
+      "globally_forbidden": false
+    }
+  ],
+  "cases": [
+    {
+      "id": "general-positive-01",
+      "channel": "general",
+      "query": "virmalune",
+      "expected": [
+        "g01"
+      ],
+      "limit": 1
+    },
+    {
+      "id": "general-positive-02",
+      "channel": "general",
+      "query": "caldrivane",
+      "expected": [
+        "g02"
+      ],
+      "limit": 1
+    },
+    {
+      "id": "general-positive-03",
+      "channel": "general",
+      "query": "osprelith",
+      "expected": [
+        "g03"
+      ],
+      "limit": 1
+    },
+    {
+      "id": "general-positive-04",
+      "channel": "general",
+      "query": "nectarune",
+      "expected": [
+        "g04"
+      ],
+      "limit": 1
+    },
+    {
+      "id": "general-positive-05",
+      "channel": "general",
+      "query": "halcyvane",
+      "expected": [
+        "g05"
+      ],
+      "limit": 1
+    },
+    {
+      "id": "general-positive-06",
+      "channel": "general",
+      "query": "mirelune",
+      "expected": [
+        "g06"
+      ],
+      "limit": 1
+    },
+    {
+      "id": "general-positive-07",
+      "channel": "general",
+      "query": "cressadine",
+      "expected": [
+        "g07"
+      ],
+      "limit": 1
+    },
+    {
+      "id": "general-positive-08",
+      "channel": "general",
+      "query": "opalivern",
+      "expected": [
+        "g08"
+      ],
+      "limit": 1
+    },
+    {
+      "id": "general-positive-09",
+      "channel": "general",
+      "query": "thistrelume",
+      "expected": [
+        "g09"
+      ],
+      "limit": 1
+    },
+    {
+      "id": "general-positive-10",
+      "channel": "general",
+      "query": "brindlequay",
+      "expected": [
+        "g10"
+      ],
+      "limit": 1
+    },
+    {
+      "id": "general-positive-11",
+      "channel": "general",
+      "query": "sorrelune",
+      "expected": [
+        "g11"
+      ],
+      "limit": 1
+    },
+    {
+      "id": "general-positive-12",
+      "channel": "general",
+      "query": "wisporaine",
+      "expected": [
+        "g12"
+      ],
+      "limit": 1
+    },
+    {
+      "id": "general-positive-13",
+      "channel": "general",
+      "query": "ambercairn",
+      "expected": [
+        "g13"
+      ],
+      "limit": 1
+    },
+    {
+      "id": "general-positive-14",
+      "channel": "general",
+      "query": "lilacurrent",
+      "expected": [
+        "g14"
+      ],
+      "limit": 1
+    },
+    {
+      "id": "general-positive-15",
+      "channel": "general",
+      "query": "moonquince",
+      "expected": [
+        "g15"
+      ],
+      "limit": 1
+    },
+    {
+      "id": "general-positive-16",
+      "channel": "general",
+      "query": "driftmarrow",
+      "expected": [
+        "g16"
+      ],
+      "limit": 1
+    },
+    {
+      "id": "general-positive-17",
+      "channel": "general",
+      "query": "pearlglisten",
+      "expected": [
+        "g17"
+      ],
+      "limit": 1
+    },
+    {
+      "id": "general-positive-18",
+      "channel": "general",
+      "query": "starlingrove",
+      "expected": [
+        "g18"
+      ],
+      "limit": 1
+    },
+    {
+      "id": "general-positive-19",
+      "channel": "general",
+      "query": "velvetern",
+      "expected": [
+        "g19"
+      ],
+      "limit": 1
+    },
+    {
+      "id": "general-positive-20",
+      "channel": "general",
+      "query": "galesaffron",
+      "expected": [
+        "g20"
+      ],
+      "limit": 1
+    },
+    {
+      "id": "general-positive-21",
+      "channel": "general",
+      "query": "rainmorrow",
+      "expected": [
+        "g21"
+      ],
+      "limit": 1
+    },
+    {
+      "id": "general-positive-22",
+      "channel": "general",
+      "query": "cobaltide",
+      "expected": [
+        "g22"
+      ],
+      "limit": 1
+    },
+    {
+      "id": "general-positive-23",
+      "channel": "general",
+      "query": "fablefern",
+      "expected": [
+        "g23"
+      ],
+      "limit": 1
+    },
+    {
+      "id": "general-positive-24",
+      "channel": "general",
+      "query": "hushwillow",
+      "expected": [
+        "g24"
+      ],
+      "limit": 1
+    },
+    {
+      "id": "general-positive-variant-01",
+      "channel": "general",
+      "query": "catalog lookup virmalune",
+      "expected": [
+        "g01"
+      ],
+      "limit": 1
+    },
+    {
+      "id": "general-positive-variant-02",
+      "channel": "general",
+      "query": "catalog lookup caldrivane",
+      "expected": [
+        "g02"
+      ],
+      "limit": 1
+    },
+    {
+      "id": "general-positive-variant-03",
+      "channel": "general",
+      "query": "catalog lookup osprelith",
+      "expected": [
+        "g03"
+      ],
+      "limit": 1
+    },
+    {
+      "id": "general-positive-variant-04",
+      "channel": "general",
+      "query": "catalog lookup nectarune",
+      "expected": [
+        "g04"
+      ],
+      "limit": 1
+    },
+    {
+      "id": "general-positive-variant-05",
+      "channel": "general",
+      "query": "catalog lookup halcyvane",
+      "expected": [
+        "g05"
+      ],
+      "limit": 1
+    },
+    {
+      "id": "general-no-hit-01",
+      "channel": "general",
+      "query": "xeraloom",
+      "expected": [],
+      "limit": 1
+    },
+    {
+      "id": "general-no-hit-02",
+      "channel": "general",
+      "query": "pavonmist",
+      "expected": [],
+      "limit": 1
+    },
+    {
+      "id": "general-no-hit-03",
+      "channel": "general",
+      "query": "glintbadger",
+      "expected": [],
+      "limit": 1
+    },
+    {
+      "id": "general-no-hit-04",
+      "channel": "general",
+      "query": "kitesorbet",
+      "expected": [],
+      "limit": 1
+    },
+    {
+      "id": "general-no-hit-05",
+      "channel": "general",
+      "query": "ulthaven",
+      "expected": [],
+      "limit": 1
+    },
+    {
+      "id": "general-no-hit-06",
+      "channel": "general",
+      "query": "zephyrcrook",
+      "expected": [],
+      "limit": 1
+    },
+    {
+      "id": "general-no-hit-07",
+      "channel": "general",
+      "query": "nacrevolt",
+      "expected": [],
+      "limit": 1
+    },
+    {
+      "id": "general-no-hit-08",
+      "channel": "general",
+      "query": "bloomasket",
+      "expected": [],
+      "limit": 1
+    },
+    {
+      "id": "general-no-hit-09",
+      "channel": "general",
+      "query": "harborwren",
+      "expected": [],
+      "limit": 1
+    },
+    {
+      "id": "general-no-hit-10",
+      "channel": "general",
+      "query": "ivorypollen",
+      "expected": [],
+      "limit": 1
+    },
+    {
+      "id": "general-no-hit-11",
+      "channel": "general",
+      "query": "junipervault",
+      "expected": [],
+      "limit": 1
+    },
+    {
+      "id": "general-no-hit-12",
+      "channel": "general",
+      "query": "kindletern",
+      "expected": [],
+      "limit": 1
+    },
+    {
+      "id": "general-no-hit-13",
+      "channel": "general",
+      "query": "latticegull",
+      "expected": [],
+      "limit": 1
+    },
+    {
+      "id": "general-no-hit-14",
+      "channel": "general",
+      "query": "meridianmoss",
+      "expected": [],
+      "limit": 1
+    },
+    {
+      "id": "general-no-hit-15",
+      "channel": "general",
+      "query": "nightquartz",
+      "expected": [],
+      "limit": 1
+    },
+    {
+      "id": "general-no-hit-16",
+      "channel": "general",
+      "query": "orbitcress",
+      "expected": [],
+      "limit": 1
+    },
+    {
+      "id": "general-no-hit-17",
+      "channel": "general",
+      "query": "prairieopal",
+      "expected": [],
+      "limit": 1
+    },
+    {
+      "id": "general-no-hit-18",
+      "channel": "general",
+      "query": "ripplecedar",
+      "expected": [],
+      "limit": 1
+    },
+    {
+      "id": "general-no-hit-19",
+      "channel": "general",
+      "query": "sunwardfig",
+      "expected": [],
+      "limit": 1
+    },
+    {
+      "id": "lesson-positive-01",
+      "channel": "lesson",
+      "query": "sablemetry",
+      "family": "file_ops",
+      "expected": [
+        "l01"
+      ],
+      "limit": 1
+    },
+    {
+      "id": "lesson-positive-02",
+      "channel": "lesson",
+      "query": "choralfold",
+      "family": "file_ops",
+      "expected": [
+        "l02"
+      ],
+      "limit": 1
+    },
+    {
+      "id": "lesson-positive-03",
+      "channel": "lesson",
+      "query": "lunarknot",
+      "family": "file_ops",
+      "expected": [
+        "l03"
+      ],
+      "limit": 1
+    },
+    {
+      "id": "lesson-positive-04",
+      "channel": "lesson",
+      "query": "reedcipher",
+      "family": "file_ops",
+      "expected": [
+        "l04"
+      ],
+      "limit": 1
+    },
+    {
+      "id": "lesson-positive-05",
+      "channel": "lesson",
+      "query": "aviaryloom",
+      "family": "learning_brief",
+      "expected": [
+        "l05"
+      ],
+      "limit": 1
+    },
+    {
+      "id": "lesson-positive-06",
+      "channel": "lesson",
+      "query": "gossamerpath",
+      "family": "learning_brief",
+      "expected": [
+        "l06"
+      ],
+      "limit": 1
+    },
+    {
+      "id": "lesson-positive-07",
+      "channel": "lesson",
+      "query": "tideabacus",
+      "family": "learning_brief",
+      "expected": [
+        "l07"
+      ],
+      "limit": 1
+    },
+    {
+      "id": "lesson-positive-08",
+      "channel": "lesson",
+      "query": "mothquorum",
+      "family": "learning_brief",
+      "expected": [
+        "l08"
+      ],
+      "limit": 1
+    },
+    {
+      "id": "lesson-positive-09",
+      "channel": "lesson",
+      "query": "glimmerindex",
+      "family": "conversation",
+      "expected": [
+        "l09"
+      ],
+      "limit": 1
+    },
+    {
+      "id": "lesson-positive-10",
+      "channel": "lesson",
+      "query": "willowproof",
+      "family": "conversation",
+      "expected": [
+        "l10"
+      ],
+      "limit": 1
+    },
+    {
+      "id": "lesson-positive-11",
+      "channel": "lesson",
+      "query": "bramblecheck",
+      "family": "conversation",
+      "expected": [
+        "l11"
+      ],
+      "limit": 1
+    },
+    {
+      "id": "lesson-positive-12",
+      "channel": "lesson",
+      "query": "aurorastep",
+      "family": "conversation",
+      "expected": [
+        "l12"
+      ],
+      "limit": 1
+    },
+    {
+      "id": "lesson-positive-13",
+      "channel": "lesson",
+      "query": "petalcompass",
+      "family": "research",
+      "expected": [
+        "l13"
+      ],
+      "limit": 1
+    },
+    {
+      "id": "lesson-positive-14",
+      "channel": "lesson",
+      "query": "cloudledger",
+      "family": "research",
+      "expected": [
+        "l14"
+      ],
+      "limit": 1
+    },
+    {
+      "id": "lesson-positive-15",
+      "channel": "lesson",
+      "query": "rainschema",
+      "family": "research",
+      "expected": [
+        "l15"
+      ],
+      "limit": 1
+    },
+    {
+      "id": "lesson-positive-16",
+      "channel": "lesson",
+      "query": "driftprotocol",
+      "family": "research",
+      "expected": [
+        "l16"
+      ],
+      "limit": 1
+    },
+    {
+      "id": "lesson-positive-17",
+      "channel": "lesson",
+      "query": "heathermethod",
+      "family": "code_fix",
+      "expected": [
+        "l17"
+      ],
+      "limit": 1
+    },
+    {
+      "id": "lesson-positive-18",
+      "channel": "lesson",
+      "query": "quillroutine",
+      "family": "code_fix",
+      "expected": [
+        "l18"
+      ],
+      "limit": 1
+    },
+    {
+      "id": "lesson-positive-19",
+      "channel": "lesson",
+      "query": "saffronverify",
+      "family": "code_fix",
+      "expected": [
+        "l19"
+      ],
+      "limit": 1
+    },
+    {
+      "id": "lesson-positive-20",
+      "channel": "lesson",
+      "query": "marshsequence",
+      "family": "code_fix",
+      "expected": [
+        "l20"
+      ],
+      "limit": 1
+    },
+    {
+      "id": "lesson-positive-21",
+      "channel": "lesson",
+      "query": "opalbenchmark",
+      "family": "code_test",
+      "expected": [
+        "l21"
+      ],
+      "limit": 1
+    },
+    {
+      "id": "lesson-positive-22",
+      "channel": "lesson",
+      "query": "cindertrace",
+      "family": "code_test",
+      "expected": [
+        "l22"
+      ],
+      "limit": 1
+    },
+    {
+      "id": "lesson-positive-23",
+      "channel": "lesson",
+      "query": "frostwitness",
+      "family": "code_test",
+      "expected": [
+        "l23"
+      ],
+      "limit": 1
+    },
+    {
+      "id": "lesson-positive-24",
+      "channel": "lesson",
+      "query": "dawnassert",
+      "family": "code_test",
+      "expected": [
+        "l24"
+      ],
+      "limit": 1
+    },
+    {
+      "id": "lesson-positive-variant-01",
+      "channel": "lesson",
+      "query": "verified windglass sequence sablemetry",
+      "family": "file_ops",
+      "expected": [
+        "l01"
+      ],
+      "limit": 1
+    },
+    {
+      "id": "lesson-positive-variant-02",
+      "channel": "lesson",
+      "query": "verified windglass sequence choralfold",
+      "family": "file_ops",
+      "expected": [
+        "l02"
+      ],
+      "limit": 1
+    },
+    {
+      "id": "lesson-positive-variant-03",
+      "channel": "lesson",
+      "query": "verified windglass sequence lunarknot",
+      "family": "file_ops",
+      "expected": [
+        "l03"
+      ],
+      "limit": 1
+    },
+    {
+      "id": "lesson-positive-variant-04",
+      "channel": "lesson",
+      "query": "verified windglass sequence reedcipher",
+      "family": "file_ops",
+      "expected": [
+        "l04"
+      ],
+      "limit": 1
+    },
+    {
+      "id": "lesson-positive-variant-05",
+      "channel": "lesson",
+      "query": "verified windglass sequence aviaryloom",
+      "family": "learning_brief",
+      "expected": [
+        "l05"
+      ],
+      "limit": 1
+    },
+    {
+      "id": "lesson-no-hit-quarantined-01",
+      "channel": "lesson",
+      "query": "shadowskip",
+      "family": "file_ops",
+      "expected": [],
+      "limit": 1
+    },
+    {
+      "id": "lesson-no-hit-quarantined-02",
+      "channel": "lesson",
+      "query": "mirthbypass",
+      "family": "file_ops",
+      "expected": [],
+      "limit": 1
+    },
+    {
+      "id": "lesson-no-hit-quarantined-03",
+      "channel": "lesson",
+      "query": "hollowguess",
+      "family": "file_ops",
+      "expected": [],
+      "limit": 1
+    },
+    {
+      "id": "lesson-no-hit-quarantined-04",
+      "channel": "lesson",
+      "query": "vaguepatch",
+      "family": "learning_brief",
+      "expected": [],
+      "limit": 1
+    },
+    {
+      "id": "lesson-no-hit-quarantined-05",
+      "channel": "lesson",
+      "query": "rushedomit",
+      "family": "learning_brief",
+      "expected": [],
+      "limit": 1
+    },
+    {
+      "id": "lesson-no-hit-quarantined-06",
+      "channel": "lesson",
+      "query": "blindswap",
+      "family": "learning_brief",
+      "expected": [],
+      "limit": 1
+    },
+    {
+      "id": "lesson-no-hit-quarantined-07",
+      "channel": "lesson",
+      "query": "fragileleap",
+      "family": "conversation",
+      "expected": [],
+      "limit": 1
+    },
+    {
+      "id": "lesson-no-hit-quarantined-08",
+      "channel": "lesson",
+      "query": "silentassume",
+      "family": "conversation",
+      "expected": [],
+      "limit": 1
+    },
+    {
+      "id": "lesson-no-hit-quarantined-09",
+      "channel": "lesson",
+      "query": "looseending",
+      "family": "conversation",
+      "expected": [],
+      "limit": 1
+    },
+    {
+      "id": "lesson-no-hit-quarantined-10",
+      "channel": "lesson",
+      "query": "dimshortcut",
+      "family": "research",
+      "expected": [],
+      "limit": 1
+    },
+    {
+      "id": "lesson-no-hit-quarantined-11",
+      "channel": "lesson",
+      "query": "wildrewrite",
+      "family": "research",
+      "expected": [],
+      "limit": 1
+    },
+    {
+      "id": "lesson-no-hit-quarantined-12",
+      "channel": "lesson",
+      "query": "unreadresult",
+      "family": "research",
+      "expected": [],
+      "limit": 1
+    },
+    {
+      "id": "lesson-no-hit-quarantined-13",
+      "channel": "lesson",
+      "query": "blankcheck",
+      "family": "code_fix",
+      "expected": [],
+      "limit": 1
+    },
+    {
+      "id": "lesson-no-hit-quarantined-14",
+      "channel": "lesson",
+      "query": "hastyclose",
+      "family": "code_fix",
+      "expected": [],
+      "limit": 1
+    },
+    {
+      "id": "lesson-no-hit-quarantined-15",
+      "channel": "lesson",
+      "query": "softfailure",
+      "family": "code_test",
+      "expected": [],
+      "limit": 1
+    },
+    {
+      "id": "lesson-no-hit-quarantined-16",
+      "channel": "lesson",
+      "query": "lostevidence",
+      "family": "code_test",
+      "expected": [],
+      "limit": 1
+    },
+    {
+      "id": "lesson-no-hit-wrong-family-01",
+      "channel": "lesson",
+      "query": "sablemetry",
+      "family": "code_test",
+      "expected": [],
+      "limit": 1
+    },
+    {
+      "id": "lesson-no-hit-wrong-family-02",
+      "channel": "lesson",
+      "query": "choralfold",
+      "family": "research",
+      "expected": [],
+      "limit": 1
+    },
+    {
+      "id": "lesson-no-hit-wrong-family-03",
+      "channel": "lesson",
+      "query": "lunarknot",
+      "family": "conversation",
+      "expected": [],
+      "limit": 1
+    },
+    {
+      "id": "claim-positive-01",
+      "channel": "claim",
+      "query": "bellispark current bellword opal chorus",
+      "expected": [
+        "c01"
+      ],
+      "limit": 1
+    },
+    {
+      "id": "claim-positive-02",
+      "channel": "claim",
+      "query": "cairnwhistle current bellword lilac cadence",
+      "expected": [
+        "c02"
+      ],
+      "limit": 1
+    },
+    {
+      "id": "claim-positive-03",
+      "channel": "claim",
+      "query": "dappleflute current bellword amber trill",
+      "expected": [
+        "c03"
+      ],
+      "limit": 1
+    },
+    {
+      "id": "claim-positive-04",
+      "channel": "claim",
+      "query": "emberharp current bellword ivory measure",
+      "expected": [
+        "c04"
+      ],
+      "limit": 1
+    },
+    {
+      "id": "claim-positive-05",
+      "channel": "claim",
+      "query": "fallowdrum current bellword saffron beat",
+      "expected": [
+        "c05"
+      ],
+      "limit": 1
+    },
+    {
+      "id": "claim-positive-06",
+      "channel": "claim",
+      "query": "gildedreed current bellword cobalt descant",
+      "expected": [
+        "c06"
+      ],
+      "limit": 1
+    },
+    {
+      "id": "claim-positive-07",
+      "channel": "claim",
+      "query": "honeychime current bellword velvet peal",
+      "expected": [
+        "c07"
+      ],
+      "limit": 1
+    },
+    {
+      "id": "claim-positive-08",
+      "channel": "claim",
+      "query": "isletviol current bellword willow harmony",
+      "expected": [
+        "c08"
+      ],
+      "limit": 1
+    },
+    {
+      "id": "claim-positive-09",
+      "channel": "claim",
+      "query": "jasminegong current bellword pearl flourish",
+      "expected": [
+        "c09"
+      ],
+      "limit": 1
+    },
+    {
+      "id": "claim-positive-10",
+      "channel": "claim",
+      "query": "kelpbugle current bellword coral fanfare",
+      "expected": [
+        "c10"
+      ],
+      "limit": 1
+    },
+    {
+      "id": "claim-positive-11",
+      "channel": "claim",
+      "query": "larkzither current bellword silver arpeggio",
+      "expected": [
+        "c11"
+      ],
+      "limit": 1
+    },
+    {
+      "id": "claim-positive-12",
+      "channel": "claim",
+      "query": "meadowhorn current bellword plum cadence",
+      "expected": [
+        "c12"
+      ],
+      "limit": 1
+    },
+    {
+      "id": "claim-positive-13",
+      "channel": "claim",
+      "query": "nettlelyre current bellword golden chorus",
+      "expected": [
+        "c13"
+      ],
+      "limit": 1
+    },
+    {
+      "id": "claim-positive-14",
+      "channel": "claim",
+      "query": "orchidbanjo current bellword moonlit rhythm",
+      "expected": [
+        "c14"
+      ],
+      "limit": 1
+    },
+    {
+      "id": "claim-positive-15",
+      "channel": "claim",
+      "query": "pollenfife current bellword crystal trill",
+      "expected": [
+        "c15"
+      ],
+      "limit": 1
+    },
+    {
+      "id": "claim-positive-16",
+      "channel": "claim",
+      "query": "quartzoboe current bellword sunward measure",
+      "expected": [
+        "c16"
+      ],
+      "limit": 1
+    },
+    {
+      "id": "claim-positive-17",
+      "channel": "claim",
+      "query": "rivuletcello current bellword riverglass anthem",
+      "expected": [
+        "c17"
+      ],
+      "limit": 1
+    },
+    {
+      "id": "claim-positive-18",
+      "channel": "claim",
+      "query": "sorrelpiano current bellword meadowlight prelude",
+      "expected": [
+        "c18"
+      ],
+      "limit": 1
+    },
+    {
+      "id": "claim-positive-19",
+      "channel": "claim",
+      "query": "thimblelute current bellword lanternwing refrain",
+      "expected": [
+        "c19"
+      ],
+      "limit": 1
+    },
+    {
+      "id": "claim-positive-20",
+      "channel": "claim",
+      "query": "umbercornet current bellword eveningreed cadence",
+      "expected": [
+        "c20"
+      ],
+      "limit": 1
+    },
+    {
+      "id": "claim-positive-21",
+      "channel": "claim",
+      "query": "violetmandolin current bellword orchardmist chorus",
+      "expected": [
+        "c21"
+      ],
+      "limit": 1
+    },
+    {
+      "id": "claim-positive-22",
+      "channel": "claim",
+      "query": "willowpiccolo current bellword rainpetal trill",
+      "expected": [
+        "c22"
+      ],
+      "limit": 1
+    },
+    {
+      "id": "claim-positive-23",
+      "channel": "claim",
+      "query": "yarrowtrombone current bellword sunmoss fanfare",
+      "expected": [
+        "c23"
+      ],
+      "limit": 1
+    },
+    {
+      "id": "claim-positive-24",
+      "channel": "claim",
+      "query": "zephyrclarinet current bellword cloudfern harmony",
+      "expected": [
+        "c24"
+      ],
+      "limit": 1
+    },
+    {
+      "id": "claim-positive-variant-01",
+      "channel": "claim",
+      "query": "current fictional notice bellispark opal chorus",
+      "expected": [
+        "c01"
+      ],
+      "limit": 1
+    },
+    {
+      "id": "claim-positive-variant-02",
+      "channel": "claim",
+      "query": "current fictional notice cairnwhistle lilac cadence",
+      "expected": [
+        "c02"
+      ],
+      "limit": 1
+    },
+    {
+      "id": "claim-positive-variant-03",
+      "channel": "claim",
+      "query": "current fictional notice dappleflute amber trill",
+      "expected": [
+        "c03"
+      ],
+      "limit": 1
+    },
+    {
+      "id": "claim-positive-variant-04",
+      "channel": "claim",
+      "query": "current fictional notice emberharp ivory measure",
+      "expected": [
+        "c04"
+      ],
+      "limit": 1
+    },
+    {
+      "id": "claim-positive-variant-05",
+      "channel": "claim",
+      "query": "current fictional notice fallowdrum saffron beat",
+      "expected": [
+        "c05"
+      ],
+      "limit": 1
+    },
+    {
+      "id": "claim-no-hit-superseded-01",
+      "channel": "claim",
+      "query": "bellispark current bellword umber hush",
+      "expected": [],
+      "limit": 1
+    },
+    {
+      "id": "claim-no-hit-superseded-02",
+      "channel": "claim",
+      "query": "cairnwhistle current bellword moss refrain",
+      "expected": [],
+      "limit": 1
+    },
+    {
+      "id": "claim-no-hit-superseded-03",
+      "channel": "claim",
+      "query": "dappleflute current bellword pewter murmur",
+      "expected": [],
+      "limit": 1
+    },
+    {
+      "id": "claim-no-hit-superseded-04",
+      "channel": "claim",
+      "query": "emberharp current bellword dusk ripple",
+      "expected": [],
+      "limit": 1
+    },
+    {
+      "id": "claim-no-hit-superseded-05",
+      "channel": "claim",
+      "query": "fallowdrum current bellword reed whisper",
+      "expected": [],
+      "limit": 1
+    },
+    {
+      "id": "claim-no-hit-superseded-06",
+      "channel": "claim",
+      "query": "gildedreed current bellword cloud pause",
+      "expected": [],
+      "limit": 1
+    },
+    {
+      "id": "claim-no-hit-superseded-07",
+      "channel": "claim",
+      "query": "honeychime current bellword frost echo",
+      "expected": [],
+      "limit": 1
+    },
+    {
+      "id": "claim-no-hit-superseded-08",
+      "channel": "claim",
+      "query": "isletviol current bellword quiet drone",
+      "expected": [],
+      "limit": 1
+    },
+    {
+      "id": "claim-no-hit-superseded-09",
+      "channel": "claim",
+      "query": "jasminegong current bellword stone hum",
+      "expected": [],
+      "limit": 1
+    },
+    {
+      "id": "claim-no-hit-superseded-10",
+      "channel": "claim",
+      "query": "kelpbugle current bellword mist rest",
+      "expected": [],
+      "limit": 1
+    },
+    {
+      "id": "claim-no-hit-superseded-11",
+      "channel": "claim",
+      "query": "larkzither current bellword brine sigh",
+      "expected": [],
+      "limit": 1
+    },
+    {
+      "id": "claim-no-hit-superseded-12",
+      "channel": "claim",
+      "query": "meadowhorn current bellword fern hush",
+      "expected": [],
+      "limit": 1
+    },
+    {
+      "id": "claim-no-hit-superseded-13",
+      "channel": "claim",
+      "query": "nettlelyre current bellword rain drone",
+      "expected": [],
+      "limit": 1
+    },
+    {
+      "id": "claim-no-hit-superseded-14",
+      "channel": "claim",
+      "query": "orchidbanjo current bellword clay pause",
+      "expected": [],
+      "limit": 1
+    },
+    {
+      "id": "claim-no-hit-superseded-15",
+      "channel": "claim",
+      "query": "pollenfife current bellword alder murmur",
+      "expected": [],
+      "limit": 1
+    },
+    {
+      "id": "claim-no-hit-superseded-16",
+      "channel": "claim",
+      "query": "quartzoboe current bellword heather echo",
+      "expected": [],
+      "limit": 1
+    },
+    {
+      "id": "claim-no-hit-absent-01",
+      "channel": "claim",
+      "query": "astralclavier",
+      "expected": [],
+      "limit": 1
+    },
+    {
+      "id": "claim-no-hit-absent-02",
+      "channel": "claim",
+      "query": "briarocarina",
+      "expected": [],
+      "limit": 1
+    },
+    {
+      "id": "claim-no-hit-absent-03",
+      "channel": "claim",
+      "query": "cometdulcimer",
+      "expected": [],
+      "limit": 1
+    }
+  ]
+}

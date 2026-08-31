@@ -162,7 +162,7 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw "Smoke virtual environment creation failed with exit code $LASTEXITCODE" }
           $python = Join-Path $smoke "Scripts\python.exe"
           $scripts = Join-Path $smoke "Scripts"
-          & $python -m pip install --disable-pip-version-check --no-deps $wheel
+          & $python -m pip install --disable-pip-version-check $wheel
           if ($LASTEXITCODE -ne 0) { throw "Wheel installation failed with exit code $LASTEXITCODE" }
           New-Item -ItemType Directory -Force -Path $outside, $data | Out-Null
           Push-Location $outside
@@ -170,8 +170,12 @@ jobs:
             $env:JARVIS_DATA = $data
             & $python -c "import importlib.metadata as m; eps={e.name:e for e in m.entry_points(group='console_scripts') if e.dist and e.dist.name=='jarvis-local'}; expected={'jarvis','jarvis-ui','jarvis-presence','jarvis-public-presence'}; assert expected <= set(eps); [eps[name].load() for name in sorted(expected)]"
             if ($LASTEXITCODE -ne 0) { throw "Installed entry-point import smoke test failed with exit code $LASTEXITCODE" }
+            & $python -c "import importlib.metadata as m; from importlib.resources import files; from jarvis.long_horizon import LongHorizonStore; reqs=m.requires('jarvis-local') or []; assert any(r.lower().startswith('cryptography') for r in reqs); fixture=files('jarvis').joinpath('evaluation_fixtures/long_horizon_restart_holdout_v1.json'); assert fixture.is_file(); assert LongHorizonStore is not None"
+            if ($LASTEXITCODE -ne 0) { throw "Installed Phase 5 runtime/fixture smoke test failed with exit code $LASTEXITCODE" }
             & (Join-Path $scripts "jarvis.exe") --help | Out-Null
             if ($LASTEXITCODE -ne 0) { throw "jarvis --help failed with exit code $LASTEXITCODE" }
+            & (Join-Path $scripts "jarvis.exe") workflow --help | Out-Null
+            if ($LASTEXITCODE -ne 0) { throw "jarvis workflow --help failed with exit code $LASTEXITCODE" }
             & (Join-Path $scripts "jarvis-public-presence.exe") health | Out-Null
             if ($LASTEXITCODE -ne 0) { throw "jarvis-public-presence health failed with exit code $LASTEXITCODE" }
           } finally {

@@ -107,7 +107,7 @@ def training_prompt_split(prompt: str, task_kind: str) -> str:
     return "train" if bucket < 80 else "validation" if bucket < 90 else "test"
 
 
-SCHEMA_VERSION = 39
+SCHEMA_VERSION = 40
 
 LESSON_DEFAULT_TTL_DAYS = 180
 LESSON_REUSABLE_PREDICTION_ORIGINS = frozenset({
@@ -808,6 +808,9 @@ class Memory:
             if version < 39:
                 self._migrate_v39()
                 version = 39
+            if version < 40:
+                self._migrate_v40()
+                version = 40
             self.db.execute(f"PRAGMA user_version={version}")
 
     def _migrate_v1(self) -> None:
@@ -2925,6 +2928,26 @@ class Memory:
                    manifest_id, target_family, status, family_sequence
                )"""
         )
+
+    def _migrate_v40(self) -> None:
+        """Add the fail-closed long-horizon workflow substrate."""
+        from .long_horizon import migrate_long_horizon_v40
+
+        # user_version<40 proves no v40 row is authoritative. Remove only
+        # v40-owned partial tables so an interrupted/manual partial migration
+        # cannot preserve a weaker schema across reopen.
+        for table in (
+            "long_horizon_final_verifications",
+            "long_horizon_authorities",
+            "long_horizon_usage_reservations",
+            "long_horizon_retry_receipts",
+            "long_horizon_mutation_receipts",
+            "long_horizon_checkpoints",
+            "long_horizon_stages",
+            "long_horizon_plans",
+        ):
+            self.db.execute(f"DROP TABLE IF EXISTS {table}")
+        migrate_long_horizon_v40(self.db)
 
     @staticmethod
     def _project_id(value: int | None) -> int:

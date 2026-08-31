@@ -18,8 +18,8 @@ FIXTURE = (
     / "evaluation_fixtures"
     / "strategy_transfer_trial_holdout_v1.json"
 )
-ARTIFACT_SHA256 = "170b28897a15e37520ac1d3ded4a533966e43e583ab58e47a1ab8c24d76bb0a1"
-MANIFEST_SHA256 = "c440838fedbc98d6c9c9a0576ceeeda745acfaf733c02ab43d9c72eccaf9d230"
+ARTIFACT_SHA256 = "92fec39aa7e324433f6d4445ceefd51d544c766415bac499afbdad226163b425"
+MANIFEST_SHA256 = "206ac2cb1cd852f60c800bda9dcf9c74a4191de423fc767a8fa8816f3cb340a5"
 EVALUATOR_SHA256 = "1998d4f177bb2a8f10b0fcdee162aec4a3e681c82d2b97b31a8df55b38c1dc8b"
 
 
@@ -69,7 +69,7 @@ class StrategyTransferTrialEvalTests(unittest.TestCase):
             expected_manifest_sha256=MANIFEST_SHA256,
         )
 
-    def test_v39_fixture_and_pure_export_pass_without_activation(self):
+    def test_v39_fixture_resealed_for_current_runtime_passes_without_activation(self):
         fixture_bytes = FIXTURE.read_bytes()
         self.assertNotIn(
             b"\r\n",

@@ -15,6 +15,15 @@ STRATEGY_VOCABULARY = (
     "compare_authoritative_sources",
 )
 STRATEGY_SET = frozenset(STRATEGY_VOCABULARY)
+STRATEGY_TRANSFER_MODES = frozenset({"disabled", "observe", "trial", "advise"})
+
+_STRATEGY_EVIDENCE_FIELDS = frozenset({
+    "schema",
+    "inspect_before_change",
+    "checkpoint_and_resume",
+    "verify_output",
+    "compare_authoritative_sources",
+})
 
 TASK_SIGNAL_TO_STRATEGY = MappingProxyType({
     "changes_existing_state": "inspect_before_change",
@@ -45,6 +54,122 @@ _IDENTIFIER_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,95}$")
 
 class StrategyTransferError(ValueError):
     """A bounded transfer input is malformed or exceeds its contract."""
+
+
+def strategy_target_from_runtime(
+    *,
+    task_id: str,
+    family: str,
+    changes_existing_state: bool,
+    resumable: bool,
+    verification: str,
+    current_external_facts: bool,
+) -> dict[str, Any]:
+    """Build the closed transfer target from already-resolved runtime facts.
+
+    This helper deliberately accepts no prompt, goal text, model prose, path,
+    URL, tool name, or permission field.  It can request procedural advice but
+    cannot widen the task that the normal runtime already authorized.
+    """
+    normalized_task_id = _bounded_identifier(task_id, "task_id")
+    normalized_family = _bounded_identifier(family, "target family")
+    flags = {
+        "changes_existing_state": changes_existing_state,
+        "long_running_or_resumable": resumable,
+        "has_verifiable_output": verification != "not_applicable",
+        "depends_on_current_external_facts": current_external_facts,
+    }
+    for label, value in flags.items():
+        if not isinstance(value, bool):
+            raise StrategyTransferError(f"runtime signal {label} must be a boolean")
+    if not isinstance(verification, str) or verification not in {
+        "process_evidence", "cited_sources", "tool_success", "not_applicable",
+    }:
+        raise StrategyTransferError("runtime verification is unsupported")
+    if current_external_facts and verification != "cited_sources":
+        raise StrategyTransferError(
+            "current external facts require cited-source verification"
+        )
+    return {
+        "task_id": normalized_task_id,
+        "family": normalized_family,
+        "signals": flags,
+    }
+
+
+def strategy_evidence_from_runtime(
+    *,
+    successful_markers: Sequence[str],
+    verification: str,
+    evidence_ok: bool | None,
+    resumed: bool,
+    authoritative_source_count: int,
+) -> dict[str, Any]:
+    """Derive reusable strategy observations from bounded runtime receipts.
+
+    Free-form lesson text is intentionally absent.  A marker can establish only
+    one of four fixed procedures; it can never name a tool or confer authority.
+    """
+    if isinstance(successful_markers, (str, bytes)) or not isinstance(
+        successful_markers, Sequence
+    ):
+        raise StrategyTransferError("successful markers must be an array")
+    if len(successful_markers) > 256:
+        raise StrategyTransferError("successful marker set exceeds 256 items")
+    markers: set[str] = set()
+    for raw in successful_markers:
+        if not isinstance(raw, str) or len(raw) > 120:
+            raise StrategyTransferError("successful marker is malformed")
+        markers.add(raw)
+    if verification not in {
+        "process_evidence", "cited_sources", "tool_success", "not_applicable",
+    }:
+        raise StrategyTransferError("runtime verification is unsupported")
+    if evidence_ok is not None and not isinstance(evidence_ok, bool):
+        raise StrategyTransferError("evidence_ok must be true, false, or null")
+    if not isinstance(resumed, bool):
+        raise StrategyTransferError("resumed must be a boolean")
+    if (
+        isinstance(authoritative_source_count, bool)
+        or not isinstance(authoritative_source_count, int)
+        or not 0 <= authoritative_source_count <= 10_000
+    ):
+        raise StrategyTransferError(
+            "authoritative_source_count must be a bounded non-negative integer"
+        )
+    verified = evidence_ok is True
+    return {
+        "schema": "jarvis.strategy-evidence.v1",
+        "inspect_before_change": verified and {
+            "__inspected_before_write__", "__inspected_after_write__",
+        }.issubset(markers),
+        "checkpoint_and_resume": verified and resumed,
+        "verify_output": verified and verification != "not_applicable",
+        "compare_authoritative_sources": (
+            verified
+            and verification == "cited_sources"
+            and authoritative_source_count >= 2
+        ),
+    }
+
+
+def strategies_from_evidence(payload: Mapping[str, Any]) -> tuple[str, ...]:
+    """Validate one closed evidence payload and return its ordered strategies."""
+    if not isinstance(payload, Mapping):
+        raise StrategyTransferError("strategy evidence must be an object")
+    _exact_fields(payload, _STRATEGY_EVIDENCE_FIELDS, "strategy evidence")
+    if payload.get("schema") != "jarvis.strategy-evidence.v1":
+        raise StrategyTransferError("strategy evidence schema is unsupported")
+    selected: list[str] = []
+    for strategy in STRATEGY_VOCABULARY:
+        value = payload.get(strategy)
+        if not isinstance(value, bool):
+            raise StrategyTransferError(
+                f"strategy evidence {strategy} must be a boolean"
+            )
+        if value:
+            selected.append(strategy)
+    return tuple(selected)
 
 
 @dataclass(frozen=True)

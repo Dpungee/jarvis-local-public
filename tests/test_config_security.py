@@ -83,6 +83,7 @@ class ConfigSecurityTests(unittest.TestCase):
         self.assertEqual(config.gateway_allowed_ids, ())
         self.assertEqual(config.google_drive_access, "app_files")
         self.assertTrue(config.memory_auto_improve)
+        self.assertEqual(config.strategy_transfer, "observe")
         self.assertEqual(config.memory_embeddings, "disabled")
         self.assertEqual(config.memory_embedding_model, "text-embedding-3-small")
         self.assertEqual(config.memory_embedding_dimensions, 512)
@@ -115,6 +116,22 @@ class ConfigSecurityTests(unittest.TestCase):
                 ValueError, "MEMORY_CLAIM_CLOCK"
             ):
                 load_config({"JARVIS_MEMORY_CLAIM_CLOCK": value})
+
+    def test_strategy_transfer_defaults_to_observe_and_requires_closed_mode(self):
+        self.assertEqual(load_config({}).strategy_transfer, "observe")
+        self.assertEqual(
+            load_config({"JARVIS_STRATEGY_TRANSFER": " ADVISE "}).strategy_transfer,
+            "advise",
+        )
+        self.assertEqual(
+            load_config({"JARVIS_STRATEGY_TRANSFER": " TRIAL "}).strategy_transfer,
+            "trial",
+        )
+        for value in ("", "enabled", "auto", "execute", "unbounded"):
+            with self.subTest(value=value), self.assertRaisesRegex(
+                ValueError, "STRATEGY_TRANSFER"
+            ):
+                load_config({"JARVIS_STRATEGY_TRANSFER": value})
 
     def test_execution_mode_requires_explicit_valid_opt_in(self):
         trusted = load_config({"JARVIS_EXECUTION_MODE": " TRUSTED-HOST "})
@@ -261,6 +278,7 @@ class ConfigSecurityTests(unittest.TestCase):
             {"JARVIS_WORKER_CONCURRENCY": "0"},
             {"JARVIS_WORKER_CONCURRENCY": "9"},
             {"JARVIS_MEMORY_AUTO_IMPROVE": "sometimes"},
+            {"JARVIS_STRATEGY_TRANSFER": "unbounded"},
             {"JARVIS_MEMORY_EMBEDDINGS": "local-magic"},
             {"JARVIS_MEMORY_EMBEDDING_MODEL": ""},
             {"JARVIS_MEMORY_EMBEDDING_DIMENSIONS": "63"},

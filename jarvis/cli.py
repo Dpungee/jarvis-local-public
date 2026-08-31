@@ -5,6 +5,7 @@ import hashlib
 import json
 import os
 import re
+import secrets
 import shutil
 import sqlite3
 import stat
@@ -63,6 +64,13 @@ from .skill_library import (
     forget_learned_skill,
     list_available_skills,
     read_available_skill,
+)
+from .strategy_transfer import STRATEGY_VOCABULARY
+from .strategy_transfer_operator import (
+    StrategyTransferOperatorError,
+    build_trial_manifest_input,
+    sanitized_trial_status,
+    trial_status_line,
 )
 from .vault import Vault
 from .specialists import specialist_for_prompt
@@ -775,6 +783,40 @@ def _learning_interval(value: str) -> int:
     if not 1 <= parsed <= 24 * 365:
         raise argparse.ArgumentTypeError("must be between 1 and 8760 hours")
     return parsed
+
+
+def _trial_positive_integer(value: str) -> int:
+    try:
+        parsed = int(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError("must be a positive integer") from None
+    if not 1 <= parsed <= 2_147_483_647:
+        raise argparse.ArgumentTypeError("must be a positive integer")
+    return parsed
+
+
+def _trial_sample_cap(value: str) -> int:
+    parsed = _trial_positive_integer(value)
+    if not 40 <= parsed <= 200 or parsed % 4:
+        raise argparse.ArgumentTypeError(
+            "must be 40-200 inclusive and divisible by 4"
+        )
+    return parsed
+
+
+def _trial_duration_days(value: str) -> int:
+    parsed = _trial_positive_integer(value)
+    if parsed > 14:
+        raise argparse.ArgumentTypeError("must be between 1 and 14 days")
+    return parsed
+
+
+def _trial_sha256(value: str) -> str:
+    if re.fullmatch(r"[0-9a-f]{64}", value) is None:
+        raise argparse.ArgumentTypeError(
+            "must be exactly 64 lowercase hexadecimal characters"
+        )
+    return value
 
 
 def _retry_delay(attempt_count: int) -> int:
@@ -1864,6 +1906,10 @@ def _run_status(args: argparse.Namespace) -> int:
             f"Initiative: configured={initiative_gate['configured_mode']} "
             f"effective={initiative_gate['effective_mode']}"
         )
+        print(
+            f"Strategy transfer: configured={config.strategy_transfer}; "
+            "trial/promotion status is available via `jarvis strategy-transfer status`"
+        )
         print(f"Tasks: {current['task_counts']}")
         specialist_states = ", ".join(
             f"{item['name']}={item['status']}"
@@ -2103,6 +2149,176 @@ def _run_control(args: argparse.Namespace) -> int:
         memory.set_control_state(state, getattr(args, "reason", None))
     print({"paused": "Background autonomy paused.", "running": "JARVIS resumed.", "stopped": "Emergency stop activated."}[state])
     return 0
+
+
+def _strategy_trial_method(memory: Any, name: str) -> Callable[..., Any]:
+    method = getattr(memory, name, None)
+    if not callable(method):
+        raise RuntimeError(
+            "Phase 4B trial storage is unavailable; no trial state was changed"
+        )
+    return method
+
+
+def _run_strategy_transfer(args: argparse.Namespace) -> int:
+    """Operate the bounded Phase 4B trial without accepting task prose."""
+    config = Config.load()
+    command = args.strategy_transfer_command
+    with Memory(config.data_dir / "jarvis.db") as memory:
+        if command == "status":
+            status = _strategy_trial_method(
+                memory, "strategy_transfer_trial_status"
+            )(args.manifest_id)
+            rows = sanitized_trial_status(
+                status, allowed_families=PREDICTION_FAMILY_CHOICES
+            )
+            if any(row.get("available") is False for row in rows):
+                raise RuntimeError(
+                    "Phase 4B trial status is unavailable or failed integrity checks"
+                )
+            if args.json:
+                print(json.dumps({
+                    "configured_mode": config.strategy_transfer,
+                    "activation_requires_explicit_promotion": True,
+                    "trials": rows,
+                }, ensure_ascii=False, indent=2))
+                return 0
+            print(f"Strategy transfer mode: {config.strategy_transfer}")
+            print(
+                "Advice activation: requires a valid pinned causal attestation "
+                "and explicit operator promotion."
+            )
+            if not rows:
+                print("No Phase 4B trial manifests.")
+                return 0
+            for row in rows:
+                print(trial_status_line(row))
+            return 0
+
+        if command == "start":
+            if config.strategy_transfer != "trial":
+                raise ValueError(
+                    "Set JARVIS_STRATEGY_TRANSFER=trial before explicitly "
+                    "starting a Phase 4B trial"
+                )
+            pins = _strategy_trial_method(
+                memory, "strategy_transfer_trial_pins"
+            )()
+            required_pins = {
+                "evaluator_version",
+                "evaluator_sha256",
+                "fixture_sha256",
+                "config_sha256",
+                "runtime_sha256",
+            }
+            if not isinstance(pins, dict) or set(pins) != required_pins:
+                raise RuntimeError(
+                    "Installed Phase 4B benchmark pins are unavailable or malformed"
+                )
+            manifest = build_trial_manifest_input(
+                project_id=args.project,
+                target_families=args.family,
+                allowed_families=PREDICTION_FAMILY_CHOICES,
+                strategies=args.strategy,
+                sample_cap=args.sample_cap,
+                duration_days=args.duration_days,
+                seed=args.seed or secrets.token_hex(32),
+                evaluator_version=pins["evaluator_version"],
+                evaluator_sha256=pins["evaluator_sha256"],
+                fixture_sha256=pins["fixture_sha256"],
+                config_sha256=pins["config_sha256"],
+                runtime_sha256=pins["runtime_sha256"],
+            )
+            created = _strategy_trial_method(
+                memory, "create_strategy_transfer_trial_manifest"
+            )(**manifest)
+            if not isinstance(created, dict):
+                raise RuntimeError("Trial storage did not return a manifest receipt")
+            manifest_id = created.get("manifest_id", created.get("id"))
+            if (
+                isinstance(manifest_id, bool)
+                or not isinstance(manifest_id, int)
+                or manifest_id < 1
+            ):
+                raise RuntimeError("Trial storage returned an invalid manifest receipt")
+            print(
+                f"Started bounded Phase 4B trial #{manifest_id}. "
+                "Assignments remain project-scoped and pre-outcome."
+            )
+            return 0
+
+        if command == "abort":
+            aborted = _strategy_trial_method(
+                memory, "abort_strategy_transfer_trial"
+            )(args.manifest_id, reason_code="operator_abort")
+            if aborted is False:
+                print(
+                    f"Phase 4B trial #{args.manifest_id} was already aborted. "
+                    "It cannot issue new assignments."
+                )
+                return 0
+            if aborted is not True:
+                raise RuntimeError("Trial storage returned an invalid abort receipt")
+            print(
+                f"Aborted Phase 4B trial #{args.manifest_id}. "
+                "It cannot issue new assignments."
+            )
+            return 0
+
+        if command == "promote":
+            if config.strategy_transfer != "advise":
+                raise ValueError(
+                    "Set JARVIS_STRATEGY_TRANSFER=advise before explicitly "
+                    "promoting a completed Phase 4B trial"
+                )
+            current = _strategy_trial_method(
+                memory, "strategy_transfer_trial_status"
+            )(args.manifest_id)
+            current_rows = sanitized_trial_status(
+                current, allowed_families=PREDICTION_FAMILY_CHOICES
+            )
+            already_promoted = bool(
+                len(current_rows) == 1
+                and current_rows[0].get("status") == "promoted"
+                and current_rows[0].get("causal_attestation_valid") is True
+            )
+            if len(current_rows) != 1 or not (
+                current_rows[0].get("promotion_ready") is True
+                or already_promoted
+            ):
+                raise ValueError(
+                    "The trial is not ready for promotion: completed balanced "
+                    "pre-outcome assignments and every safety gate are required"
+                )
+            promoted = _strategy_trial_method(
+                memory, "promote_strategy_transfer_trial"
+            )(args.manifest_id, operator_confirmed=True)
+            if not isinstance(promoted, dict):
+                raise RuntimeError("Trial storage did not return a promotion receipt")
+            promotion_rows = sanitized_trial_status(
+                promoted, allowed_families=PREDICTION_FAMILY_CHOICES
+            )
+            if len(promotion_rows) != 1 or (
+                not isinstance(promotion_rows[0].get("promoted"), bool)
+                or promotion_rows[0].get("status") != "promoted"
+                or "attestation_sha256" not in promotion_rows[0]
+            ):
+                raise RuntimeError(
+                    "Trial storage did not confirm a pinned causal promotion"
+                )
+            if promotion_rows[0]["promoted"] is False:
+                print(
+                    f"Phase 4B trial #{args.manifest_id} was already promoted "
+                    "with a valid pinned causal attestation."
+                )
+                return 0
+            print(
+                f"Explicitly promoted Phase 4B trial #{args.manifest_id}. "
+                "Runtime advice remains bound to its causal attestation, pins, "
+                "project scope, drift checks, quarantine, and ledger health."
+            )
+            return 0
+    raise StrategyTransferOperatorError("unsupported strategy-transfer command")
 
 
 def _run_goal(args: argparse.Namespace) -> int:
@@ -2879,6 +3095,65 @@ def _parser() -> argparse.ArgumentParser:
     for name in ("pause", "resume", "stop"):
         item = control_sub.add_parser(name)
         item.add_argument("--reason", default=None)
+    strategy_transfer = sub.add_parser(
+        "strategy-transfer",
+        help="start, inspect, abort, or explicitly promote a bounded Phase 4B trial",
+    )
+    strategy_transfer_sub = strategy_transfer.add_subparsers(
+        dest="strategy_transfer_command", required=True
+    )
+    strategy_transfer_status = strategy_transfer_sub.add_parser(
+        "status", help="show prompt-free Phase 4B trial status"
+    )
+    strategy_transfer_status.add_argument(
+        "--manifest", dest="manifest_id", type=_trial_positive_integer, default=None
+    )
+    strategy_transfer_status.add_argument("--json", action="store_true")
+    strategy_transfer_start = strategy_transfer_sub.add_parser(
+        "start", help="start one explicitly scoped, pinned causal trial"
+    )
+    strategy_transfer_start.add_argument(
+        "--project", type=_trial_positive_integer, required=True
+    )
+    strategy_transfer_start.add_argument(
+        "--family",
+        action="append",
+        choices=PREDICTION_FAMILY_CHOICES,
+        required=True,
+        help="target family (repeat 1-3 times)",
+    )
+    strategy_transfer_start.add_argument(
+        "--strategy",
+        action="append",
+        choices=STRATEGY_VOCABULARY,
+        required=True,
+        help="closed procedural strategy (repeatable)",
+    )
+    strategy_transfer_start.add_argument(
+        "--sample-cap", type=_trial_sample_cap, required=True
+    )
+    strategy_transfer_start.add_argument(
+        "--duration-days", type=_trial_duration_days, required=True
+    )
+    strategy_transfer_start.add_argument(
+        "--seed",
+        type=_trial_sha256,
+        default=None,
+        help=argparse.SUPPRESS,
+    )
+    strategy_transfer_abort = strategy_transfer_sub.add_parser(
+        "abort", help="permanently stop new assignments for one trial"
+    )
+    strategy_transfer_abort.add_argument(
+        "manifest_id", type=_trial_positive_integer
+    )
+    strategy_transfer_promote = strategy_transfer_sub.add_parser(
+        "promote",
+        help="explicitly promote a completed trial after causal validation",
+    )
+    strategy_transfer_promote.add_argument(
+        "manifest_id", type=_trial_positive_integer
+    )
     ask = sub.add_parser("ask", help="run one task")
     ask.add_argument("prompt", nargs="+")
     ask.add_argument(
@@ -3158,6 +3433,8 @@ def main(argv: list[str] | None = None) -> None:
             code = _run_usage(args)
         elif args.command == "control":
             code = _run_control(args)
+        elif args.command == "strategy-transfer":
+            code = _run_strategy_transfer(args)
         elif args.command == "ask":
             code = _run_ask(args)
         elif args.command == "task":

@@ -78,6 +78,14 @@ class RunObservabilityTests(unittest.TestCase):
                 "profile": "fast",
                 "route_reason": "clear_dialogue",
                 "task_contract_status": "not_attempted",
+                "strategy_transfer_mode": "observe",
+                "strategy_transfer_status": "observed",
+                "strategy_transfer_selected": 2,
+                "strategy_transfer_applied": False,
+                "strategy_transfer_trial_manifest_id": 41,
+                "strategy_transfer_trial_arm": "control",
+                "strategy_transfer_trial_prompt_recorded": True,
+                "strategy_transfer_trial_dispatched": True,
                 "token_measurement": "unknown",
                 "build_id": "v0.6.3+abcdef0",
                 "cohort": "phase1-baseline",
@@ -88,6 +96,14 @@ class RunObservabilityTests(unittest.TestCase):
         self.assertEqual(metrics["tool_counts"], {"web_fetch": 1, "web_search": 1})
         self.assertNotIn("prompt_tokens", metrics)
         self.assertTrue(metrics["streamed"])
+        self.assertEqual(metrics["strategy_transfer_mode"], "observe")
+        self.assertEqual(metrics["strategy_transfer_status"], "observed")
+        self.assertEqual(metrics["strategy_transfer_selected"], 2)
+        self.assertFalse(metrics["strategy_transfer_applied"])
+        self.assertEqual(metrics["strategy_transfer_trial_manifest_id"], 41)
+        self.assertEqual(metrics["strategy_transfer_trial_arm"], "control")
+        self.assertTrue(metrics["strategy_transfer_trial_prompt_recorded"])
+        self.assertTrue(metrics["strategy_transfer_trial_dispatched"])
 
     def test_sanitizer_is_closed_and_never_echoes_a_secret_key(self) -> None:
         secret = "sk-proj-" + "A" * 32

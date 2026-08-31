@@ -12,6 +12,9 @@ recovery scenarios.
   consumption.
 - Memory provenance, contradiction handling, temporal confidence, retrieval relevance,
   and safety leakage.
+- Cross-domain strategy selection against a frozen fictional holdout, including
+  source-receipt eligibility, independent target outcomes, harmful negative-transfer
+  controls, ordering invariance, and zero authority leakage.
 - Web research source collection, citation traceability, synthesis gates, and honest
   incomplete outcomes.
 - Code and document workflows, real execution evidence, artifact verification, and
@@ -45,3 +48,13 @@ development artifacts and must not be committed.
 Benchmark numbers are historical observations, not permanent product guarantees.
 Results should be refreshed on the release commit and never copied forward after code,
 models, providers, or hardware change.
+
+The Phase 4A strategy-transfer holdout is deterministic benchmark evidence only. It
+does not establish production causal lift and cannot activate advice. Production
+activation requires a separate operator-started trial that persists randomized
+control/treatment assignment before outcomes exist and is not part of Phase 4A.
+Phase 4B derives its fixture, evaluator, configuration, and runtime pins from the
+exact installed sealed benchmark; the operator does not copy those hashes. Its
+assignment seed is generated locally and is never printed. A completed trial still
+cannot activate advice until the causal attestation passes every declared gate and
+the operator separately promotes that exact manifest.

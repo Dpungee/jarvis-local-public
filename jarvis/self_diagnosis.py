@@ -534,7 +534,7 @@ def _candidate_execution_available() -> bool:
 
 
 def _candidate_anchor_test(candidate: Path, timeout: int) -> dict[str, Any]:
-    """Run the immutable Phase 5 behavioral anchors in an isolated candidate."""
+    """Run the immutable self-repair behavioral anchors in an isolated candidate."""
     started = time.monotonic()
     try:
         completed = subprocess.run(
@@ -693,7 +693,7 @@ def create_repair_draft(
                 verification["passed"] and anchor_eval["passed"]
             )
             if not anchor_eval["passed"]:
-                void_reason = "immutable Phase 5 anchor evaluation did not pass"
+                void_reason = "immutable self-repair anchor evaluation did not pass"
 
     status = "voided" if void_reason else "proposed"
     proposal_id = memory.record_repair_proposal(

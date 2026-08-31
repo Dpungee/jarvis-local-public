@@ -1,0 +1,951 @@
+{
+  "schema": "jarvis.long-horizon-restart-holdout.v1",
+  "evaluator_version": "1.0.0",
+  "config_sha256": "71518b73be1ca12f3e32c7b6a8d990a6ed91e2833ed3fe1c1813d8814093b227",
+  "runtime_sha256": "2f438939d87f6967af8d33de92b4d78bfd7beb91adddb54ba16ef889d0b4b6d2",
+  "templates": [
+    {
+      "template_id": "build_flow",
+      "stages": [
+        {
+          "stage_id": "inspect",
+          "kind": "inspect",
+          "depends_on": [],
+          "mutation": false,
+          "irreversible": false,
+          "tool_cost": 1,
+          "token_cost": 100,
+          "duration_ms": 10,
+          "verification": "none"
+        },
+        {
+          "stage_id": "prepare",
+          "kind": "transform",
+          "depends_on": [
+            "inspect"
+          ],
+          "mutation": false,
+          "irreversible": false,
+          "tool_cost": 1,
+          "token_cost": 120,
+          "duration_ms": 10,
+          "verification": "artifact"
+        },
+        {
+          "stage_id": "apply",
+          "kind": "mutate",
+          "depends_on": [
+            "prepare"
+          ],
+          "mutation": true,
+          "irreversible": true,
+          "tool_cost": 1,
+          "token_cost": 100,
+          "duration_ms": 10,
+          "verification": "external_receipt"
+        },
+        {
+          "stage_id": "check",
+          "kind": "verify",
+          "depends_on": [
+            "apply"
+          ],
+          "mutation": false,
+          "irreversible": false,
+          "tool_cost": 1,
+          "token_cost": 80,
+          "duration_ms": 10,
+          "verification": "artifact"
+        },
+        {
+          "stage_id": "finish",
+          "kind": "finalize",
+          "depends_on": [
+            "check"
+          ],
+          "mutation": false,
+          "irreversible": false,
+          "tool_cost": 1,
+          "token_cost": 60,
+          "duration_ms": 10,
+          "verification": "artifact"
+        }
+      ]
+    },
+    {
+      "template_id": "repair_flow",
+      "stages": [
+        {
+          "stage_id": "inspect",
+          "kind": "inspect",
+          "depends_on": [],
+          "mutation": false,
+          "irreversible": false,
+          "tool_cost": 1,
+          "token_cost": 100,
+          "duration_ms": 10,
+          "verification": "none"
+        },
+        {
+          "stage_id": "prepare",
+          "kind": "transform",
+          "depends_on": [
+            "inspect"
+          ],
+          "mutation": false,
+          "irreversible": false,
+          "tool_cost": 1,
+          "token_cost": 120,
+          "duration_ms": 10,
+          "verification": "artifact"
+        },
+        {
+          "stage_id": "apply",
+          "kind": "mutate",
+          "depends_on": [
+            "prepare"
+          ],
+          "mutation": true,
+          "irreversible": true,
+          "tool_cost": 1,
+          "token_cost": 100,
+          "duration_ms": 10,
+          "verification": "external_receipt"
+        },
+        {
+          "stage_id": "check",
+          "kind": "verify",
+          "depends_on": [
+            "apply"
+          ],
+          "mutation": false,
+          "irreversible": false,
+          "tool_cost": 1,
+          "token_cost": 80,
+          "duration_ms": 10,
+          "verification": "artifact"
+        },
+        {
+          "stage_id": "finish",
+          "kind": "finalize",
+          "depends_on": [
+            "check"
+          ],
+          "mutation": false,
+          "irreversible": false,
+          "tool_cost": 1,
+          "token_cost": 60,
+          "duration_ms": 10,
+          "verification": "artifact"
+        }
+      ]
+    },
+    {
+      "template_id": "research_flow",
+      "stages": [
+        {
+          "stage_id": "inspect",
+          "kind": "inspect",
+          "depends_on": [],
+          "mutation": false,
+          "irreversible": false,
+          "tool_cost": 1,
+          "token_cost": 100,
+          "duration_ms": 10,
+          "verification": "none"
+        },
+        {
+          "stage_id": "prepare",
+          "kind": "transform",
+          "depends_on": [
+            "inspect"
+          ],
+          "mutation": false,
+          "irreversible": false,
+          "tool_cost": 1,
+          "token_cost": 120,
+          "duration_ms": 10,
+          "verification": "artifact"
+        },
+        {
+          "stage_id": "apply",
+          "kind": "mutate",
+          "depends_on": [
+            "prepare"
+          ],
+          "mutation": true,
+          "irreversible": true,
+          "tool_cost": 1,
+          "token_cost": 100,
+          "duration_ms": 10,
+          "verification": "external_receipt"
+        },
+        {
+          "stage_id": "check",
+          "kind": "verify",
+          "depends_on": [
+            "apply"
+          ],
+          "mutation": false,
+          "irreversible": false,
+          "tool_cost": 1,
+          "token_cost": 80,
+          "duration_ms": 10,
+          "verification": "artifact"
+        },
+        {
+          "stage_id": "finish",
+          "kind": "finalize",
+          "depends_on": [
+            "check"
+          ],
+          "mutation": false,
+          "irreversible": false,
+          "tool_cost": 1,
+          "token_cost": 60,
+          "duration_ms": 10,
+          "verification": "artifact"
+        }
+      ]
+    },
+    {
+      "template_id": "file_flow",
+      "stages": [
+        {
+          "stage_id": "inspect",
+          "kind": "inspect",
+          "depends_on": [],
+          "mutation": false,
+          "irreversible": false,
+          "tool_cost": 1,
+          "token_cost": 100,
+          "duration_ms": 10,
+          "verification": "none"
+        },
+        {
+          "stage_id": "prepare",
+          "kind": "transform",
+          "depends_on": [
+            "inspect"
+          ],
+          "mutation": false,
+          "irreversible": false,
+          "tool_cost": 1,
+          "token_cost": 120,
+          "duration_ms": 10,
+          "verification": "artifact"
+        },
+        {
+          "stage_id": "apply",
+          "kind": "mutate",
+          "depends_on": [
+            "prepare"
+          ],
+          "mutation": true,
+          "irreversible": true,
+          "tool_cost": 1,
+          "token_cost": 100,
+          "duration_ms": 10,
+          "verification": "external_receipt"
+        },
+        {
+          "stage_id": "check",
+          "kind": "verify",
+          "depends_on": [
+            "apply"
+          ],
+          "mutation": false,
+          "irreversible": false,
+          "tool_cost": 1,
+          "token_cost": 80,
+          "duration_ms": 10,
+          "verification": "artifact"
+        },
+        {
+          "stage_id": "finish",
+          "kind": "finalize",
+          "depends_on": [
+            "check"
+          ],
+          "mutation": false,
+          "irreversible": false,
+          "tool_cost": 1,
+          "token_cost": 60,
+          "duration_ms": 10,
+          "verification": "artifact"
+        }
+      ]
+    },
+    {
+      "template_id": "publish_flow",
+      "stages": [
+        {
+          "stage_id": "inspect",
+          "kind": "inspect",
+          "depends_on": [],
+          "mutation": false,
+          "irreversible": false,
+          "tool_cost": 1,
+          "token_cost": 100,
+          "duration_ms": 10,
+          "verification": "none"
+        },
+        {
+          "stage_id": "prepare",
+          "kind": "transform",
+          "depends_on": [
+            "inspect"
+          ],
+          "mutation": false,
+          "irreversible": false,
+          "tool_cost": 1,
+          "token_cost": 120,
+          "duration_ms": 10,
+          "verification": "artifact"
+        },
+        {
+          "stage_id": "apply",
+          "kind": "mutate",
+          "depends_on": [
+            "prepare"
+          ],
+          "mutation": true,
+          "irreversible": true,
+          "tool_cost": 1,
+          "token_cost": 100,
+          "duration_ms": 10,
+          "verification": "external_receipt"
+        },
+        {
+          "stage_id": "check",
+          "kind": "verify",
+          "depends_on": [
+            "apply"
+          ],
+          "mutation": false,
+          "irreversible": false,
+          "tool_cost": 1,
+          "token_cost": 80,
+          "duration_ms": 10,
+          "verification": "artifact"
+        },
+        {
+          "stage_id": "finish",
+          "kind": "finalize",
+          "depends_on": [
+            "check"
+          ],
+          "mutation": false,
+          "irreversible": false,
+          "tool_cost": 1,
+          "token_cost": 60,
+          "duration_ms": 10,
+          "verification": "external_receipt"
+        }
+      ]
+    },
+    {
+      "template_id": "security_flow",
+      "stages": [
+        {
+          "stage_id": "inspect",
+          "kind": "inspect",
+          "depends_on": [],
+          "mutation": false,
+          "irreversible": false,
+          "tool_cost": 1,
+          "token_cost": 100,
+          "duration_ms": 10,
+          "verification": "none"
+        },
+        {
+          "stage_id": "prepare",
+          "kind": "transform",
+          "depends_on": [
+            "inspect"
+          ],
+          "mutation": false,
+          "irreversible": false,
+          "tool_cost": 1,
+          "token_cost": 120,
+          "duration_ms": 10,
+          "verification": "artifact"
+        },
+        {
+          "stage_id": "apply",
+          "kind": "mutate",
+          "depends_on": [
+            "prepare"
+          ],
+          "mutation": true,
+          "irreversible": true,
+          "tool_cost": 1,
+          "token_cost": 100,
+          "duration_ms": 10,
+          "verification": "external_receipt"
+        },
+        {
+          "stage_id": "check",
+          "kind": "verify",
+          "depends_on": [
+            "apply"
+          ],
+          "mutation": false,
+          "irreversible": false,
+          "tool_cost": 1,
+          "token_cost": 80,
+          "duration_ms": 10,
+          "verification": "artifact"
+        },
+        {
+          "stage_id": "finish",
+          "kind": "finalize",
+          "depends_on": [
+            "check"
+          ],
+          "mutation": false,
+          "irreversible": false,
+          "tool_cost": 1,
+          "token_cost": 60,
+          "duration_ms": 10,
+          "verification": "artifact"
+        }
+      ]
+    }
+  ],
+  "workflows": [
+    {
+      "workflow_id": "wf01",
+      "template_id": "build_flow",
+      "family": "code_build",
+      "project_id": 1,
+      "goal_sha256": "06ef0687a3a63d613733029145d66fc629f71d8bb786ce797fc1ff2373a0697e",
+      "contract_sha256": "28298680532c259d8b7bd30fc52387fa0c48ba297e949eff9c1153cd8dd3ef68",
+      "constraints_sha256": "264b342360c0a059704e4bc65f3db461abc7b46945e9d0ca59b8f576dc7cf586",
+      "approval_sha256": "2c884f2b84b68bedf37c179f0bfaa5fb63531c5f1948a0fbbceb85362156c129",
+      "artifact_sha256": "151065bc8d7468ddc7fb739f4196d961b3314b59b64df21c07670b88b6f172c8",
+      "crash_point": "before_mutation",
+      "budgets": {
+        "time_ms": 10000,
+        "tool_calls": 8,
+        "model_calls": 8,
+        "prompt_tokens": 800,
+        "completion_tokens": 200,
+        "retries": 2
+      }
+    },
+    {
+      "workflow_id": "wf02",
+      "template_id": "repair_flow",
+      "family": "code_fix",
+      "project_id": 2,
+      "goal_sha256": "19d821034ee879185da674e775ac624a97f7d87b91b825272069ee4dc21fe4e4",
+      "contract_sha256": "336e328cc136e268bcd308eaadeceb48c7de3aec9aaf4c7724012e6369ef1458",
+      "constraints_sha256": "bf7ddf86e6dad46db7f96a080da8e772ab8a6f1139b75bea64815e29f50d3cf9",
+      "approval_sha256": "b0c4ea3a2daf29faf380018151ffc832f667f210b38407197af36c3be9dc6cc1",
+      "artifact_sha256": "90e83eca1a2481effe0c81d6ec52ef3316c30589a18590cc8608438f485d49fd",
+      "crash_point": "after_mutation_before_receipt",
+      "budgets": {
+        "time_ms": 10000,
+        "tool_calls": 8,
+        "model_calls": 8,
+        "prompt_tokens": 800,
+        "completion_tokens": 200,
+        "retries": 2
+      }
+    },
+    {
+      "workflow_id": "wf03",
+      "template_id": "research_flow",
+      "family": "deep_research",
+      "project_id": 1,
+      "goal_sha256": "2423e72eb4750029422f826cb45d7a725c7d57f771cfed5da9a01166b3a65a83",
+      "contract_sha256": "52b36654ecff80ec067d51956bd3f09ca86edb3f142f9fdf784edb03a4f7298e",
+      "constraints_sha256": "f2e8c5a5df5f03ab0abb12698570f3cd8b0b90420af9c1bd95c7a19954526c9c",
+      "approval_sha256": "ecb480d0e7e81dbb35b60e3cc7f6e4037d40a575a77addc2d101cee18159132a",
+      "artifact_sha256": "46e1e6a5a856532d090c24b1d92c7beb4972ea00c8911a2aedede713fa5799e5",
+      "crash_point": "after_receipt_before_cursor",
+      "budgets": {
+        "time_ms": 10000,
+        "tool_calls": 8,
+        "model_calls": 8,
+        "prompt_tokens": 800,
+        "completion_tokens": 200,
+        "retries": 2
+      }
+    },
+    {
+      "workflow_id": "wf04",
+      "template_id": "file_flow",
+      "family": "file_ops",
+      "project_id": 2,
+      "goal_sha256": "45306da0cf73144b685e562e23b1cfa602f9dfad5c0fbdb65f42ce477b08149b",
+      "contract_sha256": "0496df8b56821973e8733f65e79e41d2671d56cebc96db15f4f3ce9f6f314467",
+      "constraints_sha256": "5dec296646bb60ea4689ff7d3b0b52ed71855c4b85dc3f625836be420ab7c741",
+      "approval_sha256": "9d6cf029fe54961b85ff31637d17e2e237b3589a0a306b6c10c0b9f4cbc4677b",
+      "artifact_sha256": "b418e23d6437b653b57be70e2234a8f0386503c080b778b700cd0b56c1694244",
+      "crash_point": "before_mutation",
+      "budgets": {
+        "time_ms": 10000,
+        "tool_calls": 8,
+        "model_calls": 8,
+        "prompt_tokens": 800,
+        "completion_tokens": 200,
+        "retries": 2
+      }
+    },
+    {
+      "workflow_id": "wf05",
+      "template_id": "publish_flow",
+      "family": "external_publish",
+      "project_id": 1,
+      "goal_sha256": "b26b7c7a2497aa71956f3837667a8f6efc87158adb5f74e866d7a7ea8269cd5b",
+      "contract_sha256": "1e11de8d54969a849341861337aa9abdd776f5abaa778493fb1e281b2298571d",
+      "constraints_sha256": "2305fb5b2f4fed0496a50b679bc570bd8facaf04790ed3c3675ca2af8113bb00",
+      "approval_sha256": "75ba4e48140bed7319e226ec8bb29c2b3b629b13e6c5656e9f45d0b6903a0ff5",
+      "artifact_sha256": "4427b2d5afc775b6283de384d11c0a8927492d4db91d4c78739ba727f367a25f",
+      "crash_point": "after_mutation_before_receipt",
+      "budgets": {
+        "time_ms": 10000,
+        "tool_calls": 8,
+        "model_calls": 8,
+        "prompt_tokens": 800,
+        "completion_tokens": 200,
+        "retries": 2
+      }
+    },
+    {
+      "workflow_id": "wf06",
+      "template_id": "security_flow",
+      "family": "security_analysis",
+      "project_id": 2,
+      "goal_sha256": "a6b92ce4afd877560ad578b0a3e43a92c9ae86524ed912cb959c6fd2e70aed0f",
+      "contract_sha256": "a5b313f2b91a6f51c418286ac960d6feb7f7f7099d948190df96decd79e62f7b",
+      "constraints_sha256": "329c2649ce6c9d6883e1b78c019c1e709a256b174046e26d446814bc492170ee",
+      "approval_sha256": "b01b99a0ac5215f9824be699aaa2a70a72744a50b2c4c81e78331565846b5fca",
+      "artifact_sha256": "f7a3748d93f4f0fb48b6f5dd404170e97edd685121146c5656a1121442ea15e6",
+      "crash_point": "after_receipt_before_cursor",
+      "budgets": {
+        "time_ms": 10000,
+        "tool_calls": 8,
+        "model_calls": 8,
+        "prompt_tokens": 800,
+        "completion_tokens": 200,
+        "retries": 2
+      }
+    },
+    {
+      "workflow_id": "wf07",
+      "template_id": "build_flow",
+      "family": "code_test",
+      "project_id": 1,
+      "goal_sha256": "c65e162080dc0ad72b33a75083cc0faf51298f3a644aebfcb11739aecec81c99",
+      "contract_sha256": "5529d5ded3fb2864b09089da9e07a3a8b361248c310e632d711c02991225ae24",
+      "constraints_sha256": "a16802994ac6dd363f93f07f6a6c24ebe17d6200a40ba231bf60b20a24e07ba0",
+      "approval_sha256": "35baa751bd8a303d6f6537f759248f9f0f73492d7ecc5f085ba8497e1354c551",
+      "artifact_sha256": "d48c08ce27d872650a111f3344fcd921189e5e29997dcaf88de0910c87a34a91",
+      "crash_point": "before_mutation",
+      "budgets": {
+        "time_ms": 10000,
+        "tool_calls": 8,
+        "model_calls": 8,
+        "prompt_tokens": 800,
+        "completion_tokens": 200,
+        "retries": 2
+      }
+    },
+    {
+      "workflow_id": "wf08",
+      "template_id": "repair_flow",
+      "family": "code_fix",
+      "project_id": 2,
+      "goal_sha256": "af294ef8834bf49f8ddae4cb82d0278ec44b26ee731b5782edf44e65fbb750ab",
+      "contract_sha256": "f40d6385b7e2f231e94f3ee736423a48d01fa9b978fdc64961dee2fa1cccc59d",
+      "constraints_sha256": "0038a384a31106bfec67c573873b60ff4d1399e0b790f71cc62010efdd236f4c",
+      "approval_sha256": "3c3039a281b7b950078b49255509afb06d15496ee5a52eda5dfde3080b55cc6e",
+      "artifact_sha256": "6886b3e1b582ff071ff78f3d49f9dd7fc70cd129b95c2f572d62a870cb9fea47",
+      "crash_point": "after_mutation_before_receipt",
+      "budgets": {
+        "time_ms": 10000,
+        "tool_calls": 8,
+        "model_calls": 8,
+        "prompt_tokens": 800,
+        "completion_tokens": 200,
+        "retries": 2
+      }
+    },
+    {
+      "workflow_id": "wf09",
+      "template_id": "research_flow",
+      "family": "deep_research",
+      "project_id": 1,
+      "goal_sha256": "a6ce7332d745d56ba7ff002d3e04fde125c56cdd32caee88f785bbee77f7e7d2",
+      "contract_sha256": "01462993299d997eb5e73b5cc68ebfe8aafc4de3c85fb2fdf0baeeb994e54624",
+      "constraints_sha256": "89940affb7bd6129b7d4c18bd4cf78389cef3e6a847b3b0fe7b1e199036de9af",
+      "approval_sha256": "fe3da79ab76a104c92f181b9cad472edb8345debc51ff25c28706005e58e5017",
+      "artifact_sha256": "39eb21658b6005dcf9b7b3849fbfdbd3debc12ebac912f8f2d8a5143bcaf77f1",
+      "crash_point": "after_receipt_before_cursor",
+      "budgets": {
+        "time_ms": 10000,
+        "tool_calls": 8,
+        "model_calls": 8,
+        "prompt_tokens": 800,
+        "completion_tokens": 200,
+        "retries": 2
+      }
+    },
+    {
+      "workflow_id": "wf10",
+      "template_id": "file_flow",
+      "family": "file_ops",
+      "project_id": 2,
+      "goal_sha256": "3645c3c513cb8d0f3ef34c85b866ac8ce0979249234e3a70bc0d9a4054808845",
+      "contract_sha256": "166e1f2025a17cac54dc72a42adac6b86da033ed13646e2919c4cb0d4c15b5ac",
+      "constraints_sha256": "c1dd197b219672a77a076d39443ea7cddd5b58a15413c23b206c28950a5515ad",
+      "approval_sha256": "6729246c923b08c2ffee6c1abaa3204137876aea480c7f4400eaac95116c1da0",
+      "artifact_sha256": "b987a39df33220f14347d21baabe84454ee5d3f11bdc72e8314b49ab2665b3a7",
+      "crash_point": "before_mutation",
+      "budgets": {
+        "time_ms": 10000,
+        "tool_calls": 8,
+        "model_calls": 8,
+        "prompt_tokens": 800,
+        "completion_tokens": 200,
+        "retries": 2
+      }
+    },
+    {
+      "workflow_id": "wf11",
+      "template_id": "publish_flow",
+      "family": "external_publish",
+      "project_id": 1,
+      "goal_sha256": "19375c6f80fddec0f0b71e8927f059db60a136688c2761968cc91008932b0387",
+      "contract_sha256": "b6b72514e924c46a58db20d011830639780f4d9f69727bcac4b1bf74468b5c99",
+      "constraints_sha256": "e6a1974c1056b621e99f89563c0c4e9d971ba3e1d6a60081a45f40221f19fade",
+      "approval_sha256": "7c29765d4d6f042b622ccc906a387d8686ad91a4f1107fd877ae3c3f130d575f",
+      "artifact_sha256": "31176c046824d0ea466c5b6ded67b8263ffa8684b84ba0afbb4b0f3f4bb5f857",
+      "crash_point": "after_mutation_before_receipt",
+      "budgets": {
+        "time_ms": 10000,
+        "tool_calls": 8,
+        "model_calls": 8,
+        "prompt_tokens": 800,
+        "completion_tokens": 200,
+        "retries": 2
+      }
+    },
+    {
+      "workflow_id": "wf12",
+      "template_id": "security_flow",
+      "family": "security_analysis",
+      "project_id": 2,
+      "goal_sha256": "3d1e8395494f9c482a57f3c622730e9126c636d3eff8b73f03829c69d632efcd",
+      "contract_sha256": "2165b8e8bccdf9f1ad3f36cc701054ae25e8872431fa1cc15bdd1630d0389ad3",
+      "constraints_sha256": "3ffb8adadbf57135b47939b1e7311fd3dc4a3815ab1bb4c21634875b45f5ee6a",
+      "approval_sha256": "954dc1a852c25e5c0252146466cfc7664add0c3e13cb7b78fc8117d2d80aff9c",
+      "artifact_sha256": "0cbd34536fe7c8cbdd175cb939c815a4e4eef3a54cc6aef369114bc48df3a9ee",
+      "crash_point": "after_receipt_before_cursor",
+      "budgets": {
+        "time_ms": 10000,
+        "tool_calls": 8,
+        "model_calls": 8,
+        "prompt_tokens": 800,
+        "completion_tokens": 200,
+        "retries": 2
+      }
+    },
+    {
+      "workflow_id": "wf13",
+      "template_id": "build_flow",
+      "family": "code_build",
+      "project_id": 1,
+      "goal_sha256": "04dfbfd087578fe25653689bc63d5df70d17a53886140d97353e25c523ce7688",
+      "contract_sha256": "6cbb80a9092284c4b65b6aade50fe97a2630c63c985d367ca46caae70b0d2571",
+      "constraints_sha256": "061270772aac9b8da5b32dd3053efccc51a74dbf4fb2f38f4ece663f5fd3b3ee",
+      "approval_sha256": "51e19a0c54b8cd8616f8bd35e2f87250977febc5fdce1af462ceac2a4ef0fab3",
+      "artifact_sha256": "7eada1b0fdaf9f910e9cb2083e7ca3b3d5b27ce7dd8c853285e673b00bfe6a18",
+      "crash_point": "before_mutation",
+      "budgets": {
+        "time_ms": 10000,
+        "tool_calls": 8,
+        "model_calls": 8,
+        "prompt_tokens": 800,
+        "completion_tokens": 200,
+        "retries": 2
+      }
+    },
+    {
+      "workflow_id": "wf14",
+      "template_id": "repair_flow",
+      "family": "code_fix",
+      "project_id": 2,
+      "goal_sha256": "914768cdbed0af665b78737e9fc045b5e0b55bd229e9b476102b66ea922e9e03",
+      "contract_sha256": "33898b8cf3756af73b3f0e7fa7006b4c41449346636228075c50426567188398",
+      "constraints_sha256": "2c43af912a172c7a19479d5f426681431e2b65e5f628cc9679192cc09fbf1e82",
+      "approval_sha256": "3123393c08c2df92189b2b89bd1f8d0ad87e011a786b29077923808147ab3d97",
+      "artifact_sha256": "32c575f1f21bd62495d11190e39214e4a96574351ea29c3d272f99de58234998",
+      "crash_point": "after_mutation_before_receipt",
+      "budgets": {
+        "time_ms": 10000,
+        "tool_calls": 8,
+        "model_calls": 8,
+        "prompt_tokens": 800,
+        "completion_tokens": 200,
+        "retries": 2
+      }
+    },
+    {
+      "workflow_id": "wf15",
+      "template_id": "research_flow",
+      "family": "deep_research",
+      "project_id": 1,
+      "goal_sha256": "5acf73e5e8bbedf1f103d5af73bb18e893bac45b92d877ffe2cefbd366b77fa3",
+      "contract_sha256": "45c2d14c82c66ccde34b8cd69236d408a5bf8521b8100aec0e5d96992cd3b58c",
+      "constraints_sha256": "577beac338d0136f640d8b514f6961b90dbeb79eb87ee338c5e5c8dd10c679d2",
+      "approval_sha256": "62696d0146cf47f7644e537f6c64ec29acf1ca1d540b3af218968cab3061129d",
+      "artifact_sha256": "60c4e933369f196e215e5e1d766c72433949fa600d3fd339cccd99c0d777fd49",
+      "crash_point": "after_receipt_before_cursor",
+      "budgets": {
+        "time_ms": 10000,
+        "tool_calls": 8,
+        "model_calls": 8,
+        "prompt_tokens": 800,
+        "completion_tokens": 200,
+        "retries": 2
+      }
+    },
+    {
+      "workflow_id": "wf16",
+      "template_id": "file_flow",
+      "family": "file_ops",
+      "project_id": 2,
+      "goal_sha256": "1a542765437728d87e2856c454f2e9b816d70e285f2ebc9e83dd06fa28dc66e7",
+      "contract_sha256": "629cf7759cb20466d9242911312b257c67a946c8a6cc188878e51321fc912231",
+      "constraints_sha256": "20793bccfc4ac52854888fd6aef608c0105862c2bf9faa4da67299cc7adf2a7a",
+      "approval_sha256": "1c65098493a18cf6bd32ebf6fc5573ffce111a559fc84b8f80effb1e01aabddb",
+      "artifact_sha256": "adb785e648527c89d65253ade398dd1eb79e15c7f7a0982db378307fa650c273",
+      "crash_point": "before_mutation",
+      "budgets": {
+        "time_ms": 10000,
+        "tool_calls": 8,
+        "model_calls": 8,
+        "prompt_tokens": 800,
+        "completion_tokens": 200,
+        "retries": 2
+      }
+    },
+    {
+      "workflow_id": "wf17",
+      "template_id": "publish_flow",
+      "family": "external_publish",
+      "project_id": 1,
+      "goal_sha256": "3b79fd6015677231b999a219ad000eb829ff0b32648da2a6a6bea785f671714e",
+      "contract_sha256": "33164334cc13ae9bbd84c22fa8b002265903322f810c270fa168d277bae778cb",
+      "constraints_sha256": "d50236d675137c81e15e64bf986ecde013db18341f6e2b10c4a24a5aaa96a5eb",
+      "approval_sha256": "5c5a137800c49ac9cea065132c3d649d84595d63b81dea024323ab7b5279f2b7",
+      "artifact_sha256": "64b525756d48abc6d5fae12148bf1e5cba86401d9eba23972582e91d3be3a5ef",
+      "crash_point": "after_mutation_before_receipt",
+      "budgets": {
+        "time_ms": 10000,
+        "tool_calls": 8,
+        "model_calls": 8,
+        "prompt_tokens": 800,
+        "completion_tokens": 200,
+        "retries": 2
+      }
+    },
+    {
+      "workflow_id": "wf18",
+      "template_id": "security_flow",
+      "family": "security_analysis",
+      "project_id": 2,
+      "goal_sha256": "558ff0f701e941da795bfd767ab37e871914f7c1ae3f472a209222cc839a4076",
+      "contract_sha256": "00a0d5528e5fc646751a207d9a8f9fbc8d59b40b7571e79f0750afbc8ef7bc09",
+      "constraints_sha256": "94f9cf27fe948cd780b149f154cd6bde0af403bd6d640820eb8164af1303a977",
+      "approval_sha256": "157a57a7f1f6887ffe1deb8ea7b54fc137915668220616b8991f30bef6eb6b12",
+      "artifact_sha256": "95e3cfe24106fff03ab5717dea08286b3ae10aed26f9a2fbcdb95040f1126c3e",
+      "crash_point": "after_receipt_before_cursor",
+      "budgets": {
+        "time_ms": 10000,
+        "tool_calls": 8,
+        "model_calls": 8,
+        "prompt_tokens": 800,
+        "completion_tokens": 200,
+        "retries": 2
+      }
+    },
+    {
+      "workflow_id": "wf19",
+      "template_id": "build_flow",
+      "family": "code_build",
+      "project_id": 1,
+      "goal_sha256": "53fa3779bff5033cca094397c62202c1871134ea962906f6fd5506a86b89c6c9",
+      "contract_sha256": "248f7b41a553f88c97d97474fc0879c0be382f6a20fa68a3a8de405b5fd71d75",
+      "constraints_sha256": "7fa1414eba5a33c3917e0b4f33051d72daa71f6bd3188cd392a209cc3a3ac4c6",
+      "approval_sha256": "6533f21acfbfb6a5284fbf15aeeda868ad5ee07fd45aac82f9d1daeeefa8d343",
+      "artifact_sha256": "73a07451a1ce659d28be10ba0197d28aff30ea618d9bdb85d98ca581d637fa5f",
+      "crash_point": "before_mutation",
+      "budgets": {
+        "time_ms": 10000,
+        "tool_calls": 8,
+        "model_calls": 8,
+        "prompt_tokens": 800,
+        "completion_tokens": 200,
+        "retries": 2
+      }
+    },
+    {
+      "workflow_id": "wf20",
+      "template_id": "repair_flow",
+      "family": "code_fix",
+      "project_id": 2,
+      "goal_sha256": "2e9cd6a04c515e37ef6c022dc23b30c2117e61a6db4f94fc1523735c9b91d34b",
+      "contract_sha256": "b7118128b221716e679b4a0e366e490f6a3943facbbfe4360af0db5f8d7e0398",
+      "constraints_sha256": "cc1ebf1faa7d8ed9c6fddb7c37fa91542e1d3523816f1a36f04736a35570d577",
+      "approval_sha256": "87339b87e2f195fd8ff08128707f72d5fa2f20065dd2f8209858c05c4b53f219",
+      "artifact_sha256": "a08d486f189dc0e28225d4813058bc252d9f06f5d1dcda93e78a306f4417b786",
+      "crash_point": "after_mutation_before_receipt",
+      "budgets": {
+        "time_ms": 10000,
+        "tool_calls": 8,
+        "model_calls": 8,
+        "prompt_tokens": 800,
+        "completion_tokens": 200,
+        "retries": 2
+      }
+    },
+    {
+      "workflow_id": "wf21",
+      "template_id": "research_flow",
+      "family": "deep_research",
+      "project_id": 1,
+      "goal_sha256": "15494585ad6949a0718d883e29f2c2f80cf689d4da0881eb3742f1ca648e1af4",
+      "contract_sha256": "5963d2a7fa8019a543d32ab134523b5cfe0bfc563dc67f5ebf7b9e5d5051c3ff",
+      "constraints_sha256": "3fa758af4686550d47d15b046a0ca38221de1f66b631869b6b1ce136d9b03304",
+      "approval_sha256": "59f3172948a3d3888f628e0fab7e6f16cf683283ee0038f9a00f1b9edca59169",
+      "artifact_sha256": "21dd422cc8b3f33ff0a5d823690bb72a50048728163f2f490e9ea7a3225f13a8",
+      "crash_point": "after_receipt_before_cursor",
+      "budgets": {
+        "time_ms": 10000,
+        "tool_calls": 8,
+        "model_calls": 8,
+        "prompt_tokens": 800,
+        "completion_tokens": 200,
+        "retries": 2
+      }
+    },
+    {
+      "workflow_id": "wf22",
+      "template_id": "file_flow",
+      "family": "file_ops",
+      "project_id": 2,
+      "goal_sha256": "b5c97911f9d3235b0b6caa158676c36b68cc11177899046af9b945a578dd729a",
+      "contract_sha256": "d9d3e385c69cf66a58fbac3a1f4ae3d3d1771b0b9dbda456c776bdaf699dba70",
+      "constraints_sha256": "3025415216e891372651f922c21e818cefaed6badb7a3f39d144b575eef3eeba",
+      "approval_sha256": "33a6da6a4f214a5765bd3f64bd20090c518fb153d80c9855e945422275606386",
+      "artifact_sha256": "c6bd18896b83b6bb2a59d31591e39a13216a1f5c42655ba869eb9c44278ba2ea",
+      "crash_point": "before_mutation",
+      "budgets": {
+        "time_ms": 10000,
+        "tool_calls": 8,
+        "model_calls": 8,
+        "prompt_tokens": 800,
+        "completion_tokens": 200,
+        "retries": 2
+      }
+    },
+    {
+      "workflow_id": "wf23",
+      "template_id": "publish_flow",
+      "family": "external_publish",
+      "project_id": 1,
+      "goal_sha256": "7ad5d8d98685aacb3b921f4a22d74f4ed539933b9df18dd014563bb0c16bb094",
+      "contract_sha256": "2f1786b75311fe47126cd3155cfb6f5b8748d531553c9b2920415202b7efd254",
+      "constraints_sha256": "16104c4825646582a0b123b0d5c856a9afbc6b335a313ace09d439f07043caab",
+      "approval_sha256": "7647ae68ee933d54944c0f17344d5bebaab9072f940af2b9dcde009bb0a13092",
+      "artifact_sha256": "4b7b39a522342d6533caca0aa1e83292097a507b95e649b0537670d241e08b61",
+      "crash_point": "after_mutation_before_receipt",
+      "budgets": {
+        "time_ms": 10000,
+        "tool_calls": 8,
+        "model_calls": 8,
+        "prompt_tokens": 800,
+        "completion_tokens": 200,
+        "retries": 2
+      }
+    },
+    {
+      "workflow_id": "wf24",
+      "template_id": "security_flow",
+      "family": "security_analysis",
+      "project_id": 2,
+      "goal_sha256": "d674a2cb7698268446de978ba7077f0559baad9d6a9aabed58a090f6d944023b",
+      "contract_sha256": "72d5fd57acf2df5df0145eefd8d9fec68e2912040602fcfd1e5c35f4d498b66c",
+      "constraints_sha256": "870f82be175edd568f087626d3ff38896813b2c79016495d13f019dc05c47da4",
+      "approval_sha256": "cb68c55fc604d0cc3972bef58f2208e2c33fe7980916a855b061d100eecf1f71",
+      "artifact_sha256": "e786807173f7713b2169d2fea6d0b40612e33b3ef28891c0e0bc95619ce4e91f",
+      "crash_point": "after_receipt_before_cursor",
+      "budgets": {
+        "time_ms": 10000,
+        "tool_calls": 8,
+        "model_calls": 8,
+        "prompt_tokens": 800,
+        "completion_tokens": 200,
+        "retries": 2
+      }
+    }
+  ],
+  "negative_controls": [
+    {
+      "control_id": "control_time",
+      "kind": "budget_time",
+      "workflow_id": "wf01"
+    },
+    {
+      "control_id": "control_tools",
+      "kind": "budget_tools",
+      "workflow_id": "wf02"
+    },
+    {
+      "control_id": "control_model",
+      "kind": "budget_model_calls",
+      "workflow_id": "wf03"
+    },
+    {
+      "control_id": "control_prompt",
+      "kind": "budget_prompt_tokens",
+      "workflow_id": "wf04"
+    },
+    {
+      "control_id": "control_completion",
+      "kind": "budget_completion_tokens",
+      "workflow_id": "wf05"
+    },
+    {
+      "control_id": "control_retries",
+      "kind": "budget_retries",
+      "workflow_id": "wf06"
+    },
+    {
+      "control_id": "control_cancel",
+      "kind": "cancelled",
+      "workflow_id": "wf07"
+    },
+    {
+      "control_id": "control_tamper",
+      "kind": "tampered_checkpoint",
+      "workflow_id": "wf08"
+    },
+    {
+      "control_id": "control_project",
+      "kind": "cross_project_checkpoint",
+      "workflow_id": "wf09"
+    },
+    {
+      "control_id": "control_replay",
+      "kind": "replayed_effect",
+      "workflow_id": "wf10"
+    }
+  ],
+  "fixture_manifest_sha256": "b8b72e901b45c95ba0a197b18b44c176f040af5e33058c54fa996adef6b069d8"
+}

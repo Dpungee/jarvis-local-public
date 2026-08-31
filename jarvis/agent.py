@@ -725,7 +725,7 @@ _LOCAL_TARGET_THEN_PUBLIC_RESEARCH = re.compile(
 )
 _CODING_ACTION = re.compile(
     r"\b(build|implement|fix|debug|refactor|create|add|change|update|write|make|develop|edit|modify|extend|patch|replace|remove|delete|rename)\b.{0,100}"
-    r"(?:\b(app|application|api|site|website|software|code|test|bug|function|class|project|file|repo|script|module|package|library|program|python|javascript|typescript|react|node|rust|golang|java|swift|kotlin|sql|html|css)\b|"
+    r"(?:\b(app|application|api|site|website|software|code|test|bug|function|method|class|regex|regular expression|query|migration|project|file|repo|script|module|package|library|program|python|javascript|typescript|react|node|rust|golang|java|swift|kotlin|sql|html|css)\b|"
     r"\b[\w.-]+\.(?:py|js|jsx|ts|tsx|java|rs|go|cs|cpp|c|h|html|css|json|toml|yaml|yml|md)\b)",
     re.I | re.S,
 )

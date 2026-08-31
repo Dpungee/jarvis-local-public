@@ -1694,6 +1694,15 @@ class AgentLoopTests(unittest.TestCase):
         self.assertEqual(tools, frozenset({"__effect_path__:stress-test-notes.md"}))
         self.assertEqual(description, "requested document target")
 
+    def test_bounded_code_units_keep_coding_authority_and_verification(self):
+        for prompt in (
+            "Create a regular expression that validates a hexadecimal color",
+            "Refactor this method so it returns early for empty input",
+            "Write a SQL query that finds duplicate email addresses",
+        ):
+            with self.subTest(prompt=prompt):
+                self.assertTrue(_requires_coding(prompt))
+
     def test_offline_multiformat_report_request_routes_to_document_workflow(self):
         prompt = (
             "Inside this isolated diagnostic project, create a source Markdown brief and "

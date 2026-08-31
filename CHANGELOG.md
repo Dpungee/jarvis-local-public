@@ -5,6 +5,21 @@ semantic versioning for tagged releases.
 
 ## [Unreleased]
 
+## [0.6.3] - 2026-08-31
+
+### Routing and operator clarity
+
+- Route structurally bounded, single-unit coding tasks through the fast model while
+  retaining normal coding tools, verification, and automatic escalation to the full
+  coding model after repeated failures. Broad, multi-file, architectural, migration,
+  deployment, and integration work continues to start on the full coding profile.
+- Add natural read-only aliases for `project create`, `memory status`, `reflection
+  list`, and `control status` without weakening any mutation or approval boundary.
+- Clarify that usage success is measured per provider transport call, so a failed
+  attempt remains visible even when retry or failover later completes the request.
+- Make disabled self-inspection errors name the exact opt-in setting required to run
+  the isolated self-test.
+
 ### Capability and supply-chain hardening
 
 - Treat bounded `research_question` excerpts as untrusted web evidence, block
@@ -162,7 +177,8 @@ Public preview release.
 - Public Presence is a disconnected foundation only; it cannot publish or connect to
   a social account in this release.
 
-[Unreleased]: https://github.com/Dpungee/jarvis-local-public/compare/v0.6.2...HEAD
+[Unreleased]: https://github.com/Dpungee/jarvis-local-public/compare/v0.6.3...HEAD
+[0.6.3]: https://github.com/Dpungee/jarvis-local-public/compare/v0.6.2...v0.6.3
 [0.6.2]: https://github.com/Dpungee/jarvis-local-public/compare/v0.6.1...v0.6.2
 [0.6.1]: https://github.com/Dpungee/jarvis-local-public/compare/v0.6.0...v0.6.1
 [0.6.0]: https://github.com/Dpungee/jarvis-local-public/releases/tag/v0.6.0

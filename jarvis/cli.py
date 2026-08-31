@@ -1984,7 +1984,7 @@ def _run_usage(args: argparse.Namespace) -> int:
     if not summary["groups"]:
         print("No model calls recorded in this window.")
         return 0
-    print(f"{'provider/model':42}{'profile':11}{'calls':>7}{'success':>9}{'input':>11}{'output':>11}{'avg ms':>9}{'p95 ms':>9}")
+    print(f"{'provider/model':42}{'profile':11}{'calls':>7}{'call ok':>9}{'input':>11}{'output':>11}{'avg ms':>9}{'p95 ms':>9}")
     for row in summary["groups"]:
         name = f"{row['provider']}/{row['model']}"[:41]
         print(
@@ -1995,6 +1995,10 @@ def _run_usage(args: argparse.Namespace) -> int:
         )
     if summary["truncated"]:
         print("Warning: summary is limited to the newest 50,000 calls in this window.")
+    print(
+        "Call ok is transport-level model-call success. Failed attempts that later "
+        "recover through retry or failover remain counted as failed calls."
+    )
     return 0
 
 
@@ -2098,6 +2102,16 @@ def _run_memory_quality(args: argparse.Namespace) -> int:
 
 def _run_control(args: argparse.Namespace) -> int:
     config = Config.load()
+    if args.control_command == "status":
+        with Memory(config.data_dir / "jarvis.db") as memory:
+            control = memory.control_state()
+        state = _safe_summary(control.get("state") or "unknown", 30)
+        print(f"JARVIS background control: {state}.")
+        if control.get("reason"):
+            print(f"Reason: {_safe_summary(control['reason'], 500)}")
+        if control.get("updated_at"):
+            print(f"Updated: {_safe_summary(control['updated_at'], 100)}")
+        return 0
     state = {"pause": "paused", "resume": "running", "stop": "stopped"}[args.control_command]
     with Memory(config.data_dir / "jarvis.db") as memory:
         memory.set_control_state(state, getattr(args, "reason", None))
@@ -2855,6 +2869,13 @@ def _parser() -> argparse.ArgumentParser:
     memory_quality = sub.add_parser(
         "memory", help="inspect neural recall and automatic memory improvement"
     )
+    memory_quality.add_argument(
+        "memory_command",
+        nargs="?",
+        choices=("status",),
+        default="status",
+        help=argparse.SUPPRESS,
+    )
     memory_quality.add_argument("--json", action="store_true")
     memory_quality.add_argument("--limit", type=int, default=20)
     memory_quality.add_argument(
@@ -2876,6 +2897,7 @@ def _parser() -> argparse.ArgumentParser:
     usage.add_argument("--json", action="store_true")
     control = sub.add_parser("control", help="pause, resume, or emergency-stop JARVIS")
     control_sub = control.add_subparsers(dest="control_command", required=True)
+    control_sub.add_parser("status", help="show the current background-control state")
     for name in ("pause", "resume", "stop"):
         item = control_sub.add_parser(name)
         item.add_argument("--reason", default=None)
@@ -2912,7 +2934,8 @@ def _parser() -> argparse.ArgumentParser:
     task_show.add_argument("task_id", type=int)
     project = sub.add_parser("project", help="manage isolated agent project workspaces")
     project_sub = project.add_subparsers(dest="project_command", required=True)
-    project_add = project_sub.add_parser("add")
+    project_add = project_sub.add_parser("add", aliases=("create",))
+    project_add.set_defaults(project_command="add")
     project_add.add_argument("name", nargs="+")
     project_sub.add_parser("list")
     agents = sub.add_parser(
@@ -3023,6 +3046,13 @@ def _parser() -> argparse.ArgumentParser:
     activity = sub.add_parser("activity", help="inspect the persistent activity log")
     activity.add_argument("--limit", type=int, default=100)
     reflection = sub.add_parser("reflection", help="inspect post-task reflections")
+    reflection.add_argument(
+        "reflection_command",
+        nargs="?",
+        choices=("list",),
+        default="list",
+        help=argparse.SUPPRESS,
+    )
     reflection.add_argument("--limit", type=int, default=50)
     repair = sub.add_parser("repair", help="review isolated, never-applied self-repair drafts")
     repair_sub = repair.add_subparsers(dest="repair_command", required=True)

@@ -307,9 +307,9 @@ class PublicPublishSourceTests(unittest.TestCase):
         publishing = (ROOT / "docs" / "PUBLISHING.md").read_text(encoding="utf-8")
         for forbidden in PUBLISH.FORBIDDEN_PUSH_OPTIONS:
             self.assertNotIn(forbidden, publishing)
-        self.assertIn("HEAD:refs/heads/release/v0.6.2", publishing)
+        self.assertIn("HEAD:refs/heads/release/v0.6.3", publishing)
         self.assertIn("HEAD:refs/heads/main", publishing)
-        self.assertIn("refs/tags/v0.6.2:refs/tags/v0.6.2", publishing)
+        self.assertIn("refs/tags/v0.6.3:refs/tags/v0.6.3", publishing)
         self.assertIn("Do not merge the pull request through", publishing)
         self.assertNotIn("Merge only after", publishing)
 

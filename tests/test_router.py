@@ -44,6 +44,36 @@ class RouterTests(unittest.TestCase):
         route = self.router.select("Build a Python API and add integration tests")
         self.assertEqual(route.model, "qwen3-coder:30b")
 
+    def test_bounded_code_units_start_fast_and_keep_escalation_available(self):
+        prompts = (
+            "Write a function that checks whether a word is a palindrome",
+            "Add unit tests for the calculate_total function",
+            "Create a regular expression that validates a hexadecimal color",
+            "Refactor this method so it returns early for empty input",
+        )
+        for prompt in prompts:
+            with self.subTest(prompt=prompt):
+                route = self.router.select(prompt)
+                self.assertEqual(route.profile, "fast")
+                self.assertEqual(route.model, "qwen3.5:9b")
+                self.assertIn("bounded coding unit", route.reason)
+                escalated = self.router.escalate(route, prompt)
+                self.assertEqual(escalated.profile, "coding")
+                self.assertEqual(escalated.model, "qwen3-coder:30b")
+
+    def test_broad_or_multifile_coding_stays_on_full_coder(self):
+        prompts = (
+            "Build a Python API and add integration tests",
+            "Refactor the authentication system across multiple files",
+            "Create a database migration and deployment service",
+            "Update parser.py and lexer.py with matching classes",
+        )
+        for prompt in prompts:
+            with self.subTest(prompt=prompt):
+                route = self.router.select(prompt)
+                self.assertEqual(route.profile, "coding")
+                self.assertEqual(route.model, "qwen3-coder:30b")
+
     def test_normal_explanations_and_current_queries_stay_fast(self):
         prompts = (
             "What is Python?",

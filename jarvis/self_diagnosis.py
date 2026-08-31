@@ -322,7 +322,10 @@ def run_isolated_selftest(
 ) -> dict[str, Any]:
     """Copy the runtime, remove secrets/state, and test only the disposable copy."""
     if config.self_inspect != "read-only":
-        raise PermissionError("Read-only self-inspection is disabled")
+        raise PermissionError(
+            "Read-only self-inspection is disabled. Set "
+            "JARVIS_SELF_INSPECT=read-only, then rerun the self-test."
+        )
     if full and anchors:
         raise ValueError("Full and anchor self-test modes are mutually exclusive")
     timeout = max(30, min(int(timeout), 3_600))
@@ -578,7 +581,10 @@ def create_repair_draft(
 ) -> dict[str, Any]:
     """Create a static review draft in a private copy; never execute or apply it."""
     if getattr(config, "self_inspect", "disabled") != "read-only":
-        raise PermissionError("Read-only self-inspection is disabled")
+        raise PermissionError(
+            "Read-only self-inspection is disabled. Set "
+            "JARVIS_SELF_INSPECT=read-only, then rerun the self-test."
+        )
     if getattr(config, "self_repair", "disabled") != "propose":
         raise PermissionError("Self-repair proposal mode is disabled")
     raw_edits = list(edits)

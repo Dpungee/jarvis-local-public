@@ -9,10 +9,10 @@ from .security_expertise import classify_security_expertise
 
 CODING_ACTION_PATTERNS = (
     r"\b(?:build|implement|debug|fix|refactor|compile|deploy|develop|edit|modify|patch|replace|remove|delete|rename)\b.{0,100}"
-    r"(?:\b(?:app|application|api|site|website|software|code|tests?|bugs?|functions?|classes?|project|files?|repo(?:sitory)?|script|module|package|library|program|database|python|javascript|typescript|react|node|rust|golang|java|swift|kotlin|sql|html|css)\b|"
+    r"(?:\b(?:app|application|api|site|website|software|code|tests?|bugs?|functions?|methods?|classes?|regex(?:es)?|regular expressions?|queries?|migrations?|project|files?|repo(?:sitory)?|script|module|package|library|program|database|python|javascript|typescript|react|node|rust|golang|java|swift|kotlin|sql|html|css)\b|"
     r"\b[\w.-]+\.(?:py|js|jsx|ts|tsx|java|rs|go|cs|cpp|c|h|html|css|json|toml|yaml|yml|md)\b)",
     r"\b(?:create|add|change|update|write|make)\b.{0,100}"
-    r"(?:\b(?:app|application|api|website|software|source code|unit tests?|integration tests?|functions?|classes?|project files?|repository|script|module|package|program|database schema|python|javascript|typescript|react|node|rust|golang|java|swift|kotlin|sql|html|css)\b|"
+    r"(?:\b(?:app|application|api|website|software|source code|unit tests?|integration tests?|functions?|methods?|classes?|regex(?:es)?|regular expressions?|queries?|migrations?|project files?|repository|script|module|package|program|database schema|python|javascript|typescript|react|node|rust|golang|java|swift|kotlin|sql|html|css)\b|"
     r"\b[\w.-]+\.(?:py|js|jsx|ts|tsx|java|rs|go|cs|cpp|c|h|html|css|json|toml|yaml|yml)\b)",
 )
 
@@ -41,6 +41,24 @@ FAST_PATTERNS = (
     r"\b(summarize|rewrite|translate|brainstorm|explain simply)\b",
 )
 
+_LIGHTWEIGHT_CODE_UNIT = re.compile(
+    r"\b(?:function|method|class|unit\s+tests?|test\s+cases?|regex|"
+    r"regular\s+expression|query|snippet)\b",
+    re.I,
+)
+_BROAD_CODE_SCOPE = re.compile(
+    r"\b(?:app|application|api|site|website|service|system|architecture|"
+    r"repository|repo|project|package|library|database|schema|migration|"
+    r"deployment|deploy|integration|end[- ]to[- ]end|multi[- ]file|"
+    r"multiple\s+files?)\b",
+    re.I,
+)
+_CODE_FILE_TARGET = re.compile(
+    r"\b[\w.-]+\.(?:py|js|jsx|ts|tsx|java|rs|go|cs|cpp|c|h|html|css|"
+    r"json|toml|yaml|yml)\b",
+    re.I,
+)
+
 _NEGATED_CODING_CLAUSE = re.compile(
     r"\b(?:do\s+not|don['’]t|never|without)\s+"
     r"(?:(?:create|add|change|update|write|make|build|implement|debug|fix|refactor|"
@@ -53,6 +71,26 @@ _NEGATED_CODING_CLAUSE = re.compile(
 def coding_intent_text(prompt: str) -> str:
     """Remove explicit negative constraints before classifying coding intent."""
     return _NEGATED_CODING_CLAUSE.sub("", prompt)
+
+
+def lightweight_coding_intent(prompt: str) -> bool:
+    """Identify bounded code units that can start on the fast profile.
+
+    This deliberately uses scope rather than named products or memorized prompt
+    phrases.  Broad artifacts, long specifications, and multi-file targets stay
+    on the full coding profile.  A lightweight route retains normal coding
+    tools and verification, and Agent escalation promotes it after repeated
+    tool failures.
+    """
+
+    text = re.sub(r"\s+", " ", coding_intent_text(prompt)).strip()
+    if not text or len(text.split()) > 48:
+        return False
+    if _LIGHTWEIGHT_CODE_UNIT.search(text) is None:
+        return False
+    if _BROAD_CODE_SCOPE.search(text) is not None:
+        return False
+    return len(_CODE_FILE_TARGET.findall(text)) <= 1
 
 
 @dataclass(frozen=True)
@@ -260,6 +298,11 @@ class ModelRouter:
         if evaluation_score >= 2:
             return self._with_fallback("reasoning", f"deterministic evaluation (score {evaluation_score})")
         if coding_score >= 1:
+            if lightweight_coding_intent(text):
+                return self._with_fallback(
+                    "fast",
+                    "bounded coding unit; automatic coding escalation remains available",
+                )
             return self._with_fallback("coding", f"coding task (score {coding_score})")
         if research_score >= 1:
             return self._with_fallback("reasoning", f"research task (score {research_score})")

@@ -335,7 +335,45 @@ class CliOfflineTests(unittest.TestCase):
             rendered = stdout.getvalue()
             self.assertIn("openai/gpt-test", rendered)
             self.assertIn("prompt/response content is not stored", rendered)
+            self.assertIn("call ok", rendered)
+            self.assertIn("transport-level model-call success", rendered)
             self.assertIn("250", rendered)
+
+    def test_natural_cli_aliases_parse_to_existing_read_and_create_actions(self):
+        parser = cli._parser()
+
+        project = parser.parse_args(["project", "create", "Demo"])
+        memory = parser.parse_args(["memory", "status"])
+        reflection = parser.parse_args(["reflection", "list"])
+        control = parser.parse_args(["control", "status"])
+
+        self.assertEqual(project.project_command, "add")
+        self.assertEqual(project.name, ["Demo"])
+        self.assertEqual(memory.command, "memory")
+        self.assertEqual(memory.memory_command, "status")
+        self.assertEqual(reflection.command, "reflection")
+        self.assertEqual(reflection.reflection_command, "list")
+        self.assertEqual(control.control_command, "status")
+
+    def test_control_status_reports_without_mutating_control_state(self):
+        with tempfile.TemporaryDirectory() as directory:
+            config = fake_config()
+            config.data_dir = Path(directory)
+            with DurableMemory(config.data_dir / "jarvis.db") as memory:
+                memory.set_control_state("paused", "maintenance window")
+
+            stdout = io.StringIO()
+            with (
+                patch.object(cli.Config, "load", return_value=config),
+                patch("sys.stdout", stdout),
+            ):
+                cli.main(["control", "status"])
+
+            rendered = stdout.getvalue()
+            self.assertIn("background control: paused", rendered)
+            self.assertIn("maintenance window", rendered)
+            with DurableMemory(config.data_dir / "jarvis.db") as memory:
+                self.assertEqual(memory.control_state()["state"], "paused")
 
     def test_task_show_redacts_legacy_persisted_secrets(self):
         secret = "sk-proj-" + "D" * 32

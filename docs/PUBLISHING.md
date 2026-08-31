@@ -19,8 +19,8 @@ $candidate = "C:\path\to\reviewed\jarvis-local"
 $publishClone = Join-Path ([IO.Path]::GetTempPath()) ("jarvis-public-" + [guid]::NewGuid())
 $approvedCommit = "FULL_40_CHARACTER_APPROVED_COMMIT"
 $approvedRoot = "FULL_40_CHARACTER_SANITIZED_ROOT"
-$sourceBranch = "public-v0.6.2-ready"
-$versionTag = "v0.6.2"
+$sourceBranch = "public-v0.6.3-ready"
+$versionTag = "v0.6.3"
 $publicUrl = "https://github.com/OWNER/jarvis-local-public.git"
 
 git clone --no-local --single-branch --no-tags --branch $sourceBranch $candidate $publishClone
@@ -63,10 +63,10 @@ candidate branch is published. Never rely on the post-push checks as the first s
 Use only the command printed by the guard. Its shape is:
 
 ```powershell
-git push public HEAD:refs/heads/release/v0.6.2
+git push public HEAD:refs/heads/release/v0.6.3
 ```
 
-Open a pull request from `release/v0.6.2` to protected `main` so review and required
+Open a pull request from `release/v0.6.3` to protected `main` so review and required
 checks run against the exact candidate commit. Do not merge the pull request through
 GitHub: after every required check passes, promote that exact commit as described below,
 then close the pull request. Do not publish the version tag from the candidate clone.
@@ -101,7 +101,7 @@ remote, add the credential-free destination as `public`, create a lightweight ta
 only local `main` and the intended tag. The reviewed command has this shape:
 
 ```powershell
-git push public refs/tags/v0.6.2:refs/tags/v0.6.2
+git push public refs/tags/v0.6.3:refs/tags/v0.6.3
 ```
 
 Do not add implicit or broad ref-selection options. After tagging, compare the public

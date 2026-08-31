@@ -1,6 +1,6 @@
 # Windows first-run guide
 
-This guide describes the current JARVIS Local 0.6.2 Public Preview installer. Jarvis is
+This guide describes the current JARVIS Local 0.6.3 Public Preview installer. Jarvis is
 alpha software for one supervised Windows operator. Setup does not grant administrator,
 desktop, account, network-scanning, or publishing authority.
 
@@ -10,7 +10,7 @@ desktop, account, network-scanning, or publishing authority.
 2. Install [Python 3.11, 3.12, or 3.13](https://www.python.org/downloads/windows/).
    Select **Add python.exe to PATH** in the Python installer.
 3. Download the **Exact release source archive** from the
-   [v0.6.2 release](https://github.com/Dpungee/jarvis-local-public/releases/tag/v0.6.2)
+   [v0.6.3 release](https://github.com/Dpungee/jarvis-local-public/releases/tag/v0.6.3)
    and extract it. The wheel and source distribution are intended for Python package
    workflows; they are not the double-click installer.
 4. Choose a model-provider path before running setup:
@@ -20,7 +20,7 @@ desktop, account, network-scanning, or publishing authority.
    - **Claude CLI:** uses an eligible Claude subscription through the official Claude
      sign-in.
    - **Both:** uses Claude for fast/reasoning work and Codex for coding/deep work.
-   - **Ollama:** local-only operation is supported, but v0.6.2 does not yet expose an
+   - **Ollama:** local-only operation is supported, but v0.6.3 does not yet expose an
      Ollama preset in the first-run chooser. Follow the manual local path below.
 
 Account eligibility and usage limits come from the selected provider. Jarvis verifies
@@ -32,7 +32,7 @@ file.
 1. Double-click `setup.bat` in the extracted project folder.
 2. Confirm the Python version and path shown at the beginning. Setup installs Jarvis and
    its document-generation libraries into that Python environment. It does not create a
-   virtual environment in v0.6.2.
+   virtual environment in v0.6.3.
 3. Choose Codex CLI, Claude CLI, or both. If the selected CLI is missing, setup can offer
    to install its exact Windows Package Manager package. If it is not signed in, setup
    can start the provider's official sign-in flow.

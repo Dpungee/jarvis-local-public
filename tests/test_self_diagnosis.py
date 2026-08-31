@@ -322,7 +322,10 @@ class SelfDiagnosisTests(unittest.TestCase):
         anchor_test.assert_not_called()
 
     def test_selftest_is_disabled_by_default_and_never_copies_live_state(self):
-        with self.assertRaisesRegex(PermissionError, "disabled"):
+        with self.assertRaisesRegex(
+            PermissionError,
+            "JARVIS_SELF_INSPECT=read-only",
+        ):
             diagnosis.run_isolated_selftest(
                 SimpleNamespace(self_inspect="disabled"), full=True
             )

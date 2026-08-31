@@ -819,6 +819,305 @@ def _trial_sha256(value: str) -> str:
     return value
 
 
+_WORKFLOW_STATUS_FIELDS = (
+    "schema",
+    "plan_id",
+    "project_id",
+    "conversation_id",
+    "task_id",
+    "status",
+    "manifest_sha256",
+    "stage_count",
+    "next_stage_ordinal",
+    "completed_stages",
+    "budget",
+    "usage",
+    "remaining",
+    "current_claim",
+    "checkpoint_head_sha256",
+    "mutation_state",
+    "final_verification",
+    "quarantine_reason",
+)
+_WORKFLOW_NESTED_FIELDS = frozenset({
+    "attempt_count",
+    "claim_sha256",
+    "completion_tokens",
+    "elapsed_seconds",
+    "elapsed_ms",
+    "expires_at",
+    "intent_sha256",
+    "lease_expires_at",
+    "model_calls",
+    "ordinal",
+    "outcome_sha256",
+    "prompt_tokens",
+    "receipt_sha256",
+    "reconciled",
+    "result_sha256",
+    "retries",
+    "stage_id",
+    "stage_key",
+    "stage_ordinal",
+    "status",
+    "time_ms",
+    "tool_calls",
+    "verified",
+    "verified_at",
+    "verification_sha256",
+    "verifier_kind",
+    "passed",
+})
+_WORKFLOW_CODE = re.compile(r"[a-z0-9][a-z0-9_.:-]{0,99}\Z")
+_WORKFLOW_TIMESTAMP = re.compile(
+    r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9:.+-]{8,35}Z?\Z"
+)
+
+
+def _workflow_limit(value: str) -> int:
+    parsed = _trial_positive_integer(value)
+    if parsed > 200:
+        raise argparse.ArgumentTypeError("must be between 1 and 200")
+    return parsed
+
+
+def _workflow_store(memory: Any, project_id: int) -> Any:
+    """Load the Phase 5 store without making ordinary CLI startup depend on it."""
+
+    try:
+        from .long_horizon import LongHorizonStore
+    except (ImportError, AttributeError) as exc:
+        raise RuntimeError(
+            "Phase 5 workflow storage is unavailable; no workflow state was changed"
+        ) from exc
+    return LongHorizonStore(memory, project_id=int(project_id))
+
+
+def _workflow_manifest_from_path(path_value: Path) -> Any:
+    """Read one bounded closed manifest without accepting executable content."""
+
+    path = Path(path_value)
+    if path.is_symlink() or not path.is_file():
+        raise ValueError("Workflow manifest must be one regular non-symlink file")
+    try:
+        with path.open("rb") as handle:
+            raw = handle.read(128 * 1024 + 1)
+    except OSError as exc:
+        raise ValueError("Workflow manifest could not be read") from exc
+    if len(raw) > 128 * 1024:
+        raise ValueError("Workflow manifest exceeds the 128 KiB limit")
+    try:
+        text = raw.decode("utf-8", errors="strict")
+    except UnicodeDecodeError as exc:
+        raise ValueError("Workflow manifest must be UTF-8 JSON") from exc
+
+    def reject_duplicate_pairs(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+        result: dict[str, Any] = {}
+        for key, value in pairs:
+            if key in result:
+                raise ValueError("Workflow manifest contains a duplicate field")
+            result[key] = value
+        return result
+
+    def reject_constant(_value: str) -> None:
+        raise ValueError("Workflow manifest contains a non-finite number")
+
+    try:
+        payload = json.loads(
+            text,
+            object_pairs_hook=reject_duplicate_pairs,
+            parse_constant=reject_constant,
+        )
+    except (TypeError, ValueError, json.JSONDecodeError) as exc:
+        raise ValueError("Workflow manifest is not valid closed JSON") from exc
+    if not isinstance(payload, dict):
+        raise ValueError("Workflow manifest must be one JSON object")
+
+    manifest_fields = {
+        "schema", "project_id", "conversation_id", "task_id", "goal_sha256",
+        "contract_sha256", "constraints_sha256", "approval_scope_sha256",
+        "artifact_set_sha256", "budget", "stages",
+    }
+    budget_fields = {
+        "elapsed_seconds", "tool_calls", "model_calls", "prompt_tokens",
+        "completion_tokens", "retries",
+    }
+    stage_fields = {"stage_id", "ordinal", "stage_type", "mutation_kind", "budget"}
+    if set(payload) != manifest_fields:
+        raise ValueError("Workflow manifest fields do not match the closed schema")
+    for key in ("project_id", "conversation_id", "task_id"):
+        value = payload[key]
+        if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+            raise ValueError(f"Workflow manifest {key} must be a positive integer")
+    for key in (
+        "goal_sha256", "contract_sha256", "constraints_sha256",
+        "approval_scope_sha256", "artifact_set_sha256",
+    ):
+        if not isinstance(payload[key], str) or re.fullmatch(
+            r"[0-9a-f]{64}", payload[key]
+        ) is None:
+            raise ValueError(f"Workflow manifest {key} must be one SHA-256 digest")
+    budget = payload["budget"]
+    if not isinstance(budget, dict) or set(budget) != budget_fields:
+        raise ValueError("Workflow manifest budget fields do not match the closed schema")
+    for value in budget.values():
+        if isinstance(value, bool) or not isinstance(value, int):
+            raise ValueError("Workflow manifest budgets must be integers")
+    stages = payload["stages"]
+    if not isinstance(stages, list):
+        raise ValueError("Workflow manifest stages must be an array")
+    for stage in stages:
+        if not isinstance(stage, dict) or set(stage) != stage_fields:
+            raise ValueError("Workflow stage fields do not match the closed schema")
+        if (
+            not isinstance(stage["stage_id"], str)
+            or isinstance(stage["ordinal"], bool)
+            or not isinstance(stage["ordinal"], int)
+            or not isinstance(stage["stage_type"], str)
+            or not isinstance(stage["mutation_kind"], str)
+        ):
+            raise ValueError("Workflow stage metadata has invalid types")
+        stage_budget = stage["budget"]
+        if not isinstance(stage_budget, dict) or set(stage_budget) != budget_fields:
+            raise ValueError("Workflow stage budget fields do not match the closed schema")
+        if any(isinstance(value, bool) or not isinstance(value, int) for value in stage_budget.values()):
+            raise ValueError("Workflow stage budgets must be integers")
+    try:
+        from .long_horizon import WorkflowManifest
+
+        return WorkflowManifest.from_value(payload)
+    except (ImportError, AttributeError) as exc:
+        raise RuntimeError(
+            "Phase 5 manifest validation is unavailable; no workflow state was changed"
+        ) from exc
+
+
+def _workflow_safe_nested(value: Any) -> Any:
+    """Keep only prompt-free receipt fields from nested workflow status."""
+
+    if value is None or isinstance(value, bool):
+        return value
+    if isinstance(value, int) and not isinstance(value, bool):
+        return value if 0 <= value <= 9_223_372_036_854_775_807 else None
+    if isinstance(value, str):
+        text = value.strip().casefold()
+        if re.fullmatch(r"[0-9a-f]{64}", text):
+            return text
+        if _WORKFLOW_CODE.fullmatch(text) or _WORKFLOW_TIMESTAMP.fullmatch(value.strip()):
+            return value.strip()
+        return None
+    if isinstance(value, dict):
+        result: dict[str, Any] = {}
+        for key, child in value.items():
+            name = str(key)
+            if name not in _WORKFLOW_NESTED_FIELDS:
+                continue
+            safe = _workflow_safe_nested(child)
+            if safe is not None:
+                result[name] = safe
+        return result
+    return None
+
+
+def _workflow_status_row(value: Any, *, project_id: int) -> dict[str, Any]:
+    """Validate project binding and whitelist one prompt-free workflow receipt."""
+
+    if not isinstance(value, dict):
+        raise RuntimeError("Workflow storage returned a malformed status receipt")
+    row_project = value.get("project_id")
+    if (
+        isinstance(row_project, bool)
+        or not isinstance(row_project, int)
+        or row_project != int(project_id)
+    ):
+        # Do not reveal whether a plan ID belongs to another project.
+        raise ValueError("Workflow was not found in the selected project")
+    plan_id = value.get("plan_id", value.get("id"))
+    if isinstance(plan_id, bool) or not isinstance(plan_id, int) or plan_id < 1:
+        raise RuntimeError("Workflow storage returned an invalid plan receipt")
+    status = str(value.get("status") or "").strip().casefold()
+    if _WORKFLOW_CODE.fullmatch(status) is None:
+        raise RuntimeError("Workflow storage returned an invalid status code")
+
+    result: dict[str, Any] = {
+        "plan_id": plan_id,
+        "project_id": row_project,
+        "status": status,
+    }
+    for key in _WORKFLOW_STATUS_FIELDS:
+        if key in result or key not in value:
+            continue
+        child = value[key]
+        if key in {"conversation_id", "task_id", "stage_count", "next_stage_ordinal", "completed_stages"}:
+            if child is None:
+                result[key] = None
+            elif isinstance(child, int) and not isinstance(child, bool) and child >= 0:
+                result[key] = child
+            else:
+                raise RuntimeError(f"Workflow storage returned invalid {key}")
+        elif key in {"manifest_sha256", "checkpoint_head_sha256"}:
+            if child is None:
+                result[key] = None
+            else:
+                digest = str(child).strip().casefold()
+                if re.fullmatch(r"[0-9a-f]{64}", digest) is None:
+                    raise RuntimeError(f"Workflow storage returned invalid {key}")
+                result[key] = digest
+        elif key in {"schema", "quarantine_reason"}:
+            code = str(child or "").strip().casefold()
+            if code and _WORKFLOW_CODE.fullmatch(code):
+                result[key] = code
+        elif key == "mutation_state":
+            if not isinstance(child, dict):
+                raise RuntimeError("Workflow storage returned invalid mutation state")
+            mutation_state: dict[str, str] = {}
+            for stage_key, state in child.items():
+                safe_stage = str(stage_key).strip().casefold()
+                safe_state = str(state).strip().casefold()
+                if (
+                    _WORKFLOW_CODE.fullmatch(safe_stage) is None
+                    or _WORKFLOW_CODE.fullmatch(safe_state) is None
+                ):
+                    raise RuntimeError("Workflow storage returned invalid mutation state")
+                mutation_state[safe_stage] = safe_state
+            result[key] = mutation_state
+        else:
+            safe = _workflow_safe_nested(child)
+            if safe is not None:
+                result[key] = safe
+    return result
+
+
+def _workflow_plan_for_project(store: Any, plan_id: int, project_id: int) -> dict[str, Any]:
+    row = store.show_plan(int(plan_id))
+    if row is None:
+        raise ValueError("Workflow was not found in the selected project")
+    return _workflow_status_row(row, project_id=int(project_id))
+
+
+def _workflow_reason_sha256(action: str) -> str:
+    """Use a fixed audit reason without accepting or persisting operator prose."""
+
+    return hashlib.sha256(f"jarvis.workflow.operator-{action}.v1".encode("ascii")).hexdigest()
+
+
+def _workflow_require_project(
+    memory: Any,
+    project_id: int,
+    *,
+    require_enabled: bool = False,
+) -> dict[str, Any]:
+    getter = getattr(memory, "get_project", None)
+    if not callable(getter):
+        raise RuntimeError("Project storage is unavailable; no workflow state was changed")
+    project = getter(int(project_id))
+    if not isinstance(project, dict) or int(project.get("id") or 0) != int(project_id):
+        raise ValueError(f"Project #{int(project_id)} does not exist")
+    if require_enabled and not bool(project.get("enabled")):
+        raise ValueError(f"Project #{int(project_id)} is disabled")
+    return project
+
+
 def _retry_delay(attempt_count: int) -> int:
     exponent = max(0, min(int(attempt_count) - 1, 10))
     return min(MAX_RETRY_SECONDS, BASE_RETRY_SECONDS * (2**exponent))
@@ -2335,6 +2634,175 @@ def _run_strategy_transfer(args: argparse.Namespace) -> int:
     raise StrategyTransferOperatorError("unsupported strategy-transfer command")
 
 
+def _workflow_json(command: str, project_id: int, **payload: Any) -> None:
+    print(json.dumps({
+        "schema": f"jarvis.workflow-cli-{command}.v1",
+        "project_id": int(project_id),
+        **payload,
+    }, ensure_ascii=False, indent=2, sort_keys=True))
+
+
+def _run_workflow(args: argparse.Namespace) -> int:
+    """Inspect and control durable workflows without invoking a model."""
+
+    config = Config.load()
+    command = args.workflow_command
+    project_id = int(args.project)
+    with Memory(config.data_dir / "jarvis.db") as memory:
+        _workflow_require_project(
+            memory,
+            project_id,
+            require_enabled=command in {"start", "resume"},
+        )
+        store = _workflow_store(memory, project_id)
+
+        if command in {"status", "list"}:
+            raw_rows = store.list_plans(
+                project_id=project_id,
+                limit=int(getattr(args, "limit", 50)),
+            )
+            if not isinstance(raw_rows, list):
+                raise RuntimeError("Workflow storage returned a malformed plan list")
+            rows = [
+                _workflow_status_row(row, project_id=project_id)
+                for row in raw_rows
+            ]
+            if command == "status":
+                counts: dict[str, int] = {}
+                for row in rows:
+                    state = str(row["status"])
+                    counts[state] = counts.get(state, 0) + 1
+                payload = {
+                    "counts": dict(sorted(counts.items())),
+                    "returned": len(rows),
+                    "limit": int(getattr(args, "limit", 50)),
+                }
+                if args.json:
+                    _workflow_json("status", project_id, **payload)
+                else:
+                    print(f"Project #{project_id} workflows: {len(rows)} returned.")
+                    if counts:
+                        print("States: " + ", ".join(
+                            f"{name}={count}" for name, count in sorted(counts.items())
+                        ))
+                    else:
+                        print("No workflows in this project.")
+                return 0
+
+            if args.json:
+                _workflow_json("list", project_id, plans=rows)
+            elif not rows:
+                print(f"No workflows in project #{project_id}.")
+            else:
+                for row in rows:
+                    complete = row.get("completed_stages")
+                    total = row.get("stage_count")
+                    progress = (
+                        f" stages={complete}/{total}"
+                        if isinstance(complete, int) and isinstance(total, int)
+                        else ""
+                    )
+                    print(f"#{row['plan_id']} {row['status']}{progress}")
+            return 0
+
+        if command == "show":
+            row = _workflow_plan_for_project(
+                store, int(args.plan_id), project_id
+            )
+            if args.json:
+                _workflow_json("show", project_id, plan=row)
+            else:
+                print(f"Workflow #{row['plan_id']}: {row['status']}")
+                if "completed_stages" in row and "stage_count" in row:
+                    print(
+                        f"Stages: {row['completed_stages']}/{row['stage_count']} "
+                        f"(next={row.get('next_stage_ordinal')})"
+                    )
+                if row.get("manifest_sha256"):
+                    print(f"Manifest: {row['manifest_sha256']}")
+                if row.get("checkpoint_head_sha256"):
+                    print(f"Checkpoint head: {row['checkpoint_head_sha256']}")
+                if row.get("quarantine_reason"):
+                    print(f"Quarantine: {row['quarantine_reason']}")
+                if "budget" in row:
+                    print("Budget: " + json.dumps(row["budget"], sort_keys=True))
+                if "usage" in row:
+                    print("Usage: " + json.dumps(row["usage"], sort_keys=True))
+                if "remaining" in row:
+                    print("Remaining: " + json.dumps(row["remaining"], sort_keys=True))
+                if "final_verification" in row:
+                    print(
+                        "Final verification: "
+                        + json.dumps(row["final_verification"], sort_keys=True)
+                    )
+            return 0
+
+        if command in {"pause", "resume", "cancel"}:
+            plan_id = int(args.plan_id)
+            _workflow_plan_for_project(store, plan_id, project_id)
+            if command == "pause":
+                changed = store.pause_plan(
+                    plan_id, _workflow_reason_sha256("pause")
+                )
+            elif command == "resume":
+                changed = store.resume_plan(plan_id)
+            else:
+                changed = store.cancel_plan(
+                    plan_id, _workflow_reason_sha256("cancel")
+                )
+            if changed is None or changed is False:
+                raise RuntimeError(
+                    f"Workflow #{plan_id} did not accept the operator {command} request"
+                )
+            row = _workflow_plan_for_project(store, plan_id, project_id)
+            if command == "pause" and row["status"] != "paused":
+                raise RuntimeError("Workflow storage did not confirm the pause")
+            if command == "cancel" and row["status"] != "cancelled":
+                raise RuntimeError("Workflow storage did not confirm cancellation")
+            if command == "resume" and row["status"] in {"paused", "cancelled"}:
+                raise RuntimeError("Workflow storage did not confirm the resume")
+            if args.json:
+                _workflow_json(command, project_id, plan=row)
+            else:
+                verb = {
+                    "pause": "Paused",
+                    "resume": "Resumed",
+                    "cancel": "Cancelled",
+                }[command]
+                print(f"{verb} workflow #{plan_id} in project #{project_id}.")
+            return 0
+
+        if command == "start":
+            manifest = _workflow_manifest_from_path(args.manifest)
+            if int(manifest.project_id) != project_id:
+                raise ValueError(
+                    "Workflow manifest is not bound to the selected project"
+                )
+            plan_id = store.create_plan(manifest)
+            if isinstance(plan_id, bool) or not isinstance(plan_id, int) or plan_id < 1:
+                raise RuntimeError(
+                    "Workflow storage did not return a valid durable plan receipt"
+                )
+            row = _workflow_plan_for_project(store, plan_id, project_id)
+            if row.get("manifest_sha256") is None:
+                raise RuntimeError(
+                    "Workflow storage did not return a bound manifest receipt"
+                )
+            if args.json:
+                _workflow_json("start", project_id, plan=row)
+            else:
+                print(
+                    f"Registered workflow plan #{plan_id} in project #{project_id}. "
+                    "This command only registered durable coordination state. "
+                    "No shipped component advances stages or performs tool, model, "
+                    "or external work. Future adapters require separate review and "
+                    "integration with policy, approval, measured-usage, "
+                    "reconciliation, and verifier boundaries."
+                )
+            return 0
+    raise ValueError("Unknown workflow command")
+
+
 def _run_goal(args: argparse.Namespace) -> int:
     config = Config.load()
     with Memory(config.data_dir / "jarvis.db") as memory:
@@ -3051,7 +3519,7 @@ def _parser() -> argparse.ArgumentParser:
     selftest_mode.add_argument(
         "--anchors",
         action="store_true",
-        help="run the immutable Phase 5 behavioral anchor set",
+        help="run the immutable self-repair behavioral anchor set",
     )
     selftest.add_argument("--json", action="store_true")
     sub.add_parser("ui", help="open the native Jarvis desktop chat interface")
@@ -3176,6 +3644,59 @@ def _parser() -> argparse.ArgumentParser:
     strategy_transfer_promote.add_argument(
         "manifest_id", type=_trial_positive_integer
     )
+    workflow = sub.add_parser(
+        "workflow",
+        help="inspect and control restart-safe registered workflow state",
+    )
+    workflow_sub = workflow.add_subparsers(
+        dest="workflow_command", required=True
+    )
+    workflow_status = workflow_sub.add_parser(
+        "status", help="show prompt-free workflow counts for one exact project"
+    )
+    workflow_status.add_argument(
+        "--project", type=_trial_positive_integer, required=True
+    )
+    workflow_status.add_argument("--limit", type=_workflow_limit, default=50)
+    workflow_status.add_argument("--json", action="store_true")
+    workflow_list = workflow_sub.add_parser(
+        "list", help="list prompt-free workflow receipts for one exact project"
+    )
+    workflow_list.add_argument(
+        "--project", type=_trial_positive_integer, required=True
+    )
+    workflow_list.add_argument("--limit", type=_workflow_limit, default=50)
+    workflow_list.add_argument("--json", action="store_true")
+    workflow_show = workflow_sub.add_parser(
+        "show", help="show one prompt-free project-bound workflow receipt"
+    )
+    workflow_show.add_argument("plan_id", type=_trial_positive_integer)
+    workflow_show.add_argument(
+        "--project", type=_trial_positive_integer, required=True
+    )
+    workflow_show.add_argument("--json", action="store_true")
+    workflow_start = workflow_sub.add_parser(
+        "start", help="persist one reviewed closed Phase 5 manifest"
+    )
+    workflow_start.add_argument(
+        "--project", type=_trial_positive_integer, required=True
+    )
+    workflow_start.add_argument(
+        "--manifest", type=Path, required=True,
+        help="bounded UTF-8 JSON manifest; executable fields are not accepted",
+    )
+    workflow_start.add_argument("--json", action="store_true")
+    for action, help_text in (
+        ("pause", "mark a plan paused so the coordinator rejects future claims"),
+        ("resume", "mark one coherently paused plan active again"),
+        ("cancel", "terminally cancel one registered plan"),
+    ):
+        workflow_action = workflow_sub.add_parser(action, help=help_text)
+        workflow_action.add_argument("plan_id", type=_trial_positive_integer)
+        workflow_action.add_argument(
+            "--project", type=_trial_positive_integer, required=True
+        )
+        workflow_action.add_argument("--json", action="store_true")
     ask = sub.add_parser("ask", help="run one task")
     ask.add_argument("prompt", nargs="+")
     ask.add_argument(
@@ -3465,6 +3986,8 @@ def main(argv: list[str] | None = None) -> None:
             code = _run_control(args)
         elif args.command == "strategy-transfer":
             code = _run_strategy_transfer(args)
+        elif args.command == "workflow":
+            code = _run_workflow(args)
         elif args.command == "ask":
             code = _run_ask(args)
         elif args.command == "task":

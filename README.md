@@ -276,9 +276,21 @@ The worker chooses backlog work only after the configured idle period, only when
 
 Every operator request receives one durable model budget shared by Jarvis and every specialist assignment it creates. Reservations are atomic in SQLite, so parallel specialists cannot race past the call ceiling. A request stops as incomplete before the next provider call when its call, prompt-token, completion-token, or specialist-fan-out limit is reached; it never converts budget exhaustion into a success result.
 
+Phase 5 adds project-scoped long-horizon workflow registration and inspection for
+work that must preserve bounded state across restarts. `jarvis workflow start`
+accepts only a closed digest-bound manifest and records it without executing a
+stage. `workflow status/list/show/pause/resume/cancel` are prompt-free operator
+controls, and there is deliberately no generic `workflow run` or arbitrary Python
+callback executor. The durable protocol covers ordered checkpoints, pre-operation
+usage reservations, ambiguous-effect reconciliation, cancellation, and separately
+signed final verification; any future real tool/model adapter must still use the
+normal policy and approval gateways and derive its own measured usage. Read the
+[operator guide](docs/LONG_HORIZON_WORKFLOWS.md) and
+[threat model](docs/LONG_HORIZON_THREAT_MODEL.md) for commands and limits.
+
 `python -m jarvis doctor --deep` adds safe handler canaries and deterministic behavioral-drift checks to the ordinary integrity/provider check. Drift compares a recent per-family window with an earlier baseline and flags completion or evidence drops, worsening Brier score, new recurring failure classes, and large step-count increases only when both samples are large enough. It also watches low disk space, a WAL over 64 MB, excessive unresolved predictions, and approval-wait tasks older than their TTL.
 
-Read-only runtime inspection is disabled by default. Set `JARVIS_SELF_INSPECT=read-only`, then run `python -m jarvis selftest` for the core suite, `python -m jarvis selftest --anchors` for the immutable Phase 5 behavioral anchors, or `python -m jarvis selftest --full` for every test. JARVIS copies the runtime into a disposable temporary directory, excludes `.env`, data, workspace state, links, caches, and provider keys, disables external/host capabilities in the child environment, and tests only that copy. Failures receive deterministic AST-based suspect-module ranking. Explicit self-diagnosis requests also expose bounded `self_source_list` and `self_source_read` tools for only `jarvis/` and `tests/`; ordinary tasks never see them.
+Read-only runtime inspection is disabled by default. Set `JARVIS_SELF_INSPECT=read-only`, then run `python -m jarvis selftest` for the core suite, `python -m jarvis selftest --anchors` for the immutable self-repair behavioral anchors, or `python -m jarvis selftest --full` for every test. JARVIS copies the runtime into a disposable temporary directory, excludes `.env`, data, workspace state, links, caches, and provider keys, disables external/host capabilities in the child environment, and tests only that copy. Failures receive deterministic AST-based suspect-module ranking. Explicit self-diagnosis requests also expose bounded `self_source_list` and `self_source_read` tools for only `jarvis/` and `tests/`; ordinary tasks never see them.
 
 `JARVIS_SELF_REPAIR=propose` adds `self_repair_draft` only to explicit self-diagnosis runs. A draft applies exact edits to a private copy under `data/self_repair`, statically parses each changed Python module, and enforces a five-file/400-line limit. A copied directory is not an OS sandbox, so model-authored candidates are never executed with the user's Windows authority; drafts are recorded as `voided` with their reviewable diff until a real restricted execution boundary is implemented. `python -m jarvis repair list` and `repair show ID` expose that evidence. There is intentionally no approve/apply command. Changes to tests/evaluations, approvals, redaction, policy, `agent.py` verification, ToolBox enforcement, Memory approval state, identity controls, or the repair gate are permanently recorded as `voided` before any candidate execution.
 

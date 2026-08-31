@@ -5,6 +5,25 @@ semantic versioning for tagged releases.
 
 ## [Unreleased]
 
+### Restart-safe long-horizon coordination
+
+- Add a project-scoped, closed-schema workflow store with ordered checkpoints,
+  durable pre-operation usage reservations, retry accounting, clock rollback
+  detection, pause/cancel controls, and keyed database-state integrity.
+- Add append-only mutation intent, short-lived one-shot authorization,
+  result, and signed reconciliation rounds. Ambiguous effects enter
+  reconciliation after restart; confirmed applied effects cannot be downgraded
+  or dispatched again.
+- Require a separately pinned Ed25519 verifier before terminal completion and
+  bind verification to the exact runtime, evidence, artifact, outcome, and
+  executor/actor set.
+- Add prompt-free `workflow status/list/show/start/pause/resume/cancel`
+  commands. Registration never starts an executor, and Phase 5 intentionally
+  exposes no generic callback or `workflow run` surface.
+- Add a deterministic multi-project restart evaluation with real subprocess
+  exits, a separate exactly-once effect ledger, negative controls, and
+  fail-closed replay/tamper checks.
+
 ### Cross-domain strategy transfer
 
 - Add explicit `strategy-transfer start/status/abort/promote` operator surfaces

@@ -79,6 +79,8 @@ _COUNT_FIELDS = frozenset(
         "provider_ttft_ms",
         "queue_ms",
         "retries",
+        "strategy_transfer_selected",
+        "strategy_transfer_trial_manifest_id",
         "task_id",
         "time_to_first_token_ms",
         "tool_calls",
@@ -107,10 +109,18 @@ _TEXT_FIELDS = frozenset(
         "route_reason",
         "status",
         "stream_transport",
+        "strategy_transfer_mode",
+        "strategy_transfer_status",
+        "strategy_transfer_trial_arm",
         "task_contract_status",
     }
 )
-_BOOLEAN_FIELDS = frozenset({"streamed"})
+_BOOLEAN_FIELDS = frozenset({
+    "streamed",
+    "strategy_transfer_applied",
+    "strategy_transfer_trial_dispatched",
+    "strategy_transfer_trial_prompt_recorded",
+})
 _TRACE_FIELDS = frozenset({"trace_id", "presence_job_id"})
 _NESTED_COUNTER_FIELDS = frozenset({"tool_counts"})
 _ALLOWED_FIELDS = (

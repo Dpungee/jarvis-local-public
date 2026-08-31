@@ -80,6 +80,7 @@ jarvis = [
     "presence.html",
     "presence.css",
     "presence.js",
+    "evaluation_fixtures/*.json",
     "builtin_skills/*/SKILL.md",
     "builtin_skills/*/agents/*.yaml",
 ]

@@ -513,6 +513,7 @@ class Config:
     gateway_token: str | None = field(default=None, repr=False)
     gateway_allowed_ids: tuple[str, ...] = ()
     memory_auto_improve: bool = True
+    strategy_transfer: str = "observe"
     memory_embeddings: str = "disabled"
     memory_embedding_model: str = "text-embedding-3-small"
     memory_embedding_dimensions: int = 512
@@ -702,6 +703,9 @@ class Config:
                 "JARVIS_SPECIALIST_DELEGATION_LIMIT_PER_REQUEST", 4, 0, 32
             ),
             memory_auto_improve=_env_bool("JARVIS_MEMORY_AUTO_IMPROVE", True),
+            strategy_transfer=os.getenv(
+                "JARVIS_STRATEGY_TRANSFER", "observe"
+            ).strip().lower(),
             memory_embeddings=os.getenv(
                 "JARVIS_MEMORY_EMBEDDINGS", "disabled"
             ).strip().lower(),
@@ -856,6 +860,10 @@ class Config:
         if cfg.google_drive_access not in {"app_files", "full"}:
             raise ValueError(
                 "JARVIS_GOOGLE_DRIVE_ACCESS must be 'app_files' or 'full'"
+            )
+        if cfg.strategy_transfer not in {"disabled", "observe", "trial", "advise"}:
+            raise ValueError(
+                "JARVIS_STRATEGY_TRANSFER must be 'disabled', 'observe', 'trial', or 'advise'"
             )
         if cfg.memory_embeddings not in {"disabled", "openai"}:
             raise ValueError(

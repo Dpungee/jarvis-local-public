@@ -11,6 +11,9 @@ from jarvis.strategy_transfer import (
     desired_strategies_for_target,
     render_strategy_advisory,
     select_strategy_transfer,
+    strategies_from_evidence,
+    strategy_evidence_from_runtime,
+    strategy_target_from_runtime,
 )
 from jarvis.strategy_transfer_eval import (
     FROZEN_STRATEGY_TRANSFER_FIXTURE_V1_SHA256,
@@ -175,6 +178,86 @@ class StrategyTransferTests(unittest.TestCase):
         non_boolean["signals"]["has_verifiable_output"] = "yes"
         with self.assertRaisesRegex(StrategyTransferError, "boolean"):
             desired_strategies_for_target(non_boolean)
+
+    def test_runtime_target_uses_only_closed_non_authority_signals(self):
+        target = strategy_target_from_runtime(
+            task_id="prediction:42",
+            family="novel_family",
+            changes_existing_state=True,
+            resumable=False,
+            verification="process_evidence",
+            current_external_facts=False,
+        )
+        self.assertEqual(
+            desired_strategies_for_target(target),
+            ("inspect_before_change", "verify_output"),
+        )
+        encoded = json.dumps(target, sort_keys=True)
+        for forbidden in ("prompt", "path", "url", "tool", "permission"):
+            self.assertNotIn(forbidden, encoded.casefold())
+        with self.assertRaisesRegex(
+            StrategyTransferError, "cited-source verification"
+        ):
+            strategy_target_from_runtime(
+                task_id="prediction:43",
+                family="novel_family",
+                changes_existing_state=False,
+                resumable=False,
+                verification="tool_success",
+                current_external_facts=True,
+            )
+
+    def test_runtime_evidence_never_derives_from_free_form_lesson_prose(self):
+        evidence = strategy_evidence_from_runtime(
+            successful_markers=(
+                "write_file",
+                "__inspected_before_write__",
+                "__inspected_after_write__",
+                "__verified_after_write__",
+            ),
+            verification="process_evidence",
+            evidence_ok=True,
+            resumed=False,
+            authoritative_source_count=0,
+        )
+        self.assertEqual(
+            strategies_from_evidence(evidence),
+            ("inspect_before_change", "verify_output"),
+        )
+        unverified = strategy_evidence_from_runtime(
+            successful_markers=(
+                "Reusable lesson: inspect before change and verify output",
+            ),
+            verification="process_evidence",
+            evidence_ok=False,
+            resumed=True,
+            authoritative_source_count=99,
+        )
+        self.assertEqual(strategies_from_evidence(unverified), ())
+        tampered = dict(evidence)
+        tampered["grant_shell"] = True
+        with self.assertRaisesRegex(StrategyTransferError, "unknown"):
+            strategies_from_evidence(tampered)
+        one_source = strategy_evidence_from_runtime(
+            successful_markers=(),
+            verification="cited_sources",
+            evidence_ok=True,
+            resumed=False,
+            authoritative_source_count=1,
+        )
+        two_sources = strategy_evidence_from_runtime(
+            successful_markers=(),
+            verification="cited_sources",
+            evidence_ok=True,
+            resumed=False,
+            authoritative_source_count=2,
+        )
+        self.assertNotIn(
+            "compare_authoritative_sources", strategies_from_evidence(one_source)
+        )
+        self.assertIn(
+            "compare_authoritative_sources", strategies_from_evidence(two_sources)
+        )
 
     def test_malformed_unknown_and_conflicting_candidates_fail_closed(self):
         case = self.cases["p_image_revision"]

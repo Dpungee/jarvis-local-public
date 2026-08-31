@@ -5,6 +5,27 @@ semantic versioning for tagged releases.
 
 ## [Unreleased]
 
+### Cross-domain strategy transfer
+
+- Add explicit `strategy-transfer start/status/abort/promote` operator surfaces
+  for a bounded project-scoped causal trial. Trial manifests accept only closed
+  labels, counts, timestamps, and internally derived pinned digests; they cannot
+  store task prose. Jarvis generates the assignment seed without displaying it.
+- Add the fail-closed `trial` configuration mode. `advise` still requires both
+  a valid pinned causal attestation and a separate explicit operator promotion;
+  changing configuration alone cannot activate cross-domain advice.
+- Bind four closed procedural strategy labels to exact successful task receipts
+  and Phase 3 lesson provenance; free-form lesson prose cannot create evidence.
+- Select only fresh, uncontradicted, same-project lessons from a different
+  calibrated task family, with an idempotent application/outcome ledger.
+- Default to observation-only operation. In this release, `advise` remains
+  reporting-only and cannot change prompts; activation awaits a separate
+  bounded trial that binds randomized arms before outcomes exist. Any future
+  advisory remains unable to change tools, approvals, policy, scope, routing,
+  or verification.
+- Add prompt-free transfer telemetry and a deterministic paired outcome holdout
+  covering positive transfer, negative transfer, provenance, and restart safety.
+
 ### Capability and supply-chain hardening
 
 - Treat bounded `research_question` excerpts as untrusted web evidence, block

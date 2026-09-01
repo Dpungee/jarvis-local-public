@@ -107,7 +107,7 @@ def training_prompt_split(prompt: str, task_kind: str) -> str:
     return "train" if bucket < 80 else "validation" if bucket < 90 else "test"
 
 
-SCHEMA_VERSION = 40
+SCHEMA_VERSION = 41
 
 LESSON_DEFAULT_TTL_DAYS = 180
 LESSON_REUSABLE_PREDICTION_ORIGINS = frozenset({
@@ -452,6 +452,22 @@ class Memory:
     ) -> None:
         self.path = Path(path)
         if str(self.path) != ":memory:":
+            from .sqlite_preflight import inspection_connection, validate_database_path
+            try:
+                path_exists = validate_database_path(self.path)
+                if path_exists:
+                    with inspection_connection(self.path) as preflight:
+                        existing_version = int(
+                            preflight.execute("PRAGMA user_version").fetchone()[0]
+                        )
+            except (OSError, sqlite3.DatabaseError, TypeError, ValueError) as exc:
+                raise RuntimeError("Database could not be inspected safely") from exc
+            if path_exists and existing_version > SCHEMA_VERSION:
+                raise RuntimeError(
+                    f"Database schema version {existing_version} is newer than "
+                    f"supported version {SCHEMA_VERSION}"
+                )
+        if str(self.path) != ":memory:":
             self.path.parent.mkdir(parents=True, exist_ok=True)
         self.worker_id = _validated_worker_id(
             f"{os.getpid()}:{uuid4().hex}" if worker_id is None else worker_id
@@ -482,10 +498,10 @@ class Memory:
         try:
             self.db.execute("PRAGMA foreign_keys=ON")
             self.db.execute(f"PRAGMA busy_timeout={busy_timeout_ms}")
-            if str(self.path) != ":memory:":
-                self.db.execute("PRAGMA journal_mode=WAL").fetchone()
             self.db.execute("PRAGMA synchronous=FULL")
             self._migrate()
+            if str(self.path) != ":memory:":
+                self.db.execute("PRAGMA journal_mode=WAL").fetchone()
             self._claim_clock_ready = True
         except BaseException:
             self.db.close()
@@ -685,12 +701,14 @@ class Memory:
             self.db.commit()
 
     def _migrate(self) -> None:
-        version = int(self.db.execute("PRAGMA user_version").fetchone()[0])
-        if version > SCHEMA_VERSION:
-            raise RuntimeError(
-                f"Database schema version {version} is newer than supported version {SCHEMA_VERSION}"
-            )
         with self._immediate_transaction():
+            # The version check and every migration share one write lock. A
+            # concurrent upgrader cannot change authority between them.
+            version = int(self.db.execute("PRAGMA user_version").fetchone()[0])
+            if version > SCHEMA_VERSION:
+                raise RuntimeError(
+                    f"Database schema version {version} is newer than supported version {SCHEMA_VERSION}"
+                )
             if version < 1:
                 self._migrate_v1()
                 version = 1
@@ -811,6 +829,9 @@ class Memory:
             if version < 40:
                 self._migrate_v40()
                 version = 40
+            if version < 41:
+                self._migrate_v41()
+                version = 41
             self.db.execute(f"PRAGMA user_version={version}")
 
     def _migrate_v1(self) -> None:
@@ -2949,6 +2970,40 @@ class Memory:
             self.db.execute(f"DROP TABLE IF EXISTS {table}")
         migrate_long_horizon_v40(self.db)
 
+    def _migrate_v41(self) -> None:
+        """Bind idempotent tasks to immutable original scheduling intent."""
+        self.db.execute("DROP TRIGGER IF EXISTS tasks_schedule_binding_immutable")
+        columns = {
+            str(row["name"])
+            for row in self.db.execute("PRAGMA table_info(tasks)").fetchall()
+        }
+        if "initial_available_at" not in columns:
+            self.db.execute("ALTER TABLE tasks ADD COLUMN initial_available_at TEXT")
+        if "availability_mode" not in columns:
+            self.db.execute(
+                """ALTER TABLE tasks ADD COLUMN availability_mode TEXT NOT NULL
+                   DEFAULT 'legacy_unknown'
+                   CHECK(availability_mode IN
+                       ('immediate','scheduled','legacy_unknown'))"""
+            )
+        # user_version<41 proves the original scheduling intent was never
+        # recorded authoritatively. Do not infer it from mutable available_at,
+        # which may already contain retry/backoff or approval-resume timing.
+        self.db.execute(
+            """UPDATE tasks
+               SET initial_available_at=NULL,
+                   availability_mode='legacy_unknown'"""
+        )
+        self.db.execute(
+            """CREATE TRIGGER tasks_schedule_binding_immutable
+               BEFORE UPDATE OF initial_available_at, availability_mode ON tasks
+               WHEN OLD.initial_available_at IS NOT NEW.initial_available_at
+                 OR OLD.availability_mode IS NOT NEW.availability_mode
+               BEGIN
+                   SELECT RAISE(ABORT, 'task scheduling intent is immutable');
+               END"""
+        )
+
     @staticmethod
     def _project_id(value: int | None) -> int:
         if value is None:
@@ -4367,7 +4422,7 @@ class Memory:
     ) -> None:
         """Record the observed goal outcome without granting any new authority."""
         normalized_state = str(state).strip().casefold()
-        if normalized_state not in {"active", "incomplete", "complete", "cancelled"}:
+        if normalized_state not in {"incomplete", "complete", "cancelled"}:
             raise ValueError("Unknown conversation-goal state")
         summary = None
         if result_summary is not None:
@@ -4377,10 +4432,28 @@ class Memory:
                 "conversation-goal result",
             )
         with self._immediate_transaction():
+            current = self.db.execute(
+                "SELECT state, retryable FROM conversation_goals WHERE id=?",
+                (int(goal_id),),
+            ).fetchone()
+            if current is None:
+                raise ValueError("Conversation goal does not exist")
+            current_state = str(current["state"])
+            resumable = current_state == "active" or (
+                current_state == "incomplete" and bool(current["retryable"])
+            )
+            if not resumable:
+                # Repeating the exact terminal outcome is harmless and must not
+                # rewrite its evidence; every other terminal transition fails.
+                if current_state == normalized_state:
+                    return
+                raise ValueError("Conversation goal is already terminal")
             cursor = self.db.execute(
                 """UPDATE conversation_goals
                    SET state=?, updated_at=?, last_result_summary=?, retryable=?
-                   WHERE id=?""",
+                   WHERE id=? AND (
+                       state='active' OR (state='incomplete' AND retryable=1)
+                   )""",
                 (
                     normalized_state, now_iso(), summary,
                     int(bool(retryable and normalized_state == "incomplete")),
@@ -4388,7 +4461,7 @@ class Memory:
                 ),
             )
             if cursor.rowcount != 1:
-                raise ValueError("Conversation goal does not exist")
+                raise ValueError("Conversation goal changed before it was finished")
 
     def finish_conversation_goal_if_current(
         self,
@@ -14356,6 +14429,8 @@ class Memory:
         *,
         stamp: str,
         available_at: str,
+        initial_available_at: str | None,
+        availability_mode: str,
         max_attempts: int,
         idempotency_key: str | None,
         project_id: int = 1,
@@ -14366,6 +14441,15 @@ class Memory:
         model_budget_scope: str | None = None,
     ) -> tuple[int, bool]:
         prompt = redact_secrets(str(prompt))
+        availability_mode = str(availability_mode).strip().casefold()
+        if availability_mode not in {"immediate", "scheduled"}:
+            raise ValueError("New tasks require immediate or scheduled availability")
+        if availability_mode == "scheduled":
+            if not initial_available_at:
+                raise ValueError("Scheduled tasks require an original availability time")
+            initial_available_at = str(initial_available_at)
+        elif initial_available_at is not None:
+            raise ValueError("Immediate tasks may not bind a scheduled availability time")
         if model_budget_scope is not None:
             model_budget_scope = self._model_budget_scope(model_budget_scope)
         if idempotency_key is not None:
@@ -14375,13 +14459,15 @@ class Memory:
         cur = self.db.execute(
             """INSERT OR IGNORE INTO tasks(
                 created_at, updated_at, status, prompt, available_at,
+                initial_available_at, availability_mode,
                 attempt_count, max_attempts, idempotency_key, project_id, requested_model,
                 specialist_key, delegated_by, parent_conversation_id,
                 model_budget_scope
-            ) VALUES (?, ?, 'queued', ?, ?, 0, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            ) VALUES (?, ?, 'queued', ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
-                stamp, stamp, prompt, available_at, max_attempts, idempotency_key,
-                project_id, requested_model, specialist_key, delegated_by,
+                stamp, stamp, prompt, available_at, initial_available_at,
+                availability_mode, max_attempts, idempotency_key, project_id,
+                requested_model, specialist_key, delegated_by,
                 parent_conversation_id, model_budget_scope,
             ),
         )
@@ -14390,13 +14476,48 @@ class Memory:
         if not idempotency_key:
             raise RuntimeError("Task insert was ignored without an idempotency key")
         row = self.db.execute(
-            """SELECT id, project_id, requested_model, specialist_key,
-                      delegated_by, parent_conversation_id, model_budget_scope
+            """SELECT id, prompt, max_attempts, project_id, requested_model,
+                      specialist_key, delegated_by, parent_conversation_id,
+                      model_budget_scope, initial_available_at, availability_mode,
+                      created_at, available_at
                FROM tasks WHERE idempotency_key=?""",
             (idempotency_key,),
         ).fetchone()
         if row is None:
             raise RuntimeError("Could not resolve idempotent task insert")
+        if str(row["prompt"]) != prompt:
+            raise ValueError(
+                "Task idempotency key is already bound to a different prompt"
+            )
+        if int(row["max_attempts"]) != int(max_attempts):
+            raise ValueError(
+                "Task idempotency key is already bound to a different retry policy"
+            )
+        stored_availability_mode = str(
+            row["availability_mode"] or "legacy_unknown"
+        )
+        if stored_availability_mode == "legacy_unknown":
+            if availability_mode == "scheduled":
+                raise ValueError(
+                    "Legacy task scheduling intent is unverifiable; explicit scheduled "
+                    "replay is not allowed"
+                )
+            if str(row["available_at"]) != str(row["created_at"]):
+                raise ValueError(
+                    "Legacy task scheduling intent is unverifiable; default replay is "
+                    "only allowed when the original row was immediately available"
+                )
+        elif stored_availability_mode != availability_mode:
+            raise ValueError(
+                "Task idempotency key is already bound to a different availability mode"
+            )
+        elif (
+            availability_mode == "scheduled"
+            and row["initial_available_at"] != initial_available_at
+        ):
+            raise ValueError(
+                "Task idempotency key is already bound to a different original schedule"
+            )
         if (
             int(row["project_id"] or 1) != int(project_id)
             or (row["requested_model"] or None) != requested_model
@@ -14444,22 +14565,43 @@ class Memory:
                 str(requested_model).strip(), "Task requested model"
             )[:200] or None
         stamp = now_iso()
-        available_text = _as_utc(available_at).isoformat() if available_at else stamp
+        scheduled_text = (
+            _as_utc(available_at).isoformat() if available_at is not None else None
+        )
+        availability_mode = "scheduled" if scheduled_text is not None else "immediate"
+        available_text = scheduled_text or stamp
         with self._immediate_transaction():
-            task_id, _ = self._insert_task_locked(
+            task_id, created = self._insert_task_locked(
                 prompt,
                 stamp=stamp,
                 available_at=available_text,
+                initial_available_at=scheduled_text,
+                availability_mode=availability_mode,
                 max_attempts=max_attempts,
                 idempotency_key=key,
                 project_id=normalized_project,
                 requested_model=safe_model,
             )
-            if goal_id is not None or backlog_id is not None:
+            if created and (goal_id is not None or backlog_id is not None):
                 self.db.execute(
                     "UPDATE tasks SET goal_id=?, backlog_id=? WHERE id=?",
                     (goal_id, backlog_id, task_id),
                 )
+            elif not created:
+                provenance = self.db.execute(
+                    "SELECT goal_id, backlog_id FROM tasks WHERE id=?",
+                    (task_id,),
+                ).fetchone()
+                if provenance is None:
+                    raise RuntimeError("Idempotent task disappeared")
+                if (
+                    provenance["goal_id"] != goal_id
+                    or provenance["backlog_id"] != backlog_id
+                ):
+                    raise ValueError(
+                        "Task idempotency key is already bound to different goal or "
+                        "backlog provenance"
+                    )
         return task_id
 
     def delegate_specialist_task(
@@ -14521,6 +14663,8 @@ class Memory:
                 text,
                 stamp=stamp,
                 available_at=stamp,
+                initial_available_at=None,
+                availability_mode="immediate",
                 max_attempts=maximum,
                 idempotency_key=idempotency_key,
                 project_id=normalized_project,
@@ -14655,6 +14799,11 @@ class Memory:
         current_text = current.isoformat()
         lease_expires = (current + timedelta(seconds=lease_seconds)).isoformat()
         with self._immediate_transaction():
+            control = self.db.execute(
+                "SELECT state FROM runtime_control WHERE id=1"
+            ).fetchone()
+            if control is None or str(control["state"]) != "running":
+                return None
             self._recover_stale_locked(current)
             row = self.db.execute(
                 """SELECT id FROM tasks
@@ -14684,7 +14833,8 @@ class Memory:
                 return None
             claimed = self.db.execute(
                 """SELECT id, created_at, updated_at, status, prompt, result,
-                          available_at, lease_owner, lease_expires_at,
+                          available_at, initial_available_at, availability_mode,
+                          lease_owner, lease_expires_at,
                           attempt_count, max_attempts, last_error, idempotency_key,
                           goal_id, backlog_id, project_id, requested_model,
                           initiative_event_id, specialist_key, delegated_by,
@@ -14968,7 +15118,8 @@ class Memory:
             return []
         rows = self.db.execute(
             """SELECT id, created_at, updated_at, status, prompt, result,
-                      available_at, lease_owner, lease_expires_at,
+                      available_at, initial_available_at, availability_mode,
+                      lease_owner, lease_expires_at,
                       attempt_count, max_attempts, last_error, idempotency_key,
                       goal_id, backlog_id, awaiting_approval_id, project_id,
                       requested_model, initiative_event_id, specialist_key,
@@ -15112,6 +15263,11 @@ class Memory:
         current_text = current.isoformat()
         queued = 0
         with self._immediate_transaction():
+            control = self.db.execute(
+                "SELECT state FROM runtime_control WHERE id=1"
+            ).fetchone()
+            if control is None or str(control["state"]) != "running":
+                return 0
             rows = self.db.execute(
                 """SELECT id, project_id, name, prompt, interval_minutes, next_run_at
                    FROM scheduled_jobs
@@ -15131,6 +15287,8 @@ class Memory:
                     prompt,
                     stamp=current_text,
                     available_at=current_text,
+                    initial_available_at=scheduled_for,
+                    availability_mode="scheduled",
                     max_attempts=3,
                     idempotency_key=f"schedule:{job_id}:{scheduled_for}",
                     project_id=int(row["project_id"]),
@@ -15208,6 +15366,11 @@ class Memory:
         current_text = current.isoformat()
         queued = 0
         with self._immediate_transaction():
+            control = self.db.execute(
+                "SELECT state FROM runtime_control WHERE id=1"
+            ).fetchone()
+            if control is None or str(control["state"]) != "running":
+                return 0
             rows = self.db.execute(
                 """SELECT id, topic, interval_hours, next_run
                    FROM learning_topics
@@ -15247,6 +15410,8 @@ class Memory:
                         prompt,
                         stamp=current_text,
                         available_at=current_text,
+                        initial_available_at=str(scheduled_for),
+                        availability_mode="scheduled",
                         max_attempts=3,
                         idempotency_key=key,
                         requested_model=specialist.model_profile,
@@ -15714,6 +15879,8 @@ class Memory:
             ]
             task_id, created = self._insert_task_locked(
                 proactive_prompt, stamp=current_text, available_at=current_text,
+                initial_available_at=str(row["next_run"]),
+                availability_mode="scheduled",
                 max_attempts=2, idempotency_key=key,
                 requested_model=specialist.model_profile,
                 specialist_key=specialist.key,
@@ -16269,6 +16436,8 @@ class Memory:
                 prompt,
                 stamp=stamp,
                 available_at=stamp,
+                initial_available_at=None,
+                availability_mode="immediate",
                 max_attempts=2,
                 idempotency_key=f"initiative:{event_id}",
                 project_id=int(selected["project_id"]),

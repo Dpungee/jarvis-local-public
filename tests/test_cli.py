@@ -609,6 +609,23 @@ class WorkerTests(unittest.TestCase):
         self.assertTrue(FakeHeartbeat.instances[0].started)
         self.assertTrue(FakeHeartbeat.instances[0].stopped)
 
+    def test_worker_never_materializes_schedules_while_paused_or_stopped(self):
+        for state in ("paused", "stopped"):
+            with self.subTest(state=state):
+                memory = WorkerMemory(None)
+                memory.control_state = Mock(return_value={"state": state})
+                memory.queue_due_learning = Mock(return_value=1)
+                memory.queue_due_scheduled_jobs = Mock(return_value=1)
+                agent_factory = Mock()
+
+                code, waits = self.run_worker(memory, agent_factory)
+
+                self.assertEqual(code, 0)
+                memory.queue_due_learning.assert_not_called()
+                memory.queue_due_scheduled_jobs.assert_not_called()
+                agent_factory.assert_not_called()
+                self.assertEqual(waits, [1] if state == "paused" else [])
+
     def test_deep_research_learning_tasks_use_reasoning_profile(self):
         deep_learning_prompt = (
             "Continuously learn about this topic: local agents. "

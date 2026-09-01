@@ -4,6 +4,7 @@ import hashlib
 import json
 import os
 import sqlite3
+import tempfile
 import threading
 import unittest
 from datetime import datetime, timedelta, timezone
@@ -23,6 +24,11 @@ from jarvis.long_horizon import (
     WorkflowStageSpec,
 )
 from jarvis.memory import Memory, SCHEMA_VERSION
+from tests.sqlite_crash_fixture import (
+    create_future_schema_in_hot_wal,
+    create_hot_future_database,
+    snapshot_directory,
+)
 
 
 def sha(value: str) -> str:
@@ -42,6 +48,26 @@ def usage(**overrides: int) -> dict[str, int]:
 
 
 class LongHorizonTests(unittest.TestCase):
+    def test_direct_future_schema_in_hot_wal_is_rejected_without_recovery_or_key(self):
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / "state.db"
+            with Memory(path):
+                pass
+            create_future_schema_in_hot_wal(path, user_version=SCHEMA_VERSION + 1)
+            before = snapshot_directory(path)
+            with self.assertRaisesRegex(LongHorizonStateError, "newer"):
+                LongHorizonStore(path, project_id=1)
+            self.assertEqual(snapshot_directory(path), before)
+
+    def test_direct_future_hot_journal_is_rejected_without_recovery_or_key_creation(self):
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / "state.db"
+            create_hot_future_database(path, user_version=SCHEMA_VERSION + 1)
+            before = snapshot_directory(path)
+            with self.assertRaisesRegex(LongHorizonStateError, "newer"):
+                LongHorizonStore(path, project_id=1)
+            self.assertEqual(snapshot_directory(path), before)
+
     def setUp(self) -> None:
         self.verify_private = Ed25519PrivateKey.generate()
         self.reconcile_private = Ed25519PrivateKey.generate()
@@ -208,8 +234,8 @@ class LongHorizonTests(unittest.TestCase):
         )
 
     def test_schema_v40_and_normal_five_stage_completion(self) -> None:
-        self.assertEqual(SCHEMA_VERSION, 40)
-        self.assertEqual(self.memory.db.execute("PRAGMA user_version").fetchone()[0], 40)
+        self.assertEqual(SCHEMA_VERSION, 41)
+        self.assertEqual(self.memory.db.execute("PRAGMA user_version").fetchone()[0], 41)
         plan_id = self.store.create_plan(self.manifest())
         for _ in range(5):
             self.complete_claim(plan_id)
@@ -222,6 +248,43 @@ class LongHorizonTests(unittest.TestCase):
         self.assertEqual(evidence["plan"]["status"], "complete")
         self.assertEqual(len(evidence["checkpoints"]), 5)
         self.assertNotIn("private goal text", json.dumps(evidence))
+
+    def test_direct_path_rejects_future_schema_before_sidecar_or_ddl(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "future.db"
+            db = sqlite3.connect(path)
+            try:
+                db.execute("CREATE TABLE future_only(value TEXT)")
+                db.execute(f"PRAGMA user_version={SCHEMA_VERSION + 1}")
+                db.commit()
+            finally:
+                db.close()
+            before_bytes = path.read_bytes()
+            before_files = sorted(item.name for item in Path(directory).iterdir())
+
+            with self.assertRaisesRegex(LongHorizonStateError, "newer than supported"):
+                LongHorizonStore(path, project_id=1)
+
+            self.assertEqual(path.read_bytes(), before_bytes)
+            self.assertEqual(
+                sorted(item.name for item in Path(directory).iterdir()),
+                before_files,
+            )
+            self.assertFalse(Path(str(path) + ".long-horizon.key").exists())
+            db = sqlite3.connect(path)
+            try:
+                self.assertEqual(
+                    [str(row[0]) for row in db.execute(
+                        "SELECT name FROM sqlite_master WHERE type='table' ORDER BY name"
+                    ).fetchall()],
+                    ["future_only"],
+                )
+                self.assertEqual(
+                    int(db.execute("PRAGMA user_version").fetchone()[0]),
+                    SCHEMA_VERSION + 1,
+                )
+            finally:
+                db.close()
 
     def test_interrupted_v40_partial_schema_recovers_on_reopen(self) -> None:
         self.memory.close()
@@ -237,7 +300,7 @@ class LongHorizonTests(unittest.TestCase):
             row["name"]
             for row in self.memory.db.execute("PRAGMA table_info(long_horizon_plans)")
         }
-        self.assertEqual(self.memory.db.execute("PRAGMA user_version").fetchone()[0], 40)
+        self.assertEqual(self.memory.db.execute("PRAGMA user_version").fetchone()[0], 41)
         self.assertIn("manifest_sha256", columns)
         self.assertNotIn("unsafe", columns)
 

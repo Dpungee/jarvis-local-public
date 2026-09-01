@@ -3,7 +3,6 @@ from __future__ import annotations
 import argparse
 import os
 import re
-import shutil
 import sqlite3
 import stat
 import subprocess
@@ -24,6 +23,7 @@ from .model_client import (
     resolve_codex_cli_executable,
 )
 from .subprocess_env import trusted_cli_environment
+from .trusted_executables import trusted_install_file
 
 
 SETUP_NEEDED_MESSAGE = (
@@ -52,6 +52,11 @@ _CHOICES = frozenset({"codex", "claude", "both"})
 _AUTH_STATUS_MAX_BYTES = 4096
 _SETUP_MARKER = "# JARVIS_PROVIDER_SETUP=complete:v1"
 _CANARY_SENTINEL = "JARVIS_CANARY_OK"
+_WINGET_PACKAGE_DIRECTORY = re.compile(
+    r"Microsoft\.DesktopAppInstaller_[0-9]+(?:\.[0-9]+){1,4}_"
+    r"(?:x64|x86|arm64|neutral)__8wekyb3d8bbwe\Z",
+    re.IGNORECASE,
+)
 _TEMPLATE_PROVIDER_VALUES = {
     "JARVIS_MODEL": "auto",
     "JARVIS_FAST_MODEL": "qwen3.5:9b",
@@ -468,64 +473,57 @@ def persist_provider_choice(choice: str, root: Path | None = None) -> Path:
 
 
 def _native_candidates(command: str, environ: Mapping[str, str]) -> list[Path]:
-    names = [f"{command}.exe"] if os.name == "nt" else [command]
-    candidates: list[Path] = []
-    seen: set[str] = set()
-    # Keep first-run detection aligned with the runtime's stricter native-binary
-    # resolution. In particular, the Codex desktop app's PATH alias can be
-    # non-launchable while its private, signed app-server binary is usable.
-    if environ is os.environ:
-        resolved_by_runtime = (
-            resolve_codex_cli_executable()
-            if command == "codex"
-            else resolve_claude_cli_executable()
-        )
-        if resolved_by_runtime is not None:
-            candidates.append(resolved_by_runtime)
-    path_value = str(environ.get("PATH", ""))
-    for name in names:
-        found = shutil.which(name, path=path_value)
-        if found:
-            candidates.append(Path(found))
-        for directory in path_value.split(os.pathsep):
-            if directory.strip():
-                candidates.append(Path(directory.strip().strip('"')) / name)
-    if os.name == "nt":
-        appdata = str(environ.get("APPDATA", "")).strip()
-        localappdata = str(environ.get("LOCALAPPDATA", "")).strip()
-        if command == "claude" and appdata:
-            candidates.insert(
-                0,
-                Path(appdata)
-                / "npm"
-                / "node_modules"
-                / "@anthropic-ai"
-                / "claude-code"
-                / "bin"
-                / "claude.exe",
-            )
-        if localappdata:
-            candidates.append(Path(localappdata) / "Microsoft" / "WinGet" / "Links" / names[0])
+    del environ  # Environment PATH and per-user shim directories are never trusted.
+    resolver = {
+        "codex": resolve_codex_cli_executable,
+        "claude": resolve_claude_cli_executable,
+    }.get(command)
+    if resolver is None:
+        return []
+    candidate = resolver()
+    return [candidate] if candidate is not None else []
 
-    resolved_candidates: list[Path] = []
-    for candidate in candidates:
-        try:
-            resolved = candidate.resolve(strict=True)
-            details = os.lstat(resolved)
-        except OSError:
-            continue
-        attributes = getattr(details, "st_file_attributes", 0)
-        if not stat.S_ISREG(details.st_mode) or attributes & _WINDOWS_REPARSE_POINT:
-            continue
-        if os.name == "nt" and resolved.suffix.casefold() != ".exe":
-            continue
-        if os.name != "nt" and not os.access(resolved, os.X_OK):
-            continue
-        identity = str(resolved).casefold()
-        if identity not in seen:
-            seen.add(identity)
-            resolved_candidates.append(resolved)
-    return resolved_candidates
+
+def _winget_registry_hint() -> Path | None:
+    """Read the per-user App Paths value as an untrusted location hint only."""
+    if os.name != "nt":
+        return None
+    try:
+        import winreg
+
+        with winreg.OpenKey(
+            winreg.HKEY_CURRENT_USER,
+            r"SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths\winget.exe",
+            0,
+            winreg.KEY_READ,
+        ) as key:
+            value, _kind = winreg.QueryValueEx(key, "")
+    except (ImportError, OSError):
+        return None
+    text = str(value).strip()
+    return Path(text) if text and "\x00" not in text else None
+
+
+def _windows_package_manager_executable() -> Path | None:
+    """Resolve WinGet's protected DesktopAppInstaller binary, never its PATH alias."""
+    hinted = _winget_registry_hint()
+    if hinted is None:
+        return None
+    candidate = trusted_install_file(hinted)
+    if (
+        candidate is None
+        or candidate.name.casefold() != "winget.exe"
+        or candidate.parent.parent.name.casefold() != "windowsapps"
+        or _WINGET_PACKAGE_DIRECTORY.fullmatch(candidate.parent.name) is None
+    ):
+        return None
+    try:
+        with candidate.open("rb") as stream:
+            if stream.read(2) != b"MZ":
+                return None
+    except OSError:
+        return None
+    return candidate
 
 
 def detect_provider(
@@ -648,16 +646,14 @@ def _install_provider(
 ) -> bool:
     if os.name != "nt":
         return False
-    winget = shutil.which("winget.exe", path=str(environ.get("PATH", ""))) or shutil.which(
-        "winget", path=str(environ.get("PATH", ""))
-    )
-    if not winget:
+    winget = _windows_package_manager_executable()
+    if winget is None:
         return False
     spec = _PROVIDERS[provider]
     try:
         completed = runner(
             [
-                winget,
+                str(winget),
                 "install",
                 "--id",
                 spec.package_id,

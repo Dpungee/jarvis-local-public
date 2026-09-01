@@ -26,12 +26,10 @@ MAX_BRIDGE_LIFETIME_SECONDS = 366 * 24 * 60 * 60
 
 _IDENTIFIER = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}\Z")
 _SHA256 = re.compile(r"[0-9a-f]{64}\Z")
-_CONTROL_OR_HIDDEN = re.compile(
-    r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f\u200b-\u200f\u202a-\u202e\u2060\u2066-\u2069]"
-)
 _SECRET = re.compile(
     r"(?is)(?:"
-    r"-----BEGIN [A-Z ]*PRIVATE KEY-----|"
+    r"-----BEGIN (?P<pem_kind>[A-Z0-9 ]{0,64}PRIVATE KEY)-----"
+    r".*?(?:-----END (?P=pem_kind)-----|\Z)|"
     r"\bsk-(?:proj-)?[A-Za-z0-9_-]{12,}|"
     r"\bgh[pousr]_[A-Za-z0-9_-]{12,}|"
     r"\bgithub_pat_[A-Za-z0-9_]{12,}|"
@@ -71,9 +69,34 @@ _STREET_ADDRESS = re.compile(
     r"(?:street|st\.?|avenue|ave\.?|road|rd\.?|boulevard|blvd\.?|"
     r"lane|ln\.?|drive|dr\.?|court|ct\.?|circle|cir\.?|way|parkway|pkwy\.?)\b"
 )
-_PRIVATE_PATH = re.compile(
-    r"(?i)(?:\b[A-Z]:[\\/](?:Users|Documents and Settings|AppData)[\\/]|"
-    r"/(?:home|users)/[^/\s]+/|[\\/](?:\.ssh|\.aws|\.config)[\\/])"
+_WINDOWS_PRIVATE_PATH = re.compile(
+    r"(?ix)(?:"
+    r'"(?:[A-Z]:[\\/]|\\\\[^\\/\s\"]+[\\/])[^\"\r\n]*"|'
+    r"'(?:[A-Z]:[\\/]|\\\\[^\\/\s']+[\\/])[^'\r\n]*'|"
+    r"(?:(?<![\w])[A-Z]:[\\/]|(?<![\\])\\\\[^\\/\s\"'<>|?*]+[\\/])"
+    r"[^\s\"'<>|?*\r\n]+"
+    r")"
+)
+_UNIX_PRIVATE_PATH = re.compile(
+    r"(?x)(?:"
+    r'"/(?!/)[^\"\r\n]+"|'
+    r"'/(?!/)[^'\r\n]+'|"
+    r"(?<![:/\w])/(?!/)[^\s\"'<>|?*\r\n]+"
+    r")"
+)
+_UNQUOTED_PRIVATE_PATH_TO_EOL = re.compile(
+    r"(?im)(?:"
+    r"(?<![\w\"'])[A-Z]:[\\/]|"
+    r"(?<![\\\"'])\\\\[^\\/\s\"'<>|?*]+[\\/]|"
+    r"(?<![:/\w\"'])/(?!/)"
+    r")[^\r\n]*"
+)
+_IP_LITERAL = re.compile(
+    r"(?<![\w:])(?:"
+    r"\[(?:[0-9A-Fa-f:.]+)(?:%[A-Za-z0-9_.-]+)?\]|"
+    r"[0-9A-Fa-f]*:[0-9A-Fa-f:.]*(?:%[A-Za-z0-9_.-]+)?|"
+    r"(?:\d{1,3}\.){3}\d{1,3}"
+    r")(?![\w:])"
 )
 _PROMPT_INJECTION = re.compile(
     r"(?is)(?:"
@@ -109,6 +132,15 @@ class PublicBridgeError(ValueError):
 
 class PrivateDataRejected(PublicBridgeError):
     """The bridge detected private, credential, PII, or instruction content."""
+
+
+def _contains_hidden_or_control(value: str) -> bool:
+    """Cover every Unicode control/format character, not a fragile codepoint list."""
+    return any(
+        character not in {"\t", "\n", "\r"}
+        and unicodedata.category(character) in {"Cc", "Cf"}
+        for character in value
+    )
 
 
 def _canonical_json(value: Any) -> str:
@@ -168,7 +200,9 @@ def _digest(value: Any, label: str) -> str:
 
 
 def _private_ip_in_text(value: str) -> bool:
-    for candidate in re.findall(r"(?<![\w:])(?:\d{1,3}\.){3}\d{1,3}(?![\w:])", value):
+    for match in _IP_LITERAL.finditer(value):
+        candidate = match.group(0).strip("[]")
+        candidate = candidate.split("%", 1)[0]
         try:
             address = ipaddress.ip_address(candidate)
         except ValueError:
@@ -189,6 +223,7 @@ def sanitize_public_text(
     maximum: int,
     *,
     allow_empty: bool = False,
+    allow_unix_url_path: bool = False,
 ) -> str:
     """Normalize benign formatting and reject content unsafe for the bridge.
 
@@ -199,10 +234,10 @@ def sanitize_public_text(
 
     if type(value) is not str:
         raise PublicBridgeError(f"{label} must be a string")
-    if _CONTROL_OR_HIDDEN.search(value):
+    if _contains_hidden_or_control(value):
         raise PrivateDataRejected(f"{label} contains control or hidden-direction characters")
     normalized = unicodedata.normalize("NFKC", value)
-    if _CONTROL_OR_HIDDEN.search(normalized):
+    if _contains_hidden_or_control(normalized):
         raise PrivateDataRejected(f"{label} contains control or hidden-direction characters")
     normalized = normalized.replace("\r\n", "\n").replace("\r", "\n").strip()
     if not normalized and not allow_empty:
@@ -221,7 +256,11 @@ def sanitize_public_text(
         or _STREET_ADDRESS.search(normalized)
     ):
         raise PrivateDataRejected(f"{label} contains personally identifying data")
-    if _PRIVATE_PATH.search(normalized) or _private_ip_in_text(normalized):
+    if (
+        _WINDOWS_PRIVATE_PATH.search(normalized)
+        or (not allow_unix_url_path and _UNIX_PRIVATE_PATH.search(normalized))
+        or _private_ip_in_text(normalized)
+    ):
         raise PrivateDataRejected(f"{label} contains private machine information")
     if _PROMPT_INJECTION.search(normalized):
         raise PrivateDataRejected(f"{label} contains instruction-like hostile content")
@@ -238,36 +277,54 @@ def sanitize_untrusted_public_text(value: str) -> tuple[str, tuple[str, ...]]:
 
     if type(value) is not str:
         raise PublicBridgeError("untrusted public text must be a string")
+    if _contains_hidden_or_control(value):
+        raise PrivateDataRejected(
+            "untrusted public text contains control or hidden-direction characters"
+        )
+    normalized = unicodedata.normalize("NFKC", value)
+    if _contains_hidden_or_control(normalized):
+        raise PrivateDataRejected(
+            "untrusted public text contains control or hidden-direction characters"
+        )
+    normalized = normalized.replace("\r\n", "\n").replace("\r", "\n").strip()
     labels: list[str] = []
-    if _SECRET.search(value):
+    if _SECRET.search(normalized):
         labels.append("credential")
-    if any(pattern.search(value) for pattern in (
+    if any(pattern.search(normalized) for pattern in (
         _EMAIL, _OBFUSCATED_EMAIL, _PHONE, _PHONE_CONTEXTUAL,
         _SSN, _DATE_OF_BIRTH, _STREET_ADDRESS
     )):
         labels.append("pii")
-    if _PRIVATE_PATH.search(value) or _private_ip_in_text(value):
+    if (
+        _WINDOWS_PRIVATE_PATH.search(normalized)
+        or _UNIX_PRIVATE_PATH.search(normalized)
+        or _private_ip_in_text(normalized)
+    ):
         labels.append("private_machine")
-    if _PROMPT_INJECTION.search(value):
+    if _PROMPT_INJECTION.search(normalized):
         labels.append("prompt_injection")
 
-    cleaned = value
+    cleaned = _SECRET.sub("[REDACTED CREDENTIAL]", normalized)
     for pattern in (
         _EMAIL, _OBFUSCATED_EMAIL, _PHONE, _PHONE_CONTEXTUAL,
         _SSN, _DATE_OF_BIRTH, _STREET_ADDRESS,
     ):
         cleaned = pattern.sub("[REDACTED PRIVATE DATA]", cleaned)
-    cleaned = _PRIVATE_PATH.sub("[REDACTED PRIVATE DATA]", cleaned)
+    # An unquoted local path can legally contain spaces, so token boundaries
+    # are unknowable. Consume the rest of that line rather than retain a
+    # project/file tail. Quoted paths are excluded here and bounded precisely
+    # by the path patterns below.
+    cleaned = _UNQUOTED_PRIVATE_PATH_TO_EOL.sub(
+        "[REDACTED PRIVATE DATA]", cleaned
+    )
+    cleaned = _WINDOWS_PRIVATE_PATH.sub("[REDACTED PRIVATE DATA]", cleaned)
+    cleaned = _UNIX_PRIVATE_PATH.sub("[REDACTED PRIVATE DATA]", cleaned)
 
     def redact_private_ip(match: re.Match[str]) -> str:
         candidate = match.group(0)
         return "[REDACTED PRIVATE DATA]" if _private_ip_in_text(candidate) else candidate
 
-    cleaned = re.sub(
-        r"(?<![\w:])(?:\d{1,3}\.){3}\d{1,3}(?![\w:])",
-        redact_private_ip,
-        cleaned,
-    )
+    cleaned = _IP_LITERAL.sub(redact_private_ip, cleaned)
     return cleaned, tuple(labels)
 
 
@@ -305,6 +362,7 @@ def validate_public_url(value: Any, label: str = "url") -> str:
             f"{label} {component_name}",
             2_048,
             allow_empty=True,
+            allow_unix_url_path=component_name == "path",
         )
     hostname = parsed.hostname.casefold().rstrip(".")
     if hostname in {"localhost", "localhost.localdomain"} or hostname.endswith(".local"):

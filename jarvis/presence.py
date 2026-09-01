@@ -8,6 +8,7 @@ import os
 import queue
 import re
 import shutil
+import socket
 import sqlite3
 import stat
 import sys
@@ -3553,29 +3554,61 @@ class PresenceRuntime:
 
 class PresenceHTTPServer(ThreadingHTTPServer):
     daemon_threads = True
-    allow_reuse_address = True
+    # SO_REUSEADDR permits competing listeners on Windows. Keep Unix restart
+    # behavior, but make a Windows Presence listener an exclusive owner.
+    allow_reuse_address = os.name != "nt"
+
+    def server_bind(self) -> None:
+        if os.name == "nt" and hasattr(socket, "SO_EXCLUSIVEADDRUSE"):
+            self.socket.setsockopt(
+                socket.SOL_SOCKET,
+                socket.SO_EXCLUSIVEADDRUSE,
+                1,
+            )
+        super().server_bind()
 
     def __init__(
         self,
         address: tuple[str, int],
-        runtime: PresenceRuntime,
+        runtime: PresenceRuntime | None,
         *,
         trusted_hosts: tuple[str, ...] = (),
         remote_access: str = "disabled",
     ) -> None:
-        super().__init__(address, PresenceRequestHandler)
-        self.runtime = runtime
-        self.remote_access = str(remote_access).strip().casefold()
-        if self.remote_access not in {"disabled", "paired"}:
+        normalized_remote_access = str(remote_access).strip().casefold()
+        if normalized_remote_access not in {"disabled", "paired"}:
             raise ValueError("Presence remote access mode is invalid")
-        self.trusted_hosts = frozenset({
+        normalized_trusted_hosts = frozenset({
             "127.0.0.1",
             "localhost",
             "::1",
             *(str(host).casefold().rstrip(".") for host in trusted_hosts),
         })
-        self._pairing_attempts: deque[float] = deque()
-        self._pairing_lock = threading.Lock()
+        super().__init__(address, PresenceRequestHandler)
+        try:
+            self._runtime = runtime
+            self.remote_access = normalized_remote_access
+            self.trusted_hosts = normalized_trusted_hosts
+            self._pairing_attempts: deque[float] = deque()
+            self._pairing_lock = threading.Lock()
+        except BaseException:
+            # ThreadingHTTPServer closes its socket when bind/activation fails,
+            # but failures in this subclass after a successful bind are ours to
+            # unwind.
+            self.server_close()
+            raise
+
+    @property
+    def runtime(self) -> PresenceRuntime:
+        runtime = self._runtime
+        if runtime is None:
+            raise RuntimeError("Presence runtime is not initialized")
+        return runtime
+
+    def attach_runtime(self, runtime: PresenceRuntime) -> None:
+        if self._runtime is not None:
+            raise RuntimeError("Presence runtime is already initialized")
+        self._runtime = runtime
 
     def allow_pairing_attempt(self) -> bool:
         current = time.monotonic()
@@ -4382,33 +4415,51 @@ def run_presence(
     config = Config.load()
     resolved_host = normalize_presence_host(host or config.presence_host)
     resolved_port = normalize_presence_port(port or config.presence_port)
-    runtime = PresenceRuntime(config)
-    runtime.start()
-    server = PresenceHTTPServer(
-        (resolved_host, resolved_port),
-        runtime,
-        trusted_hosts=config.presence_trusted_hosts,
-        remote_access=config.presence_remote_access,
-    )
-    indicator_process = (
-        start_indicator_process(resolved_host, resolved_port)
-        if bool(getattr(config, "screen_companion_indicator", True))
-        else None
-    )
-    url = presence_url(resolved_host, resolved_port)
-    if open_browser:
-        threading.Timer(0.25, lambda: webbrowser.open(url)).start()
-    print(f"JARVIS Presence is online at {url}")
-    print("Remote access: proxy this loopback URL with Tailscale Serve; do not port-forward it.")
+    runtime: PresenceRuntime | None = None
+    server: PresenceHTTPServer | None = None
+    indicator_process = None
     try:
-        server.serve_forever(poll_interval=0.25)
-    except KeyboardInterrupt:
-        pass
+        # Claim the listening socket before job recovery or worker startup. A
+        # duplicate Presence process therefore fails without touching live jobs.
+        server = PresenceHTTPServer(
+            (resolved_host, resolved_port),
+            None,
+            trusted_hosts=config.presence_trusted_hosts,
+            remote_access=config.presence_remote_access,
+        )
+        # PresenceRuntime construction opens/migrates several stores, so it
+        # must happen only after this process has exclusive ownership of the
+        # listening socket. A duplicate process then has no state side effects.
+        runtime = PresenceRuntime(config)
+        server.attach_runtime(runtime)
+        runtime.start()
+        indicator_process = (
+            start_indicator_process(resolved_host, resolved_port)
+            if bool(getattr(config, "screen_companion_indicator", True))
+            else None
+        )
+        url = presence_url(resolved_host, resolved_port)
+        if open_browser:
+            threading.Timer(0.25, lambda: webbrowser.open(url)).start()
+        print(f"JARVIS Presence is online at {url}")
+        print(
+            "Remote access: proxy this loopback URL with Tailscale Serve; "
+            "do not port-forward it."
+        )
+        try:
+            server.serve_forever(poll_interval=0.25)
+        except KeyboardInterrupt:
+            pass
     finally:
-        server.shutdown()
-        server.server_close()
-        stop_indicator_process(indicator_process)
-        runtime.shutdown()
+        try:
+            if server is not None:
+                server.server_close()
+        finally:
+            try:
+                stop_indicator_process(indicator_process)
+            finally:
+                if runtime is not None:
+                    runtime.shutdown()
     return 0
 
 

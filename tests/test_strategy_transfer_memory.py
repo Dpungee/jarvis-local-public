@@ -122,8 +122,8 @@ class StrategyTransferMemoryTests(unittest.TestCase):
 
     def test_v39_schema_and_selector_candidates_are_metadata_only(self) -> None:
         with Memory(Path(":memory:")) as memory:
-            self.assertEqual(SCHEMA_VERSION, 40)
-            self.assertEqual(memory.db.execute("PRAGMA user_version").fetchone()[0], 40)
+            self.assertEqual(SCHEMA_VERSION, 41)
+            self.assertEqual(memory.db.execute("PRAGMA user_version").fetchone()[0], 41)
             for table in (
                 "task_strategy_observations", "strategy_transfer_applications",
                 "strategy_transfer_attestations",
@@ -689,7 +689,7 @@ class StrategyTransferMemoryTests(unittest.TestCase):
             with Memory(database_path) as recovered:
                 self.assertEqual(
                     recovered.db.execute("PRAGMA user_version").fetchone()[0],
-                    40,
+                    41,
                 )
                 columns = {
                     str(row["name"])

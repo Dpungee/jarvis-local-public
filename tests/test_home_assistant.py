@@ -31,7 +31,7 @@ TEMP_ROOT.mkdir(exist_ok=True)
 class RecordingHomeAssistant(HomeAssistantProvider):
     def __init__(self, entities=("remote.example_tv",)) -> None:
         super().__init__(
-            "http://192.168.50.2:8123",
+            "https://192.168.50.2:8123",
             "test-token-" + "x" * 24,
             tuple(entities),
             timeout_seconds=1,
@@ -121,8 +121,8 @@ class NetworkRecordingHomeAssistant(HomeAssistantProvider):
 class HomeAssistantProviderTests(unittest.TestCase):
     def test_origin_is_private_literal_and_canonical(self):
         self.assertEqual(
-            normalize_home_assistant_url("http://192.168.50.2:8123/"),
-            "http://192.168.50.2:8123",
+            normalize_home_assistant_url("https://192.168.50.2:8123/"),
+            "https://192.168.50.2:8123",
         )
         self.assertEqual(
             normalize_home_assistant_url("http://localhost:8123"),
@@ -132,11 +132,39 @@ class HomeAssistantProviderTests(unittest.TestCase):
             "https://example.com",
             "http://homeassistant.local:8123",
             "http://user:pass@192.168.50.2:8123",
-            "http://192.168.50.2:8123/api/states",
+            "https://192.168.50.2:8123/api/states",
             "file:///tmp/home-assistant",
         ):
             with self.subTest(url=unsafe), self.assertRaises(ValueError):
                 normalize_home_assistant_url(unsafe)
+
+    def test_plaintext_is_rejected_for_non_loopback_before_opener_creation(self):
+        for unsafe in (
+            "http://192.168.50.2:8123",
+            "http://169.254.20.5:8123",
+            "http://[fd00::2]:8123",
+        ):
+            with self.subTest(url=unsafe), patch(
+                "jarvis.home_assistant.urllib.request.build_opener"
+            ) as build_opener:
+                with self.assertRaisesRegex(ValueError, "must use HTTPS"):
+                    HomeAssistantProvider(
+                        unsafe,
+                        "test-token-" + "x" * 24,
+                        ("remote.example_tv",),
+                    )
+                build_opener.assert_not_called()
+
+    def test_https_lan_and_plaintext_loopback_remain_supported(self):
+        for supported, expected in (
+            ("https://192.168.50.2:8123", "https://192.168.50.2:8123"),
+            ("https://[fd00::2]:8123", "https://[fd00::2]:8123"),
+            ("http://127.0.0.1:8123", "http://127.0.0.1:8123"),
+            ("http://[::1]:8123", "http://[::1]:8123"),
+            ("http://localhost:8123", "http://localhost:8123"),
+        ):
+            with self.subTest(url=supported):
+                self.assertEqual(normalize_home_assistant_url(supported), expected)
 
     def test_status_reads_only_allowlisted_entities_and_never_exposes_token(self):
         provider = RecordingHomeAssistant((
@@ -181,7 +209,11 @@ class HomeAssistantProviderTests(unittest.TestCase):
             provider.requests,
         )
         self.assertTrue(result["command_accepted"])
-        self.assertTrue(result["verified_readback"])
+        self.assertTrue(result["readback_completed"])
+        self.assertTrue(result["effect_verified"])
+        self.assertEqual(
+            result["effect_verification_basis"], "current_activity_exact_match"
+        )
         self.assertEqual(result["current_activity"], "com.spotify.tv.android")
         self.assertNotIn(provider.token, json.dumps(result))
 
@@ -191,6 +223,13 @@ class HomeAssistantProviderTests(unittest.TestCase):
             entity_id="remote.example_tv", action="home"
         )
         self.assertEqual(result["action"], "home")
+        self.assertTrue(result["command_accepted"])
+        self.assertTrue(result["readback_completed"])
+        self.assertIsNone(result["effect_verified"])
+        self.assertEqual(
+            result["effect_verification_basis"],
+            "remote_effect_not_observable_from_entity_state",
+        )
         self.assertIn(
             (
                 "POST",
@@ -205,6 +244,37 @@ class HomeAssistantProviderTests(unittest.TestCase):
             provider.control(entity_id="remote.unlisted_tv", action="home")
         with self.assertRaises(ValueError):
             provider.normalize_app("; rm -rf / ;")
+
+    def test_app_launch_mismatch_is_not_effect_verified(self):
+        provider = RecordingHomeAssistant()
+        mismatched_state = {
+            "entity_id": "remote.example_tv",
+            "state": "on",
+            "attributes": {
+                "friendly_name": "Example TV",
+                "current_activity": "com.google.android.youtube.tv",
+            },
+        }
+        with (
+            patch.object(
+                provider,
+                "_request",
+                side_effect=[[], *[mismatched_state for _item in range(4)]],
+            ),
+            patch("jarvis.home_assistant.time.sleep"),
+        ):
+            result = provider.control(
+                entity_id="remote.example_tv",
+                action="open_app",
+                app="Spotify",
+            )
+
+        self.assertTrue(result["command_accepted"])
+        self.assertTrue(result["readback_completed"])
+        self.assertFalse(result["effect_verified"])
+        self.assertEqual(
+            result["effect_verification_basis"], "current_activity_did_not_match"
+        )
 
     def test_netgear_telemetry_is_read_only_bounded_and_honest_about_bandwidth(self):
         provider = NetworkRecordingHomeAssistant()
@@ -258,7 +328,7 @@ class HomeDeviceToolAndRoutingTests(unittest.TestCase):
         return replace(
             self.config,
             home_assistant_access="paired",
-            home_assistant_url="http://192.168.50.2:8123",
+            home_assistant_url="https://192.168.50.2:8123",
             home_assistant_token="test-token-" + "x" * 24,
             home_assistant_entities=("remote.example_tv",),
         )
@@ -328,7 +398,8 @@ class HomeDeviceToolAndRoutingTests(unittest.TestCase):
         with toolbox.approval_context("conversation:501"):
             allowed = json.loads(toolbox.execute("home_device_control", arguments))
         self.assertTrue(allowed["ok"], allowed)
-        self.assertTrue(allowed["result"]["verified_readback"])
+        self.assertTrue(allowed["result"]["readback_completed"])
+        self.assertTrue(allowed["result"]["effect_verified"])
 
         changed = {**arguments, "app": "YouTube"}
         with toolbox.approval_context("conversation:501"):
@@ -431,7 +502,10 @@ class HomeDeviceToolAndRoutingTests(unittest.TestCase):
                         "entity_id": "remote.example_tv",
                         "action": "open_app",
                         "app": "com.spotify.tv.android",
-                        "verified_readback": True,
+                        "command_accepted": True,
+                        "readback_completed": True,
+                        "effect_verified": True,
+                        "effect_verification_basis": "current_activity_exact_match",
                     },
                 })
 

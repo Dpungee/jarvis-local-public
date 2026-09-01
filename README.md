@@ -109,10 +109,12 @@ For the easiest supported path, use a Codex CLI or Claude CLI subscription login
 v0.6.3 first-run wizard configures those subscription providers; Ollama is supported,
 but its local-model selection is still a manual setup path.
 
-1. Download and extract the **Exact release source archive** from the
-   [v0.6.3 release](https://github.com/Dpungee/jarvis-local-public/releases/tag/v0.6.3),
-   or clone the repository with Git. The Python wheel is for Python installation, not
-   the double-click Windows setup described here.
+1. Clone this repository with Git to test the current v0.6.3 development candidate.
+   **Exact release source archive:** for a tagged release, use the latest artifact on the
+   [Releases page](https://github.com/Dpungee/jarvis-local-public/releases) and follow
+   the instructions for that tagged version. Do not assume an untagged candidate has
+   release assets. The Python wheel is for Python installation, not the double-click
+   Windows setup described here.
 2. Install a supported Python version if necessary, then open the extracted project
    folder.
 3. Double-click `setup.bat`. The public-preview installer adds Jarvis and its document
@@ -148,10 +150,11 @@ professional review in high-stakes domains. See [Security](SECURITY.md),
 Before changing repository visibility, complete the
 [public-release checklist](docs/PUBLIC_RELEASE_CHECKLIST.md).
 
-This repository is **JARVIS Local 0.6.3 Public Preview (alpha)**. Its published release
-artifacts were cut from the sanitized, protected release commit after the public-release
-checks and isolated package smoke tests passed. Separate first-launch validation under a
-clean Windows user remains a stabilization gate.
+This checkout is the **JARVIS Local 0.6.3 development candidate (alpha)**. A Git tag or
+release asset is published only after that exact commit passes the sanitized public-release
+checks and isolated package smoke tests. Do not treat an untagged checkout as a published
+release. Separate first-launch validation under a clean Windows user remains a
+stabilization gate.
 
 <details>
 <summary><strong>Open the detailed operations and engineering reference</strong></summary>
@@ -550,11 +553,22 @@ Host process execution is disabled by default. With `JARVIS_EXECUTION_MODE=trust
 
 With `JARVIS_COMPUTER_ACCESS=trusted-desktop`, JARVIS can inspect and edit ordinary files under `JARVIS_COMPUTER_ROOT`, inspect live system health, build projects inside its workspace, and launch `.exe`, `.py`, `.pyw`, or `.html` artifacts it created there. Existing text files require a fresh hash and receive a backup. Credential stores, link escapes, permanent deletion, and system-wide writes stay blocked.
 
-External GitHub, Google Drive, and Vercel tools are hidden unless `JARVIS_EXTERNAL_ACCESS=trusted-external` is explicitly configured. Read-only account inspection then becomes available. Mutation schemas are offered only when the current request explicitly names an external action; authentication, upload, mutation, push, and deployment operations additionally require exact one-shot approval.
+External GitHub, Google Drive, and Vercel tools are hidden unless `JARVIS_EXTERNAL_ACCESS=trusted-external` is explicitly configured. Read-only inspection becomes available only for each provider whose separate executable, authentication, and provider-specific configuration checks succeed. Mutation schemas are offered only when the current request explicitly names an external action; authentication, upload, mutation, push, and deployment operations additionally require exact one-shot approval.
+
+GitHub and other provider executables must resolve from an OS-administered install
+root; workspace and user-writable PATH shims are refused. The usual user-owned npm
+`.cmd` installation of the Vercel CLI therefore remains unavailable until Jarvis has a
+separate operator-pinned Node/entrypoint trust flow. Jarvis reports Vercel unavailable
+instead of executing an unpinned script.
 
 GitHub uses the official `gh` CLI and its operating-system credential store. Complete
 `gh auth login --hostname github.com --git-protocol https --web` once; JARVIS never
-reads or prints the token. Google Drive uses the official Desktop OAuth loopback flow
+reads or prints the token. Its contained Git provider accepts ordinary repositories only,
+rejects executable or network-rewriting local Git configuration, ignores global/system
+Git configuration, permits only credential-free `https://github.com/...` remotes, and
+pushes only the exact URL and commit recorded in the approval snapshot. Linked worktrees,
+SSH remotes, custom filters/hooks/helpers, URL rewrites, and repositories with unsupported
+local configuration fail closed. Google Drive uses the official Desktop OAuth loopback flow
 with the least-privilege `drive.file` scope by default. Whole-Drive inventory and cleanup
 require the explicit `JARVIS_GOOGLE_DRIVE_ACCESS=full` setting and a fresh authorization
 using Google's full Drive scope. Enable the Drive API, create a

@@ -577,6 +577,24 @@ class LongHorizonStore:
             self.db = memory_or_path
         else:
             source_path = Path(memory_or_path)
+            from .memory import SCHEMA_VERSION
+            from .sqlite_preflight import inspection_connection, validate_database_path
+            try:
+                path_exists = validate_database_path(source_path)
+                if path_exists:
+                    with inspection_connection(source_path) as preflight:
+                        preflight_version = int(
+                            preflight.execute("PRAGMA user_version").fetchone()[0]
+                        )
+            except (OSError, sqlite3.DatabaseError, TypeError, ValueError) as exc:
+                raise LongHorizonStateError(
+                    "Database could not be inspected safely"
+                ) from exc
+            if path_exists and preflight_version > SCHEMA_VERSION:
+                raise LongHorizonStateError(
+                    f"Database schema version {preflight_version} is newer than "
+                    f"supported version {SCHEMA_VERSION}"
+                )
             self.db = sqlite3.connect(
                 str(source_path),
                 timeout=max(0.1, min(int(busy_timeout_ms), 120_000) / 1000),
@@ -589,12 +607,39 @@ class LongHorizonStore:
         if self.db.row_factory is None:
             self.db.row_factory = sqlite3.Row
         self.worker_id = _require_identity(worker_id or f"worker:{secrets.token_hex(12)}", "worker_id")
-        self._integrity_key = self._load_integrity_key(source_path, integrity_key)
+        # Memory owns the database schema. A direct-path restart worker must
+        # refuse an unknown future database before creating the integrity
+        # sidecar or running any Phase 5 DDL against state it cannot understand.
+        from .memory import SCHEMA_VERSION
+
         self._authorities = self._validated_authorities(authorities or {})
         self._approval_validator = approval_validator
         if not self.db.in_transaction:
-            with self._transaction():
+            self.db.execute("BEGIN IMMEDIATE")
+            try:
+                existing_version = int(
+                    self.db.execute("PRAGMA user_version").fetchone()[0]
+                )
+                if existing_version > SCHEMA_VERSION:
+                    raise LongHorizonStateError(
+                        f"Database schema version {existing_version} is newer than "
+                        f"supported version {SCHEMA_VERSION}"
+                    )
+                # Create/read the sidecar only after the locked authority check.
+                self._integrity_key = self._load_integrity_key(source_path, integrity_key)
+                self._verify_existing_state_macs_locked()
                 migrate_long_horizon_v40(self.db)
+                self._seal_all_states_locked()
+                self.db.commit()
+            except BaseException:
+                if self.db.in_transaction:
+                    self.db.rollback()
+                if self._owns_connection:
+                    self.db.close()
+                    self._owns_connection = False
+                raise
+        else:
+            self._integrity_key = self._load_integrity_key(source_path, integrity_key)
 
     @staticmethod
     def _load_integrity_key(path: Path | None, supplied: bytes | None) -> bytes:

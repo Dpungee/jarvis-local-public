@@ -55,6 +55,7 @@ class PublicPublishSourceTests(unittest.TestCase):
         *,
         root: str | None = None,
         mode: str = "tag",
+        expected_remote_main: str | None = None,
     ) -> None:
         PUBLISH.check_public_publish_source(
             repository,
@@ -63,6 +64,7 @@ class PublicPublishSourceTests(unittest.TestCase):
             mode=mode,
             version_tag="v0.6.0",
             remote_url=self.PUBLIC_URL,
+            expected_remote_main=expected_remote_main,
         )
 
     def test_accepts_exact_public_only_repository(self) -> None:
@@ -128,6 +130,137 @@ class PublicPublishSourceTests(unittest.TestCase):
                 with self.assertRaisesRegex(PUBLISH.PublishSourceError, "not an ancestor"):
                     self.check(repository, head, mode="promotion")
 
+    def test_accepts_exact_lease_bound_history_replacement(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            repository, root = self.safe_repository(Path(temporary), with_tag=False)
+            (repository / "candidate.txt").write_text("checked\n", encoding="utf-8")
+            self.git(repository, "add", "candidate.txt")
+            self.git(repository, "commit", "-m", "checked replacement")
+            head = self.git(repository, "rev-parse", "HEAD")
+            old_main = "a" * 40
+            original_git = PUBLISH._git
+
+            def fake_git(git_executable, repo, *arguments, allow_missing=False):
+                if arguments == (
+                    "ls-remote",
+                    "--heads",
+                    "--tags",
+                    "public",
+                ):
+                    return (
+                        f"{old_main}\trefs/heads/main\n"
+                        f"{head}\trefs/heads/release/v0.6.0\n"
+                        f"{root}\trefs/tags/v0.5.0\n"
+                        f"{'d' * 40}\trefs/tags/v0.4.0\n"
+                        f"{root}\trefs/tags/v0.4.0^{{}}"
+                    )
+                return original_git(
+                    git_executable, repo, *arguments, allow_missing=allow_missing
+                )
+
+            with mock.patch.object(PUBLISH, "_git", side_effect=fake_git):
+                self.check(
+                    repository,
+                    head,
+                    root=root,
+                    mode="history-replacement",
+                    expected_remote_main=old_main,
+                )
+
+    def test_history_replacement_rejects_stale_lease_or_candidate_ref(self) -> None:
+        for stale_main, stale_candidate, expected_error in (
+            (True, False, "approved lease"),
+            (False, True, "candidate ref"),
+        ):
+            with self.subTest(
+                stale_main=stale_main,
+                stale_candidate=stale_candidate,
+            ), tempfile.TemporaryDirectory() as temporary:
+                repository, head = self.safe_repository(
+                    Path(temporary), with_tag=False
+                )
+                old_main = "a" * 40
+                remote_main = "b" * 40 if stale_main else old_main
+                remote_candidate = "c" * 40 if stale_candidate else head
+                original_git = PUBLISH._git
+
+                def fake_git(
+                    git_executable,
+                    repo,
+                    *arguments,
+                    allow_missing=False,
+                    _remote_main=remote_main,
+                    _remote_candidate=remote_candidate,
+                    _original_git=original_git,
+                ):
+                    if arguments == (
+                        "ls-remote",
+                        "--heads",
+                        "--tags",
+                        "public",
+                    ):
+                        return (
+                            f"{_remote_main}\trefs/heads/main\n"
+                            f"{_remote_candidate}\trefs/heads/release/v0.6.0"
+                        )
+                    return _original_git(
+                        git_executable, repo, *arguments, allow_missing=allow_missing
+                    )
+
+                with (
+                    mock.patch.object(PUBLISH, "_git", side_effect=fake_git),
+                    self.assertRaisesRegex(PUBLISH.PublishSourceError, expected_error),
+                ):
+                    self.check(
+                        repository,
+                        head,
+                        mode="history-replacement",
+                        expected_remote_main=old_main,
+                    )
+
+    def test_history_replacement_rejects_advertised_old_history_ref(self) -> None:
+        for refname in ("refs/heads/legacy", "refs/tags/legacy"):
+            with self.subTest(refname=refname), tempfile.TemporaryDirectory() as temporary:
+                repository, head = self.safe_repository(
+                    Path(temporary), with_tag=False
+                )
+                old_main = "a" * 40
+                original_git = PUBLISH._git
+
+                def fake_git(
+                    git_executable,
+                    repo,
+                    *arguments,
+                    allow_missing=False,
+                    _refname=refname,
+                    _old_main=old_main,
+                    _head=head,
+                    _original_git=original_git,
+                ):
+                    if arguments == ("ls-remote", "--heads", "--tags", "public"):
+                        return (
+                            f"{_old_main}\trefs/heads/main\n"
+                            f"{_head}\trefs/heads/release/v0.6.0\n"
+                            f"{'b' * 40}\t{_refname}"
+                        )
+                    return _original_git(
+                        git_executable, repo, *arguments, allow_missing=allow_missing
+                    )
+
+                with (
+                    mock.patch.object(PUBLISH, "_git", side_effect=fake_git),
+                    self.assertRaisesRegex(
+                        PUBLISH.PublishSourceError,
+                        "outside the sanitized candidate history",
+                    ),
+                ):
+                    self.check(
+                        repository,
+                        head,
+                        mode="history-replacement",
+                        expected_remote_main=old_main,
+                    )
+
     def test_poisoned_repository_path_git_is_rejected_without_execution(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             repository, head = self.safe_repository(Path(temporary))
@@ -173,6 +306,7 @@ class PublicPublishSourceTests(unittest.TestCase):
             mode="promotion",
             version_tag="v0.6.2",
             remote_url=self.PUBLIC_URL,
+            expected_remote_main=None,
         )
         parser = mock.Mock()
         parser.parse_args.return_value = arguments
@@ -184,6 +318,32 @@ class PublicPublishSourceTests(unittest.TestCase):
         ):
             self.assertEqual(PUBLISH.main(), 0)
         self.assertEqual(output.getvalue(), "git push public HEAD:refs/heads/main\n")
+
+    def test_history_replacement_cli_prints_only_exact_lease_command(self) -> None:
+        old_main = "a" * 40
+        arguments = SimpleNamespace(
+            repository=Path("."),
+            expected_commit="b" * 40,
+            expected_root="c" * 40,
+            mode="history-replacement",
+            version_tag="v0.6.2",
+            remote_url=self.PUBLIC_URL,
+            expected_remote_main=old_main,
+        )
+        parser = mock.Mock()
+        parser.parse_args.return_value = arguments
+        output = io.StringIO()
+        with (
+            mock.patch.object(PUBLISH, "_parser", return_value=parser),
+            mock.patch.object(PUBLISH, "check_public_publish_source"),
+            redirect_stdout(output),
+        ):
+            self.assertEqual(PUBLISH.main(), 0)
+        self.assertEqual(
+            output.getvalue(),
+            "git push --force-with-lease=refs/heads/main:"
+            f"{old_main} public {'b' * 40}:refs/heads/main\n",
+        )
 
     def test_rejects_extra_local_ref(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -238,6 +398,58 @@ class PublicPublishSourceTests(unittest.TestCase):
             )
             with self.assertRaisesRegex(PUBLISH.PublishSourceError, "unreachable Git objects"):
                 self.check(repository, head)
+
+    def test_rejects_shallow_partial_or_grafted_repository(self) -> None:
+        cases = ("shallow", "partial", "graft")
+        for case in cases:
+            with self.subTest(case=case), tempfile.TemporaryDirectory() as temporary:
+                repository, head = self.safe_repository(Path(temporary))
+                git_dir = Path(self.git(repository, "rev-parse", "--absolute-git-dir"))
+                if case == "shallow":
+                    (git_dir / "shallow").write_text(head + "\n", encoding="ascii")
+                    expected = "shallow"
+                elif case == "partial":
+                    self.git(repository, "config", "extensions.partialClone", "public")
+                    expected = "partial"
+                else:
+                    (git_dir / "info" / "grafts").write_text(
+                        head + "\n", encoding="ascii"
+                    )
+                    expected = "grafts"
+                with self.assertRaisesRegex(PUBLISH.PublishSourceError, expected):
+                    self.check(repository, head)
+
+    def test_rejects_git_topology_environment_override(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            repository, head = self.safe_repository(Path(temporary))
+            with (
+                mock.patch.dict(
+                    os.environ,
+                    {"GIT_REPLACE_REF_BASE": "refs/private-replacements/"},
+                    clear=False,
+                ),
+                self.assertRaisesRegex(
+                    PUBLISH.PublishSourceError,
+                    "topology environment overrides",
+                ),
+            ):
+                self.check(repository, head)
+
+    def test_rejects_linked_worktree_as_publish_source(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            repository, head = self.safe_repository(root)
+            self.git(repository, "branch", "-m", "source")
+            self.git(repository, "switch", "--detach")
+            linked = root / "linked-public"
+            self.git(repository, "worktree", "add", "-b", "main", str(linked), head)
+            self.git(repository, "branch", "-D", "source")
+
+            with self.assertRaisesRegex(
+                PUBLISH.PublishSourceError,
+                "standalone disposable clone",
+            ):
+                self.check(linked, head)
 
     def test_accepts_linear_update_history_rooted_at_approved_snapshot(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -302,6 +514,46 @@ class PublicPublishSourceTests(unittest.TestCase):
             PUBLISH.expected_push_arguments("tag", "v0.6.0"),
             ["public", "refs/tags/v0.6.0:refs/tags/v0.6.0"],
         )
+        old_main = "a" * 40
+        approved_commit = "c" * 40
+        self.assertEqual(
+            PUBLISH.expected_push_arguments(
+                "history-replacement",
+                "v0.6.0",
+                old_main,
+                approved_commit,
+            ),
+            [
+                f"--force-with-lease=refs/heads/main:{old_main}",
+                "public",
+                f"{approved_commit}:refs/heads/main",
+            ],
+        )
+        for arguments in (
+            ["--force", "public", f"{approved_commit}:refs/heads/main"],
+            ["--force-with-lease", "public", f"{approved_commit}:refs/heads/main"],
+            [
+                f"--force-with-lease=refs/heads/main:{'b' * 40}",
+                "public",
+                f"{approved_commit}:refs/heads/main",
+            ],
+            [
+                f"--force-with-lease=refs/heads/main:{old_main}",
+                "public",
+                f"{'d' * 40}:refs/heads/main",
+            ],
+        ):
+            with self.subTest(arguments=arguments), self.assertRaisesRegex(
+                PUBLISH.PublishSourceError,
+                "must name only",
+            ):
+                PUBLISH.validate_push_arguments(
+                    arguments,
+                    "history-replacement",
+                    "v0.6.0",
+                    old_main,
+                    approved_commit,
+                )
 
     def test_documentation_contains_only_explicit_ref_guidance(self) -> None:
         publishing = (ROOT / "docs" / "PUBLISHING.md").read_text(encoding="utf-8")
@@ -310,6 +562,37 @@ class PublicPublishSourceTests(unittest.TestCase):
         self.assertIn("HEAD:refs/heads/release/v0.6.3", publishing)
         self.assertIn("HEAD:refs/heads/main", publishing)
         self.assertIn("refs/tags/v0.6.3:refs/tags/v0.6.3", publishing)
+        self.assertIn("--force-with-lease=refs/heads/main:", publishing)
+        self.assertIn("FULL_NEW_COMMIT:refs/heads/main", publishing)
+        self.assertIn("release/v0.6.4-phase6-baseline", publishing)
+        self.assertIn('$versionTag = "v0.6.4-phase6-baseline"', publishing)
+        self.assertIn("--mode candidate", publishing)
+        self.assertIn("--mode history-replacement", publishing)
+        self.assertIn(
+            "git push public HEAD:refs/heads/release/v0.6.4-phase6-baseline",
+            publishing,
+        )
+        self.assertIn("jarvis-repair-publish-", publishing)
+        self.assertIn("jarvis-repair-verify-", publishing)
+        self.assertIn(
+            'gh api "repos/$publicRepository/branches/main/protection"',
+            publishing,
+        )
+        self.assertIn("Main protection was not restored exactly", publishing)
+        self.assertIn(
+            "git -c credential.helper= -c http.extraHeader= clone", publishing
+        )
+        self.assertIn(
+            "git -c credential.helper= -c http.extraHeader= ls-remote $publicUrl",
+            publishing,
+        )
+        self.assertIn("'refs/heads/*' 'refs/tags/*'", publishing)
+        self.assertIn("git merge-base --is-ancestor $target $approvedCommit", publishing)
+        self.assertIn("Required push-triggered CI", publishing)
+        self.assertLess(
+            publishing.index("Privacy-history repair exception"),
+            publishing.index('$versionTag = "v0.6.3"'),
+        )
         self.assertIn("Do not merge the pull request through", publishing)
         self.assertNotIn("Merge only after", publishing)
 

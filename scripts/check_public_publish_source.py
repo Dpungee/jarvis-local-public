@@ -8,6 +8,7 @@ contains only the exact public branch and release tag intended for publication.
 from __future__ import annotations
 
 import argparse
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -25,7 +26,7 @@ class PublishSourceError(RuntimeError):
 
 
 FORBIDDEN_PUSH_OPTIONS = frozenset({"--all", "--tags", "--mirror"})
-PUBLISH_MODES = frozenset({"candidate", "promotion", "tag"})
+PUBLISH_MODES = frozenset({"candidate", "history-replacement", "promotion", "tag"})
 
 
 def _resolve_trusted_git(repository: Path) -> Path:
@@ -85,19 +86,46 @@ def _normalized_https_github_url(value: str) -> str:
     return f"https://github.com/{path_parts[0]}/{repository_name}.git".casefold()
 
 
-def expected_push_arguments(mode: str, version_tag: str) -> list[str]:
+def expected_push_arguments(
+    mode: str,
+    version_tag: str,
+    expected_remote_main: str | None = None,
+    expected_commit: str | None = None,
+) -> list[str]:
     """Return the only accepted exact-ref push arguments for one publish phase."""
 
     if mode == "candidate":
         return ["public", f"HEAD:refs/heads/release/{version_tag}"]
     if mode == "promotion":
         return ["public", "HEAD:refs/heads/main"]
+    if mode == "history-replacement":
+        if expected_remote_main is None:
+            raise PublishSourceError(
+                "history replacement requires the exact expected remote main"
+            )
+        if expected_commit is None:
+            raise PublishSourceError(
+                "history replacement requires the exact approved commit"
+            )
+        return [
+            f"--force-with-lease=refs/heads/main:{expected_remote_main}",
+            "public",
+            f"{expected_commit}:refs/heads/main",
+        ]
     if mode == "tag":
         return ["public", f"refs/tags/{version_tag}:refs/tags/{version_tag}"]
-    raise PublishSourceError("publish mode must be candidate, promotion, or tag")
+    raise PublishSourceError(
+        "publish mode must be candidate, history-replacement, promotion, or tag"
+    )
 
 
-def validate_push_arguments(arguments: list[str], mode: str, version_tag: str) -> None:
+def validate_push_arguments(
+    arguments: list[str],
+    mode: str,
+    version_tag: str,
+    expected_remote_main: str | None = None,
+    expected_commit: str | None = None,
+) -> None:
     """Reject broad push modes and anything except the phase's explicit ref."""
 
     broad_options = {
@@ -110,12 +138,106 @@ def validate_push_arguments(arguments: list[str], mode: str, version_tag: str) -
         raise PublishSourceError(
             f"broad push option is forbidden: {', '.join(rejected)}"
         )
-    expected = expected_push_arguments(mode, version_tag)
+    expected = expected_push_arguments(
+        mode,
+        version_tag,
+        expected_remote_main,
+        expected_commit,
+    )
     if arguments != expected:
         raise PublishSourceError(
             "push arguments must name only the intended candidate branch, main promotion, "
             "or release tag"
         )
+
+
+def _validated_commit_id(value: str | None, label: str) -> str:
+    candidate = str(value or "").strip().casefold()
+    if len(candidate) != 40 or any(
+        character not in "0123456789abcdef" for character in candidate
+    ):
+        raise PublishSourceError(f"{label} must be a full 40-character SHA-1")
+    return candidate
+
+
+def _check_history_replacement_remote(
+    git_executable: Path,
+    repository: Path,
+    *,
+    head: str,
+    expected_remote_main: str,
+    version_tag: str,
+) -> None:
+    """Bind a rewrite to the live old tip and already checked candidate ref."""
+
+    candidate_ref = f"refs/heads/release/{version_tag}"
+    remote_output = _git(
+        git_executable,
+        repository,
+        "ls-remote",
+        "--heads",
+        "--tags",
+        "public",
+    )
+    refs: dict[str, str] = {}
+    for line in remote_output.splitlines():
+        fields = line.split()
+        if len(fields) != 2 or fields[1] in refs:
+            raise PublishSourceError(
+                "could not resolve the exact public main and candidate refs"
+            )
+        refs[fields[1]] = fields[0].casefold()
+    required_refs = {"refs/heads/main", candidate_ref}
+    if not required_refs.issubset(refs):
+        raise PublishSourceError(
+            "could not resolve the exact public main and candidate refs"
+        )
+    for commit_id in refs.values():
+        _validated_commit_id(commit_id, "public ref")
+    if refs["refs/heads/main"] != expected_remote_main:
+        raise PublishSourceError("public main no longer matches the approved lease")
+    if refs[candidate_ref] != head:
+        raise PublishSourceError(
+            "public candidate ref no longer matches the approved release commit"
+        )
+
+    advertised_targets: list[str] = []
+    for refname, commit_id in refs.items():
+        if refname in {"refs/heads/main", candidate_ref} or refname.endswith("^{}"):
+            continue
+        if refname.startswith("refs/heads/"):
+            advertised_targets.append(commit_id)
+            continue
+        if refname.startswith("refs/tags/"):
+            advertised_targets.append(refs.get(f"{refname}^{{}}", commit_id))
+            continue
+        raise PublishSourceError("public remote advertised an unexpected ref type")
+
+    for target in advertised_targets:
+        try:
+            _git(git_executable, repository, "cat-file", "-e", f"{target}^{{commit}}")
+        except PublishSourceError as error:
+            raise PublishSourceError(
+                "an advertised public ref is outside the sanitized candidate history"
+            ) from error
+        ancestor = subprocess.run(
+            [
+                str(git_executable),
+                "-C",
+                str(repository),
+                "merge-base",
+                "--is-ancestor",
+                target,
+                head,
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        if ancestor.returncode != 0:
+            raise PublishSourceError(
+                "an advertised public ref is outside the sanitized candidate history"
+            )
 
 
 def _check_promotion_is_fast_forward(
@@ -180,13 +302,16 @@ def check_public_publish_source(
     mode: str,
     version_tag: str,
     remote_url: str,
+    expected_remote_main: str | None = None,
 ) -> None:
     """Validate a disposable clone before an explicit-ref public push."""
 
     repository = repository.resolve()
     git_executable = _resolve_trusted_git(repository)
     if mode not in PUBLISH_MODES:
-        raise PublishSourceError("publish mode must be candidate, promotion, or tag")
+        raise PublishSourceError(
+            "publish mode must be candidate, history-replacement, promotion, or tag"
+        )
     if not version_tag.startswith("v") or any(
         character.isspace() for character in version_tag
     ):
@@ -199,16 +324,21 @@ def check_public_publish_source(
     if completed.returncode != 0:
         raise PublishSourceError("version tag is not a valid Git ref name")
 
-    expected_commit = expected_commit.strip().casefold()
-    if len(expected_commit) != 40 or any(
-        character not in "0123456789abcdef" for character in expected_commit
-    ):
-        raise PublishSourceError("expected commit must be a full 40-character SHA-1")
-    expected_root = expected_root.strip().casefold()
-    if len(expected_root) != 40 or any(
-        character not in "0123456789abcdef" for character in expected_root
-    ):
-        raise PublishSourceError("expected root must be a full 40-character SHA-1")
+    expected_commit = _validated_commit_id(expected_commit, "expected commit")
+    expected_root = _validated_commit_id(expected_root, "expected root")
+    if mode == "history-replacement":
+        expected_remote_main = _validated_commit_id(
+            expected_remote_main,
+            "expected remote main",
+        )
+        if expected_remote_main == expected_commit:
+            raise PublishSourceError(
+                "history replacement requires distinct old and approved commits"
+            )
+    elif expected_remote_main is not None:
+        raise PublishSourceError(
+            "expected remote main is valid only for history replacement"
+        )
 
     inside = _git(git_executable, repository, "rev-parse", "--is-inside-work-tree")
     if inside != "true":
@@ -311,6 +441,15 @@ def check_public_publish_source(
 
     if mode == "promotion":
         _check_promotion_is_fast_forward(git_executable, repository, head)
+    elif mode == "history-replacement":
+        assert expected_remote_main is not None
+        _check_history_replacement_remote(
+            git_executable,
+            repository,
+            head=head,
+            expected_remote_main=expected_remote_main,
+            version_tag=version_tag,
+        )
 
     if _git(
         git_executable,
@@ -331,10 +470,88 @@ def check_public_publish_source(
     ):
         raise PublishSourceError("configured push refspecs are forbidden; use explicit refs")
 
+    object_topology_overrides = (
+        "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+        "GIT_COMMON_DIR",
+        "GIT_DIR",
+        "GIT_GRAFT_FILE",
+        "GIT_INDEX_FILE",
+        "GIT_OBJECT_DIRECTORY",
+        "GIT_REPLACE_REF_BASE",
+        "GIT_SHALLOW_FILE",
+        "GIT_WORK_TREE",
+    )
+    if any(os.environ.get(name) for name in object_topology_overrides):
+        raise PublishSourceError(
+            "Git topology environment overrides are forbidden for public publishing"
+        )
+
+    if _git(
+        git_executable,
+        repository,
+        "rev-parse",
+        "--is-shallow-repository",
+    ) != "false":
+        raise PublishSourceError("shallow repositories are forbidden for public publishing")
+    if _git(git_executable, repository, "replace", "-l"):
+        raise PublishSourceError("Git replace refs are forbidden for public publishing")
+    partial = subprocess.run(
+        [
+            str(git_executable),
+            "-C",
+            str(repository),
+            "config",
+            "--get-regexp",
+            r"^(extensions\.partialclone|remote\..*\.promisor)$",
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if partial.returncode not in {0, 1}:
+        raise PublishSourceError("could not verify clone completeness")
+    if partial.stdout.strip():
+        raise PublishSourceError("partial clones are forbidden for public publishing")
+
     git_dir = Path(
         _git(git_executable, repository, "rev-parse", "--absolute-git-dir")
+    ).resolve()
+    common_dir_text = _git(
+        git_executable, repository, "rev-parse", "--git-common-dir"
     )
-    if (git_dir / "objects" / "info" / "alternates").exists():
+    common_dir = Path(common_dir_text)
+    if not common_dir.is_absolute():
+        common_dir = repository / common_dir
+    common_dir = common_dir.resolve()
+    expected_git_dir = (repository / ".git").resolve()
+    if (
+        git_dir != common_dir
+        or git_dir != expected_git_dir
+        or not expected_git_dir.is_dir()
+    ):
+        raise PublishSourceError(
+            "public publishing requires a standalone disposable clone"
+        )
+
+    graft_path = Path(
+        _git(git_executable, repository, "rev-parse", "--git-path", "info/grafts")
+    )
+    if not graft_path.is_absolute():
+        graft_path = repository / graft_path
+    if graft_path.exists():
+        raise PublishSourceError("Git grafts are forbidden for public publishing")
+    alternates_path = Path(
+        _git(
+            git_executable,
+            repository,
+            "rev-parse",
+            "--git-path",
+            "objects/info/alternates",
+        )
+    )
+    if not alternates_path.is_absolute():
+        alternates_path = repository / alternates_path
+    if alternates_path.exists():
         raise PublishSourceError("alternate object databases are forbidden")
     unreachable = _git(
         git_executable, repository, "fsck", "--full", "--no-reflogs", "--unreachable"
@@ -342,7 +559,18 @@ def check_public_publish_source(
     if unreachable:
         raise PublishSourceError("the disposable clone contains unreachable Git objects")
 
-    validate_push_arguments(expected_push_arguments(mode, version_tag), mode, version_tag)
+    validate_push_arguments(
+        expected_push_arguments(
+            mode,
+            version_tag,
+            expected_remote_main,
+            expected_commit,
+        ),
+        mode,
+        version_tag,
+        expected_remote_main,
+        expected_commit,
+    )
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -353,6 +581,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--mode", choices=sorted(PUBLISH_MODES), required=True)
     parser.add_argument("--version-tag", required=True)
     parser.add_argument("--remote-url", required=True)
+    parser.add_argument("--expected-remote-main")
     return parser
 
 
@@ -366,14 +595,20 @@ def main() -> int:
             mode=arguments.mode,
             version_tag=arguments.version_tag,
             remote_url=arguments.remote_url,
+            expected_remote_main=arguments.expected_remote_main,
         )
     except PublishSourceError as error:
         print(f"PUBLIC PUBLISH SOURCE REJECTED: {error}", file=sys.stderr)
         return 1
     push_arguments = " ".join(
-        expected_push_arguments(arguments.mode, arguments.version_tag)
+        expected_push_arguments(
+            arguments.mode,
+            arguments.version_tag,
+            arguments.expected_remote_main,
+            arguments.expected_commit,
+        )
     )
-    if arguments.mode == "promotion":
+    if arguments.mode in {"history-replacement", "promotion"}:
         print(f"git push {push_arguments}")
     else:
         print("PUBLIC PUBLISH SOURCE PASSED")

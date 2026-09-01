@@ -5,7 +5,6 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
-  workflow_dispatch:
 
 permissions:
   contents: read
@@ -28,22 +27,57 @@ jobs:
           ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
 
       - name: Check public-release privacy boundary
+        id: release_privacy
         env:
           PUBLIC_RELEASE_HISTORY_REF: ${{ github.event.pull_request.head.sha || github.sha }}
           PUBLIC_RELEASE_HISTORY_BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
+          PUBLIC_RELEASE_HEAD_BRANCH: ${{ github.event.pull_request.head.ref || '' }}
+          PUBLIC_RELEASE_FORCED: ${{ github.event.forced || false }}
         run: |
-          if [[ "$GITHUB_EVENT_NAME" == "workflow_dispatch" ]]; then
-            [[ "$GITHUB_REF" == "refs/heads/main" ]] || exit 1
-            PUBLIC_RELEASE_HISTORY_BASE="$(git rev-parse "${PUBLIC_RELEASE_HISTORY_REF}^")"
-          fi
           [[ "$PUBLIC_RELEASE_HISTORY_BASE" =~ ^[0-9a-fA-F]{40}$ ]] || exit 1
           [[ ! "$PUBLIC_RELEASE_HISTORY_BASE" =~ ^0+$ ]] || exit 1
-          python scripts/check_public_release.py --history-ref "$PUBLIC_RELEASE_HISTORY_REF" --history-base "$PUBLIC_RELEASE_HISTORY_BASE"
+          if git merge-base --is-ancestor "$PUBLIC_RELEASE_HISTORY_BASE" "$PUBLIC_RELEASE_HISTORY_REF" 2>/dev/null; then
+            python scripts/check_public_release.py --history-ref "$PUBLIC_RELEASE_HISTORY_REF" --history-base "$PUBLIC_RELEASE_HISTORY_BASE"
+            echo "history_mode=range" >> "$GITHUB_OUTPUT"
+            echo "gitleaks_base=$PUBLIC_RELEASE_HISTORY_BASE" >> "$GITHUB_OUTPUT"
+          else
+            [[ "$PUBLIC_RELEASE_HISTORY_BASE" == "4e747afd26dd116c28b306c80f266925aeb54e84" ]] || exit 1
+            if [[ "$GITHUB_EVENT_NAME" == "pull_request" ]]; then
+              [[ "$PUBLIC_RELEASE_HEAD_BRANCH" == "release/v0.6.4-phase6-baseline" ]] || exit 1
+            elif [[ "$GITHUB_EVENT_NAME" == "push" ]]; then
+              [[ "$GITHUB_REF" == "refs/heads/main" ]] || exit 1
+              [[ "$PUBLIC_RELEASE_FORCED" == "true" ]] || exit 1
+            else
+              exit 1
+            fi
+            git fetch --no-tags --no-write-fetch-head origin "$PUBLIC_RELEASE_HISTORY_BASE"
+            python scripts/check_public_release.py \
+              --history-ref "$PUBLIC_RELEASE_HISTORY_REF" \
+              --history-rewrite-base "$PUBLIC_RELEASE_HISTORY_BASE" \
+              --history-rewrite-common 2cf147b99dd416b054dd6a6221c9e376c46f4889 \
+              --history-rewrite-tip 998ef51eb0eb8154070d567bb40c53c8c2fd36ae
+            echo "history_mode=rewrite" >> "$GITHUB_OUTPUT"
+            echo "gitleaks_base=2cf147b99dd416b054dd6a6221c9e376c46f4889" >> "$GITHUB_OUTPUT"
+          fi
 
       - name: Scan Git history for secrets
         uses: gitleaks/gitleaks-action@e0c47f4f8be36e29cdc102c57e68cb5cbf0e8d1e # v3.0.0
         env:
+          BASE_REF: ${{ steps.release_privacy.outputs.history_mode == 'rewrite' && '5c0e3364eeb04f07013f155250439f0ce8f0a08c' || '' }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITLEAKS_VERSION: "8.30.1"
+
+      - name: Scan exact validated Git range for secrets
+        env:
+          PUBLIC_RELEASE_GITLEAKS_BASE: ${{ steps.release_privacy.outputs.gitleaks_base }}
+          PUBLIC_RELEASE_HISTORY_REF: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          [[ "$PUBLIC_RELEASE_GITLEAKS_BASE" =~ ^[0-9a-fA-F]{40}$ ]] || exit 1
+          [[ "$PUBLIC_RELEASE_HISTORY_REF" =~ ^[0-9a-fA-F]{40}$ ]] || exit 1
+          [[ "$(git rev-parse HEAD)" == "$PUBLIC_RELEASE_HISTORY_REF" ]] || exit 1
+          git merge-base --is-ancestor "$PUBLIC_RELEASE_GITLEAKS_BASE" "$PUBLIC_RELEASE_HISTORY_REF"
+          gitleaks git --redact --no-banner \
+            --log-opts="--no-merges --first-parent ${PUBLIC_RELEASE_GITLEAKS_BASE}..${PUBLIC_RELEASE_HISTORY_REF}" .
 
   test:
     name: Python ${{ matrix.python-version }} on Windows

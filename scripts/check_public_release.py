@@ -10,6 +10,7 @@ they are staged.
 from __future__ import annotations
 
 import argparse
+import os
 import re
 import subprocess
 import sys
@@ -127,6 +128,7 @@ _ALLOWED_EMAIL_ADDRESSES = {
     "support@github.com",
 }
 _HISTORY_REF_RE = re.compile(r"(?:HEAD|[0-9a-fA-F]{40})\Z")
+_FULL_COMMIT_RE = re.compile(r"[0-9a-fA-F]{40}\Z")
 
 
 def _resolve_trusted_git(repo: Path) -> Path:
@@ -379,13 +381,378 @@ def _validated_history_base(
     return base_commit
 
 
+def _commit_structure(
+    git_executable: Path,
+    repo: Path,
+    commit_id: str,
+) -> tuple[str, tuple[str, ...], bytes, bytes, tuple[bytes, ...], bytes]:
+    """Return privacy-safe comparable parts of one raw commit object."""
+
+    raw = _git(git_executable, repo, "cat-file", "-p", commit_id)
+    header_block, separator, message = raw.partition(b"\n\n")
+    if not separator:
+        raise ValueError("history rewrite contains a malformed commit object")
+
+    records: list[bytes] = []
+    for line in header_block.splitlines():
+        if line.startswith(b" "):
+            if not records:
+                raise ValueError("history rewrite contains a malformed commit header")
+            records[-1] += b"\n" + line
+        else:
+            records.append(line)
+
+    keys = [record.partition(b" ")[0] for record in records]
+    cursor = 0
+    if not keys or keys[cursor] != b"tree":
+        raise ValueError("history rewrite contains non-canonical commit headers")
+    cursor += 1
+    while cursor < len(keys) and keys[cursor] == b"parent":
+        cursor += 1
+    if cursor >= len(keys) or keys[cursor] != b"author":
+        raise ValueError("history rewrite contains non-canonical commit headers")
+    cursor += 1
+    if cursor >= len(keys) or keys[cursor] != b"committer":
+        raise ValueError("history rewrite contains non-canonical commit headers")
+    cursor += 1
+    if any(key in {b"tree", b"parent", b"author", b"committer"} for key in keys[cursor:]):
+        raise ValueError("history rewrite contains non-canonical commit headers")
+
+    trees: list[str] = []
+    parents: list[str] = []
+    authors: list[bytes] = []
+    committers: list[bytes] = []
+    extras: list[bytes] = []
+    for record in records:
+        key, separator, value = record.partition(b" ")
+        if not separator:
+            raise ValueError("history rewrite contains a malformed commit header")
+        if key == b"tree":
+            trees.append(value.decode("ascii", errors="strict"))
+        elif key == b"parent":
+            parents.append(value.decode("ascii", errors="strict"))
+        elif key == b"author":
+            authors.append(value)
+        elif key == b"committer":
+            committers.append(value)
+        else:
+            extras.append(record)
+    if len(trees) != 1 or len(authors) != 1 or len(committers) != 1:
+        raise ValueError("history rewrite contains malformed identity metadata")
+    return (
+        trees[0],
+        tuple(parents),
+        authors[0],
+        committers[0],
+        tuple(extras),
+        message,
+    )
+
+
+def _identity_timestamp(identity: bytes) -> bytes:
+    """Extract a commit identity timestamp without returning the identity value."""
+
+    fields = identity.rsplit(b" ", 2)
+    if (
+        len(fields) != 3
+        or re.fullmatch(rb"-?\d+", fields[1]) is None
+        or re.fullmatch(rb"[+-]\d{4}", fields[2]) is None
+    ):
+        raise ValueError("history rewrite contains malformed identity timing")
+    return fields[1] + b" " + fields[2]
+
+
+def _identity_subject(identity: bytes) -> bytes:
+    """Extract a name/mailbox pair without ever logging it."""
+
+    fields = identity.rsplit(b" ", 2)
+    if (
+        len(fields) != 3
+        or re.fullmatch(rb"-?\d+", fields[1]) is None
+        or re.fullmatch(rb"[+-]\d{4}", fields[2]) is None
+    ):
+        raise ValueError("history rewrite contains malformed identity timing")
+    return fields[0]
+
+
+def _validated_history_rewrite_base(
+    git_executable: Path,
+    repo: Path,
+    history_rewrite_base: str,
+    history_commit: str,
+    expected_common: str,
+    expected_replacement_tip: str,
+) -> str:
+    """Prove a non-fast-forward rewrite preserved the replaced commit segment."""
+
+    candidate = str(history_rewrite_base).strip()
+    if _FULL_COMMIT_RE.fullmatch(candidate) is None:
+        raise ValueError("history rewrite base must be a full 40-character commit ID")
+    if set(candidate) == {"0"}:
+        raise ValueError("history rewrite base may not be the all-zero Git sentinel")
+    base_commit = _git(
+        git_executable,
+        repo,
+        "rev-parse",
+        "--verify",
+        f"{candidate}^{{commit}}",
+    ).decode("ascii", errors="strict").strip()
+    head_commit = _git(
+        git_executable, repo, "rev-parse", "--verify", "HEAD^{commit}"
+    ).decode("ascii", errors="strict").strip()
+    if head_commit != history_commit:
+        raise ValueError("history rewrite ref must equal the checked-out HEAD")
+    if _FULL_COMMIT_RE.fullmatch(expected_common) is None:
+        raise ValueError("history rewrite common must be a full 40-character commit ID")
+    if _FULL_COMMIT_RE.fullmatch(expected_replacement_tip) is None:
+        raise ValueError("history rewrite tip must be a full 40-character commit ID")
+    if _git(
+        git_executable,
+        repo,
+        "status",
+        "--porcelain=v1",
+        "--untracked-files=all",
+    ):
+        raise ValueError("history replacement requires a clean exact checkout")
+    object_topology_overrides = (
+        "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+        "GIT_COMMON_DIR",
+        "GIT_DIR",
+        "GIT_GRAFT_FILE",
+        "GIT_INDEX_FILE",
+        "GIT_OBJECT_DIRECTORY",
+        "GIT_REPLACE_REF_BASE",
+        "GIT_SHALLOW_FILE",
+        "GIT_WORK_TREE",
+    )
+    if any(os.environ.get(name) for name in object_topology_overrides):
+        raise ValueError("history replacement rejects Git topology environment overrides")
+    fsck = subprocess.run(
+        [
+            str(git_executable),
+            "fsck",
+            "--strict",
+            "--no-reflogs",
+            "--no-dangling",
+            history_commit,
+        ],
+        cwd=repo,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        check=False,
+    )
+    if fsck.returncode != 0:
+        raise ValueError("history replacement failed strict Git object validation")
+
+    shallow = _git(
+        git_executable, repo, "rev-parse", "--is-shallow-repository"
+    ).decode("ascii", errors="strict").strip()
+    if shallow != "false":
+        raise ValueError("history replacement requires a complete non-shallow repository")
+    if _git(git_executable, repo, "replace", "-l"):
+        raise ValueError("history replacement rejects Git replace refs")
+    graft_path_text = _git(
+        git_executable, repo, "rev-parse", "--git-path", "info/grafts"
+    ).decode("utf-8", errors="strict").strip()
+    graft_path = Path(graft_path_text)
+    if not graft_path.is_absolute():
+        graft_path = repo / graft_path
+    if graft_path.exists():
+        raise ValueError("history replacement rejects Git grafts")
+    partial = subprocess.run(
+        [
+            str(git_executable),
+            "config",
+            "--get-regexp",
+            r"^(extensions\.partialclone|remote\..*\.promisor)$",
+        ],
+        cwd=repo,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+    )
+    if partial.returncode not in {0, 1}:
+        raise ValueError("history replacement clone completeness could not be verified")
+    if partial.stdout.strip():
+        raise ValueError("history replacement rejects partial clones")
+
+    ancestor = subprocess.run(
+        [
+            str(git_executable),
+            "merge-base",
+            "--is-ancestor",
+            base_commit,
+            history_commit,
+        ],
+        cwd=repo,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.PIPE,
+        check=False,
+    )
+    if ancestor.returncode == 0:
+        raise ValueError("history rewrite base is already an ancestor of the history ref")
+    if ancestor.returncode != 1:
+        raise ValueError("history rewrite ancestry could not be verified")
+    rollback = subprocess.run(
+        [
+            str(git_executable),
+            "merge-base",
+            "--is-ancestor",
+            history_commit,
+            base_commit,
+        ],
+        cwd=repo,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.PIPE,
+        check=False,
+    )
+    if rollback.returncode == 0:
+        raise ValueError("history replacement cannot roll public history backward")
+    if rollback.returncode != 1:
+        raise ValueError("history rewrite ancestry could not be verified")
+
+    if _git(git_executable, repo, "rev-list", "--merges", history_commit):
+        raise ValueError("history replacement must remain linear")
+    roots = list(
+        filter(
+            None,
+            _git(
+                git_executable,
+                repo,
+                "rev-list",
+                "--max-parents=0",
+                history_commit,
+            )
+            .decode("ascii", errors="strict")
+            .splitlines(),
+        )
+    )
+    if len(roots) != 1:
+        raise ValueError("history replacement must have exactly one root")
+
+    base_tree = _git(
+        git_executable, repo, "rev-parse", f"{base_commit}^{{tree}}"
+    ).decode("ascii", errors="strict").strip()
+    replacement_matches: list[str] = []
+    new_history = _git(
+        git_executable, repo, "rev-list", history_commit
+    ).decode("ascii", errors="strict").splitlines()
+    for commit_id in new_history:
+        tree = _git(
+            git_executable, repo, "rev-parse", f"{commit_id}^{{tree}}"
+        ).decode("ascii", errors="strict").strip()
+        if tree == base_tree:
+            replacement_matches.append(commit_id)
+    if len(replacement_matches) != 1:
+        raise ValueError(
+            "history replacement must contain exactly one tree-equivalent old-tip counterpart"
+        )
+    replacement_tip = replacement_matches[0]
+    if replacement_tip != expected_replacement_tip.casefold():
+        raise ValueError("history replacement tip does not match the reviewed commit")
+
+    merge_bases = list(
+        filter(
+            None,
+            _git(
+                git_executable,
+                repo,
+                "merge-base",
+                "--all",
+                base_commit,
+                replacement_tip,
+            )
+            .decode("ascii", errors="strict")
+            .splitlines(),
+        )
+    )
+    if len(merge_bases) != 1:
+        raise ValueError("history replacement must have one unambiguous common ancestor")
+    common = merge_bases[0]
+    if common != expected_common.casefold():
+        raise ValueError("history replacement common ancestor does not match review")
+    old_commits = list(
+        filter(
+            None,
+            _git(
+                git_executable,
+                repo,
+                "rev-list",
+                "--reverse",
+                f"{common}..{base_commit}",
+            )
+            .decode("ascii", errors="strict")
+            .splitlines(),
+        )
+    )
+    new_commits = list(
+        filter(
+            None,
+            _git(
+                git_executable,
+                repo,
+                "rev-list",
+                "--reverse",
+                f"{common}..{replacement_tip}",
+            )
+            .decode("ascii", errors="strict")
+            .splitlines(),
+        )
+    )
+    if not old_commits or len(old_commits) != len(new_commits):
+        raise ValueError("history replacement commit counts do not match")
+
+    for index, (old_commit, new_commit) in enumerate(zip(old_commits, new_commits)):
+        old_parts = _commit_structure(git_executable, repo, old_commit)
+        new_parts = _commit_structure(git_executable, repo, new_commit)
+        expected_old_parent = common if index == 0 else old_commits[index - 1]
+        expected_new_parent = common if index == 0 else new_commits[index - 1]
+        if old_parts[1] != (expected_old_parent,) or new_parts[1] != (
+            expected_new_parent,
+        ):
+            raise ValueError("history replacement parent structure does not match")
+        if old_parts[0] != new_parts[0]:
+            raise ValueError("history replacement changed a source tree")
+        if old_parts[2] != new_parts[2]:
+            raise ValueError("history replacement changed author metadata")
+        if _identity_timestamp(old_parts[3]) != _identity_timestamp(new_parts[3]):
+            raise ValueError("history replacement changed committer timing")
+        if _identity_subject(new_parts[3]) != _identity_subject(new_parts[2]):
+            raise ValueError(
+                "history replacement committer must match the approved author identity"
+            )
+        if old_parts[4] != new_parts[4]:
+            raise ValueError("history replacement changed protected commit headers")
+        if old_parts[5] != new_parts[5]:
+            raise ValueError("history replacement changed a commit message")
+
+    history_tree = _git(
+        git_executable, repo, "rev-parse", f"{history_commit}^{{tree}}"
+    ).decode("ascii", errors="strict").strip()
+    index_tree = _git(git_executable, repo, "write-tree").decode(
+        "ascii", errors="strict"
+    ).strip()
+    if index_tree != history_tree:
+        raise ValueError("Git index must exactly match the history rewrite ref")
+    return base_commit
+
+
 def _history_identity_findings(
     git_executable: Path,
     repo: Path,
     history_ref: str = "HEAD",
     history_base: str | None = None,
+    history_rewrite_base: str | None = None,
+    history_rewrite_common: str | None = None,
+    history_rewrite_tip: str | None = None,
 ) -> list[str]:
     findings: list[str] = []
+    if history_base is not None and history_rewrite_base is not None:
+        raise ValueError("history base modes are mutually exclusive")
+    if history_rewrite_base is None and (
+        history_rewrite_common is not None or history_rewrite_tip is not None
+    ):
+        raise ValueError("history rewrite pins require a history rewrite base")
     if history_base is not None and re.fullmatch(
         r"[0-9a-fA-F]{40}", str(history_ref).strip()
     ) is None:
@@ -402,6 +769,23 @@ def _history_identity_findings(
             history_commit,
         )
         revision = f"{base_commit}..{history_commit}"
+    elif history_rewrite_base is not None:
+        if _FULL_COMMIT_RE.fullmatch(str(history_ref).strip()) is None:
+            raise ValueError(
+                "history rewrite ref must be a full 40-character commit ID"
+            )
+        if history_rewrite_common is None or history_rewrite_tip is None:
+            raise ValueError(
+                "history rewrite requires exact common and rewritten-tip pins"
+            )
+        _validated_history_rewrite_base(
+            git_executable,
+            repo,
+            history_rewrite_base,
+            history_commit,
+            history_rewrite_common,
+            history_rewrite_tip,
+        )
     history = _git(
         git_executable,
         repo,
@@ -459,11 +843,86 @@ def _history_identity_findings(
     return sorted(set(findings))
 
 
+def _historical_tree_findings(
+    git_executable: Path,
+    repo: Path,
+    history_commit: str,
+    trusted_common: str,
+) -> list[str]:
+    """Scan every path/blob introduced after the pinned trusted common history."""
+
+    findings: list[str] = []
+    seen_entries: set[tuple[str, str, str]] = set()
+    seen_blobs: set[str] = set()
+    commits = _git(
+        git_executable, repo, "rev-list", f"{trusted_common}..{history_commit}"
+    ).decode("ascii", errors="strict").splitlines()
+    for commit_id in commits:
+        tree = _git(
+            git_executable,
+            repo,
+            "ls-tree",
+            "-r",
+            "-z",
+            "--full-tree",
+            commit_id,
+        )
+        for record in tree.split(b"\0"):
+            if not record:
+                continue
+            try:
+                metadata, raw_path = record.split(b"\t", 1)
+                mode, object_type, object_id = metadata.decode(
+                    "ascii", errors="strict"
+                ).split()
+                path = raw_path.decode(
+                    "utf-8", errors="surrogateescape"
+                ).replace("\\", "/")
+            except (UnicodeError, ValueError) as error:
+                raise RuntimeError("Git returned a malformed historical tree") from error
+            entry = (path, object_id, mode)
+            if entry in seen_entries:
+                continue
+            seen_entries.add(entry)
+            if _path_findings(path):
+                findings.append(
+                    f"commit {commit_id} historical tracked path violates publishability rules"
+                )
+            if object_type != "blob" or mode not in {"100644", "100755"}:
+                findings.append(
+                    f"commit {commit_id} historical entry is not a regular file"
+                )
+                continue
+            if object_id in seen_blobs:
+                continue
+            seen_blobs.add(object_id)
+            blob = _git(git_executable, repo, "cat-file", "blob", object_id)
+            if len(blob) > MAX_TRACKED_FILE_BYTES:
+                findings.append(
+                    f"commit {commit_id} historical tracked file exceeds the size limit"
+                )
+                continue
+            text = _decode_text(blob)
+            if text is None:
+                findings.append(
+                    f"commit {commit_id} historical tracked content is not publishable text"
+                )
+                continue
+            for reason in _content_findings(text):
+                findings.append(
+                    f"commit {commit_id} historical tracked content: {reason}"
+                )
+    return sorted(set(findings))
+
+
 def check_release(
     repo: Path,
     *,
     history_ref: str = "HEAD",
     history_base: str | None = None,
+    history_rewrite_base: str | None = None,
+    history_rewrite_common: str | None = None,
+    history_rewrite_tip: str | None = None,
 ) -> list[str]:
     git_executable = _resolve_trusted_git(repo)
     findings: list[str] = _history_identity_findings(
@@ -471,7 +930,25 @@ def check_release(
         repo,
         history_ref,
         history_base,
+        history_rewrite_base,
+        history_rewrite_common,
+        history_rewrite_tip,
     )
+    if history_rewrite_base is not None:
+        assert history_rewrite_common is not None
+        history_commit = _validated_history_commit(
+            git_executable,
+            repo,
+            history_ref,
+        )
+        findings.extend(
+            _historical_tree_findings(
+                git_executable,
+                repo,
+                history_commit,
+                history_rewrite_common,
+            )
+        )
     for path, object_id, mode in _indexed_files(git_executable, repo):
         for reason in _path_findings(path):
             findings.append(f"{path}: {reason}")
@@ -549,6 +1026,25 @@ def _parse_args() -> argparse.Namespace:
             "the base must be an ancestor of --history-ref"
         ),
     )
+    parser.add_argument(
+        "--history-rewrite-base",
+        default=None,
+        help=(
+            "full pre-rewrite public tip; proves the divergent segment is tree-, "
+            "message-, author-, and timestamp-equivalent before scanning reachable "
+            "metadata and all divergent history after the pinned common ancestor"
+        ),
+    )
+    parser.add_argument(
+        "--history-rewrite-common",
+        default=None,
+        help="exact reviewed common ancestor for a history replacement",
+    )
+    parser.add_argument(
+        "--history-rewrite-tip",
+        default=None,
+        help="exact reviewed rewritten counterpart of the old public tip",
+    )
     return parser.parse_args()
 
 
@@ -560,6 +1056,9 @@ def main() -> int:
             repo,
             history_ref=args.history_ref,
             history_base=args.history_base,
+            history_rewrite_base=args.history_rewrite_base,
+            history_rewrite_common=args.history_rewrite_common,
+            history_rewrite_tip=args.history_rewrite_tip,
         )
     except (OSError, RuntimeError, ValueError) as exc:
         print(f"PUBLIC RELEASE CHECK ERROR: {exc}", file=sys.stderr)

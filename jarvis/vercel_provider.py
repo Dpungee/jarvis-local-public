@@ -20,7 +20,6 @@ import json
 import math
 import os
 import re
-import shutil
 import stat
 import subprocess
 import tempfile
@@ -33,10 +32,19 @@ from urllib.parse import urlsplit
 
 from .redaction import is_sensitive_key, redact_secrets
 from .subprocess_env import trusted_cli_environment
+from .trusted_executables import trusted_path_executable
 
 
 Runner = Callable[..., subprocess.CompletedProcess[str]]
 ExecutableFinder = Callable[[str], str | None]
+
+
+def _trusted_vercel_executable(workspace: Path) -> str | None:
+    """Resolve Vercel only from an ordinary OS-administered native binary."""
+    name = "vercel.exe" if os.name == "nt" else "vercel"
+    candidate = trusted_path_executable(name, prohibited_roots=(workspace,))
+    return str(candidate) if candidate is not None else None
+
 
 _NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}\Z")
 _TARGET = re.compile(r"[a-z0-9][a-z0-9-]{0,47}\Z")
@@ -159,7 +167,7 @@ class VercelProvider:
         deploy_timeout_seconds: float = 300.0,
         max_output_chars: int = 64_000,
         runner: Runner | None = None,
-        executable_finder: ExecutableFinder = shutil.which,
+        executable_finder: ExecutableFinder | None = None,
     ) -> None:
         try:
             root = Path(workspace).resolve(strict=True)
@@ -174,7 +182,14 @@ class VercelProvider:
         if isinstance(max_output_chars, bool) or not 1_024 <= int(max_output_chars) <= 1_000_000:
             raise ValueError("max_output_chars must be between 1024 and 1000000")
 
-        found = os.fspath(cli_path) if cli_path is not None else executable_finder("vercel")
+        if (cli_path is not None or executable_finder is not None) and runner is None:
+            raise ValueError("A custom Vercel executable requires a custom runner")
+        if cli_path is not None:
+            found = os.fspath(cli_path)
+        elif executable_finder is not None:
+            found = executable_finder("vercel")
+        else:
+            found = _trusted_vercel_executable(root)
         if found is not None and (not found.strip() or "\x00" in found):
             raise ValueError("cli_path is invalid")
         self.workspace = root

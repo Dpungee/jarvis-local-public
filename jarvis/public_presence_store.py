@@ -87,6 +87,20 @@ def _sha256(value: str) -> str:
     return hashlib.sha256(value.encode("utf-8")).hexdigest()
 
 
+def _execute_script_in_current_transaction(db: sqlite3.Connection, script: str) -> None:
+    """Execute DDL without sqlite3.executescript's implicit transaction boundary."""
+    pending = ""
+    for line in script.splitlines(keepends=True):
+        pending += line
+        if sqlite3.complete_statement(pending):
+            statement = pending.strip()
+            pending = ""
+            if statement:
+                db.execute(statement)
+    if pending.strip():
+        raise PublicPresenceStoreError("incomplete public schema migration statement")
+
+
 def _now(value: float | None = None) -> float:
     if isinstance(value, bool):
         raise ValueError("timestamp must be numeric")
@@ -130,11 +144,48 @@ class PublicPresenceStore:
         candidate = Path(path)
         if candidate.name.casefold() != "public_presence.db":
             raise ValueError("Public Presence may only open a database named public_presence.db")
-        if candidate.exists() and candidate.is_symlink():
-            raise ValueError("public_presence.db may not be a symbolic link")
+        from .sqlite_preflight import validate_database_path
+
+        try:
+            path_exists = validate_database_path(candidate)
+        except OSError as exc:
+            raise PublicPresenceStoreError(
+                "public database could not be inspected safely"
+            ) from exc
         self.path = candidate.resolve(strict=False)
+        if path_exists:
+            self._preflight_existing_store()
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._migrate()
+
+    def _preflight_existing_store(self) -> None:
+        from .sqlite_preflight import inspection_connection
+        try:
+            with inspection_connection(self.path) as db:
+                db.row_factory = sqlite3.Row
+                existing_id = int(db.execute("PRAGMA application_id").fetchone()[0])
+                version = int(db.execute("PRAGMA user_version").fetchone()[0])
+                tables = {str(row[0]) for row in db.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table'"
+                ).fetchall()}
+                public_version = None
+                if "public_schema" in tables:
+                    row = db.execute(
+                        "SELECT version FROM public_schema WHERE singleton=1"
+                    ).fetchone()
+                    public_version = None if row is None else int(row["version"])
+        except (OSError, sqlite3.DatabaseError, TypeError, ValueError) as exc:
+            raise PublicPresenceStoreError(
+                "public database could not be inspected safely"
+            ) from exc
+        if existing_id not in {0, PUBLIC_PRESENCE_APPLICATION_ID}:
+            raise PublicPresenceStoreError("database belongs to a different application")
+        if existing_id == 0 and tables - {"sqlite_sequence"}:
+            raise PublicPresenceStoreError("existing unmarked database is not a public store")
+        if version > PUBLIC_PRESENCE_SCHEMA_VERSION or (
+            public_version is not None and public_version > PUBLIC_PRESENCE_SCHEMA_VERSION
+        ):
+            raise PublicPresenceStoreError("public database schema is newer than this runtime")
 
     def _connect(self) -> sqlite3.Connection:
         db = sqlite3.connect(
@@ -147,7 +198,11 @@ class PublicPresenceStore:
 
     def _migrate(self) -> None:
         with self._connect() as db:
+            db.execute("BEGIN IMMEDIATE")
             existing_id = int(db.execute("PRAGMA application_id").fetchone()[0])
+            existing_user_version = int(
+                db.execute("PRAGMA user_version").fetchone()[0]
+            )
             if existing_id not in {0, PUBLIC_PRESENCE_APPLICATION_ID}:
                 raise PublicPresenceStoreError("database belongs to a different application")
             tables = {
@@ -158,9 +213,33 @@ class PublicPresenceStore:
             }
             if existing_id == 0 and tables - {"sqlite_sequence"}:
                 raise PublicPresenceStoreError("existing unmarked database is not a public store")
+            if existing_user_version > PUBLIC_PRESENCE_SCHEMA_VERSION:
+                raise PublicPresenceStoreError(
+                    "public database schema is newer than this runtime"
+                )
+            # Read and validate the application-owned version marker before WAL,
+            # DDL, ALTERs, expiry changes, or audit writes. Unknown future state
+            # must remain byte-for-byte outside this runtime's authority.
+            if "public_schema" in tables:
+                try:
+                    preflight_schema = db.execute(
+                        "SELECT version FROM public_schema WHERE singleton=1"
+                    ).fetchone()
+                except sqlite3.DatabaseError as exc:
+                    raise PublicPresenceStoreError(
+                        "public database schema marker is invalid"
+                    ) from exc
+                if (
+                    preflight_schema is not None
+                    and int(preflight_schema["version"])
+                    > PUBLIC_PRESENCE_SCHEMA_VERSION
+                ):
+                    raise PublicPresenceStoreError(
+                        "public database schema is newer than this runtime"
+                    )
             db.execute(f"PRAGMA application_id={PUBLIC_PRESENCE_APPLICATION_ID}")
-            db.execute("PRAGMA journal_mode=WAL")
-            db.executescript(
+            _execute_script_in_current_transaction(
+                db,
                 """
                 CREATE TABLE IF NOT EXISTS public_schema (
                     singleton INTEGER PRIMARY KEY CHECK(singleton=1),
@@ -319,6 +398,8 @@ class PublicPresenceStore:
                 (time.time(),),
             )
             db.execute(f"PRAGMA user_version={PUBLIC_PRESENCE_SCHEMA_VERSION}")
+        with self._connect() as db:
+            db.execute("PRAGMA journal_mode=WAL").fetchone()
 
     @staticmethod
     def _control_row(db: sqlite3.Connection) -> dict[str, Any]:

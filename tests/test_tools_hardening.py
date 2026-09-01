@@ -331,7 +331,7 @@ class ToolCapabilityHardeningTests(unittest.TestCase):
                 "resolved_friendly_name": "Test TV",
                 "resolved_action": "power",
                 "resolved_app": None,
-                "provider_origin": "http://192.168.50.2:8123",
+                "provider_origin": "https://192.168.50.2:8123",
             }
             toolbox = ToolBox(replace(
                 self.config,
@@ -339,7 +339,7 @@ class ToolCapabilityHardeningTests(unittest.TestCase):
                 computer_root=computer_root,
                 external_access="trusted-external",
                 home_assistant_access="paired",
-                home_assistant_url="http://192.168.50.2:8123",
+                home_assistant_url="https://192.168.50.2:8123",
                 home_assistant_token="test-token-" + "x" * 24,
                 home_assistant_entities=("remote.test_tv",),
             ), self.memory)

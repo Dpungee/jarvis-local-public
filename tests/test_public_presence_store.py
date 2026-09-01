@@ -28,6 +28,11 @@ from jarvis.public_presence_store import (
     PublicPresenceStore,
     PublicPresenceStoreError,
 )
+from tests.sqlite_crash_fixture import (
+    create_future_schema_in_hot_wal,
+    create_hot_future_database,
+    snapshot_directory,
+)
 
 
 def _hash(value: str) -> str:
@@ -35,6 +40,32 @@ def _hash(value: str) -> str:
 
 
 class PublicPresenceStoreTests(unittest.TestCase):
+    def test_future_schema_in_hot_wal_is_rejected_without_recovery(self):
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / "public_presence.db"
+            PublicPresenceStore(path)
+            create_future_schema_in_hot_wal(
+                path, user_version=PUBLIC_PRESENCE_SCHEMA_VERSION + 1
+            )
+            before = snapshot_directory(path)
+            with self.assertRaisesRegex(PublicPresenceStoreError, "newer"):
+                PublicPresenceStore(path)
+            self.assertEqual(snapshot_directory(path), before)
+
+    def test_future_hot_journal_is_rejected_without_recovery_or_sidecar_changes(self):
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / "public_presence.db"
+            create_hot_future_database(
+                path,
+                user_version=PUBLIC_PRESENCE_SCHEMA_VERSION + 1,
+                application_id=PUBLIC_PRESENCE_APPLICATION_ID,
+                public_marker=True,
+            )
+            before = snapshot_directory(path)
+            with self.assertRaisesRegex(PublicPresenceStoreError, "newer"):
+                PublicPresenceStore(path)
+            self.assertEqual(snapshot_directory(path), before)
+
     def setUp(self) -> None:
         self.temp = tempfile.TemporaryDirectory()
         self.path = Path(self.temp.name) / "public_presence.db"
@@ -102,6 +133,51 @@ class PublicPresenceStoreTests(unittest.TestCase):
         self.assertIn("public_control_state", tables)
         self.assertTrue(all(name.startswith(("public_", "sqlite_")) for name in tables))
         self.assertFalse({"memories", "claims", "conversations", "tasks"} & tables)
+
+    def test_future_schema_is_rejected_before_any_database_mutation(self) -> None:
+        future_root = Path(self.temp.name) / "future"
+        future_root.mkdir()
+        future_path = future_root / "public_presence.db"
+        db = sqlite3.connect(future_path)
+        try:
+            db.execute(f"PRAGMA application_id={PUBLIC_PRESENCE_APPLICATION_ID}")
+            db.execute("PRAGMA user_version=999")
+            db.execute(
+                """CREATE TABLE public_schema (
+                       singleton INTEGER PRIMARY KEY,
+                       version INTEGER NOT NULL,
+                       migrated_at REAL NOT NULL
+                   )"""
+            )
+            db.execute(
+                "INSERT INTO public_schema(singleton, version, migrated_at) VALUES(1,999,0)"
+            )
+            db.commit()
+        finally:
+            db.close()
+        before_bytes = future_path.read_bytes()
+        before_files = sorted(item.name for item in future_root.iterdir())
+
+        with self.assertRaisesRegex(PublicPresenceStoreError, "newer"):
+            PublicPresenceStore(future_path)
+
+        self.assertEqual(future_path.read_bytes(), before_bytes)
+        self.assertEqual(sorted(item.name for item in future_root.iterdir()), before_files)
+        db = sqlite3.connect(future_path)
+        try:
+            self.assertEqual(
+                [
+                    str(row[0])
+                    for row in db.execute(
+                        "SELECT name FROM sqlite_master WHERE type='table' ORDER BY name"
+                    ).fetchall()
+                ],
+                ["public_schema"],
+            )
+            self.assertEqual(int(db.execute("PRAGMA user_version").fetchone()[0]), 999)
+            self.assertEqual(str(db.execute("PRAGMA journal_mode").fetchone()[0]), "delete")
+        finally:
+            db.close()
 
     def test_defaults_fail_closed_and_pause_kill_persist_across_restart(self) -> None:
         self.assertEqual(self.store.status()["effective_state"], "disabled")

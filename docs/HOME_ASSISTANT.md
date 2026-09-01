@@ -26,6 +26,13 @@ and 2 GB of memory.
    JARVIS_HOME_ASSISTANT_TOKEN=replace-locally
    ```
 
+   Loopback HTTP is accepted because the token never leaves this computer. If
+   Home Assistant runs on another LAN device, configure HTTPS and use an exact
+   private IP origin. The certificate must be valid for that IP and its issuing
+   CA must be trusted by Windows; Jarvis does not bypass certificate or hostname
+   validation. A local TLS reverse proxy is usually easier than a self-signed
+   certificate. Jarvis refuses to send its bearer token over plaintext LAN.
+
 5. For Google/Android TV control, add the **Android TV Remote** integration,
    enter the pairing code shown on the TV, and add its exact `remote.*` entity:
 
@@ -48,6 +55,13 @@ and 2 GB of memory.
 - Jarvis never returns the Home Assistant token or router administrator password.
 - Device-changing actions remain limited to exact allowlisted `remote.*`
   entities and require approval for the exact action.
+- A successful Home Assistant service response means only that the service call
+  was accepted. A completed entity readback means only that Jarvis could read
+  the device state after the call; neither claim proves a physical effect.
+- App launch is effect-verified only when the entity's `current_activity`
+  exactly matches the requested package. Remote navigation, media, volume,
+  mute, and power effects are not observable from the generic entity state, so
+  Jarvis reports their effect verification as unknown rather than successful.
 
 Official references:
 

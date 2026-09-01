@@ -1,18 +1,20 @@
 # Windows first-run guide
 
-This guide describes the current JARVIS Local 0.6.3 Public Preview installer. Jarvis is
-alpha software for one supervised Windows operator. Setup does not grant administrator,
-desktop, account, network-scanning, or publishing authority.
+This guide describes the current JARVIS Local 0.6.3 development-candidate installer.
+Jarvis is alpha software for one supervised Windows operator. Setup does not grant
+administrator, desktop, account, network-scanning, or publishing authority.
 
 ## Before you start
 
 1. Use Windows 10 or Windows 11.
 2. Install [Python 3.11, 3.12, or 3.13](https://www.python.org/downloads/windows/).
    Select **Add python.exe to PATH** in the Python installer.
-3. Download the **Exact release source archive** from the
-   [v0.6.3 release](https://github.com/Dpungee/jarvis-local-public/releases/tag/v0.6.3)
-   and extract it. The wheel and source distribution are intended for Python package
-   workflows; they are not the double-click installer.
+3. Clone the repository with Git to test the current v0.6.3 development candidate. For
+   a tagged build, download the exact source archive from the
+   [Releases page](https://github.com/Dpungee/jarvis-local-public/releases) and use that
+   tag's matching instructions. Do not assume an untagged candidate has release assets.
+   The wheel and source distribution are intended for Python package workflows; they
+   are not the double-click installer.
 4. Choose a model-provider path before running setup:
 
    - **Codex CLI:** uses an eligible ChatGPT subscription through the official Codex

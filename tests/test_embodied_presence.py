@@ -177,8 +177,11 @@ class RelationshipMemoryTests(unittest.TestCase):
             visible = memory.list_for_mode(PresenceMode.COMPANION)
             self.assertEqual([item["value"] for item in visible], ["Call me M"])
             self.assertEqual(len(memory.history("address_preference", "operator")), 2)
-            self.assertTrue(memory.forget(second))
             self.assertTrue(memory.forget(first))
+            remaining = memory.history("address_preference", "operator")
+            self.assertEqual([item["id"] for item in remaining], [second])
+            self.assertIsNone(remaining[0]["supersedes_id"])
+            self.assertTrue(memory.forget(second))
             self.assertEqual(memory.history("address_preference", "operator"), [])
 
     def test_secrets_and_operational_claims_are_rejected(self):

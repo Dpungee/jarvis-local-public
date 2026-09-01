@@ -1383,6 +1383,14 @@ def worker(
                     ):
                         _write_worker_heartbeat(config, worker_id)
                         last_status_heartbeat = time.monotonic()
+                    control_state = _runtime_state(memory)
+                    if control_state == "stopped":
+                        print("Emergency stop is active; worker exiting.")
+                        return 0
+                    if control_state == "paused":
+                        _wait(poll_seconds, stop_event, sleep)
+                        continue
+
                     queued = memory.queue_due_learning()
                     if queued:
                         print(f"Queued {queued} scheduled learning task(s).")
@@ -1394,6 +1402,9 @@ def worker(
                     if scheduled:
                         print(f"Queued {scheduled} recurring scheduled job(s).")
 
+                    # Materializers enforce the same control state inside their
+                    # transactions. Re-check before claiming to honor a control
+                    # change that raced the scheduler calls.
                     control_state = _runtime_state(memory)
                     if control_state == "stopped":
                         print("Emergency stop is active; worker exiting.")

@@ -67,7 +67,7 @@ _ROUTER_METRIC_SUFFIXES = frozenset({
 
 
 class HomeAssistantError(RuntimeError):
-    """A paired Home Assistant action failed or could not be verified."""
+    """A paired Home Assistant action failed or could not be read back."""
 
 
 def normalize_home_assistant_url(value: str) -> str:
@@ -86,7 +86,8 @@ def normalize_home_assistant_url(value: str) -> str:
             "Home Assistant URL must be an exact HTTP(S) origin without credentials or a path"
         )
     host = parsed.hostname.casefold()
-    if host != "localhost":
+    loopback = host == "localhost"
+    if not loopback:
         try:
             address = ipaddress.ip_address(host)
         except ValueError as exc:
@@ -95,6 +96,11 @@ def normalize_home_assistant_url(value: str) -> str:
             ) from exc
         if not (address.is_private or address.is_loopback or address.is_link_local):
             raise ValueError("Home Assistant URL must stay on the private local network")
+        loopback = address.is_loopback
+    if parsed.scheme == "http" and not loopback:
+        raise ValueError(
+            "Home Assistant URL must use HTTPS for non-loopback private addresses"
+        )
     port = parsed.port
     rendered_host = f"[{host}]" if ":" in host else host
     return f"{parsed.scheme}://{rendered_host}{f':{port}' if port else ''}"
@@ -454,6 +460,7 @@ class HomeAssistantProvider:
             payload = {"entity_id": entity, "command": command}
         response = self._request("POST", service, payload)
 
+        command_accepted = isinstance(response, (list, dict)) or response is None
         readback = self._state(entity)
         if expected_activity is not None:
             for _attempt in range(3):
@@ -461,17 +468,31 @@ class HomeAssistantProvider:
                     break
                 time.sleep(0.25)
                 readback = self._state(entity)
-            verified = (readback.current_activity or "").casefold() == expected_activity
+            effect_verified: bool | None = (
+                command_accepted
+                and (readback.current_activity or "").casefold() == expected_activity
+            )
+            verification_basis = (
+                "current_activity_exact_match"
+                if effect_verified
+                else "current_activity_did_not_match"
+            )
         else:
-            verified = True
+            # A generic entity read proves only that Home Assistant remained
+            # reachable. It cannot observe a remote-navigation button press on
+            # the television, so the physical effect must remain unknown.
+            effect_verified = None
+            verification_basis = "remote_effect_not_observable_from_entity_state"
         return {
             "provider": "home_assistant",
             "entity_id": entity,
             "friendly_name": readback.friendly_name,
             "action": normalized_action,
             "app": expected_activity,
-            "command_accepted": isinstance(response, (list, dict)) or response is None,
-            "verified_readback": verified,
+            "command_accepted": command_accepted,
+            "readback_completed": True,
+            "effect_verified": effect_verified,
+            "effect_verification_basis": verification_basis,
             "state": readback.state,
             "current_activity": readback.current_activity,
             "credentials_exposed": False,

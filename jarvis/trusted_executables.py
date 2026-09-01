@@ -78,7 +78,14 @@ def windows_system_executable(*parts: str) -> Path:
 
 
 def _trusted_install_roots() -> tuple[Path, ...]:
-    """Return OS-administered roots that an ordinary user cannot redirect."""
+    """Return OS-administered third-party installation roots.
+
+    Windows system utilities use :func:`windows_system_executable`, whose
+    identity is anchored to an exact path below the OS-reported Windows
+    directory. Optional third-party programs must never inherit that broad
+    root: some Windows descendants (notably ``Windows\\Tasks``) deliberately
+    grant ordinary users file-creation rights.
+    """
     if os.name != "nt":
         return tuple(
             root.resolve(strict=True)
@@ -86,7 +93,7 @@ def _trusted_install_roots() -> tuple[Path, ...]:
             if root.exists()
         )
 
-    roots: list[Path] = [windows_directory()]
+    roots: list[Path] = []
     try:
         import winreg
 

@@ -400,6 +400,69 @@ JARVIS_CLAUDE_CLI_ENABLED=false
         self.assertIs(options["stdout"], subprocess.DEVNULL)
         self.assertIs(options["stderr"], subprocess.DEVNULL)
 
+    def test_native_candidates_ignore_path_and_use_runtime_resolver(self) -> None:
+        poison = self.root / ("codex.exe" if os.name == "nt" else "codex")
+        trusted = self.root / "runtime-validated-codex"
+        with patch.object(
+            provider_setup,
+            "resolve_codex_cli_executable",
+            return_value=trusted,
+        ) as resolver:
+            candidates = provider_setup._native_candidates(
+                "codex",
+                {"PATH": str(poison.parent), "APPDATA": str(poison.parent)},
+            )
+
+        self.assertEqual(candidates, [trusted])
+        resolver.assert_called_once_with()
+
+    @unittest.skipUnless(os.name == "nt", "Windows Package Manager path is Windows-only")
+    def test_windows_install_ignores_untrusted_path_shim(self) -> None:
+        runner = Mock(return_value=subprocess.CompletedProcess([], 0))
+        with patch.object(
+            provider_setup, "_windows_package_manager_executable", return_value=None
+        ) as resolver:
+            installed = provider_setup._install_provider(
+                "codex",
+                environ={"PATH": str(self.root)},
+                runner=runner,
+            )
+
+        self.assertFalse(installed)
+        resolver.assert_called_once_with()
+        runner.assert_not_called()
+
+    @unittest.skipUnless(os.name == "nt", "Windows Package Manager path is Windows-only")
+    def test_winget_registry_hint_cannot_escape_desktop_app_installer(self) -> None:
+        poison = self.root / "winget.exe"
+        poison.write_bytes(b"MZ")
+        with patch.object(
+            provider_setup, "_winget_registry_hint", return_value=poison
+        ):
+            self.assertIsNone(provider_setup._windows_package_manager_executable())
+
+    @unittest.skipUnless(os.name == "nt", "Windows Package Manager path is Windows-only")
+    def test_winget_accepts_exact_trusted_desktop_app_installer_binary(self) -> None:
+        candidate = (
+            self.root
+            / "WindowsApps"
+            / "Microsoft.DesktopAppInstaller_1.29.290.0_x64__8wekyb3d8bbwe"
+            / "winget.exe"
+        )
+        candidate.parent.mkdir(parents=True)
+        candidate.write_bytes(b"MZnative")
+        with (
+            patch.object(
+                provider_setup, "_winget_registry_hint", return_value=candidate
+            ),
+            patch.object(
+                provider_setup, "trusted_install_file", return_value=candidate
+            ),
+        ):
+            self.assertEqual(
+                provider_setup._windows_package_manager_executable(), candidate
+            )
+
     @unittest.skipUnless(os.name == "nt", "Windows Package Manager path is Windows-only")
     def test_windows_install_uses_exact_official_package_and_no_provider_keys(self) -> None:
         runner = Mock(return_value=subprocess.CompletedProcess([], 0))
@@ -409,7 +472,13 @@ JARVIS_CLAUDE_CLI_ENABLED=false
             "OPENAI_API_KEY": "must-not-cross",
             "ANTHROPIC_API_KEY": "must-not-cross",
         }
-        with patch.object(provider_setup.shutil, "which", return_value="C:/Windows/winget.exe"):
+        with (
+            patch.object(
+                provider_setup,
+                "_windows_package_manager_executable",
+                return_value=Path("C:/Windows/winget.exe"),
+            ),
+        ):
             installed = provider_setup._install_provider(
                 "codex", environ=environment, runner=runner
             )
@@ -418,7 +487,7 @@ JARVIS_CLAUDE_CLI_ENABLED=false
         self.assertEqual(
             args[0],
             [
-                "C:/Windows/winget.exe",
+                str(Path("C:/Windows/winget.exe")),
                 "install",
                 "--id",
                 "OpenAI.Codex",

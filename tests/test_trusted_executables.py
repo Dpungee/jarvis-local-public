@@ -50,6 +50,21 @@ class TrustedExecutableTests(unittest.TestCase):
                     trusted_path_executable("git", prohibited_roots=(root,))
                 )
 
+    @unittest.skipUnless(os.name == "nt", "Windows Tasks trust boundary")
+    def test_path_executable_rejects_windows_tasks_descendants(self):
+        poison = windows_directory() / "Tasks" / "gh.exe"
+        with (
+            patch(
+                "jarvis.trusted_executables.shutil.which",
+                return_value=str(poison),
+            ),
+            patch(
+                "jarvis.trusted_executables._ordinary_executable",
+                return_value=poison,
+            ),
+        ):
+            self.assertIsNone(trusted_path_executable("gh"))
+
     @unittest.skipUnless(os.name == "nt", "Windows canonical-directory check")
     def test_windows_utility_ignores_poisoned_systemroot(self):
         with tempfile.TemporaryDirectory(prefix="jarvis-fake-windows-") as temporary:

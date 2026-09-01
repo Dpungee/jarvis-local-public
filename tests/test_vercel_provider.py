@@ -14,6 +14,7 @@ from jarvis.vercel_provider import (
     VercelWorkspaceError,
     _deployment_tree_digest,
 )
+from jarvis.trusted_executables import windows_directory
 
 
 class FakeRunner:
@@ -92,6 +93,52 @@ class VercelProviderTests(unittest.TestCase):
         with self.assertRaises(VercelCLIUnavailableError):
             provider.list_projects()
         self.assertEqual(runner.calls, [])
+
+    def test_custom_executable_requires_custom_runner(self) -> None:
+        with self.assertRaisesRegex(ValueError, "custom Vercel executable"):
+            VercelProvider(self.workspace, cli_path=self.cli)
+        with self.assertRaisesRegex(ValueError, "custom Vercel executable"):
+            VercelProvider(
+                self.workspace,
+                executable_finder=lambda _name: self.cli,
+            )
+
+    def test_default_resolution_rejects_workspace_executable(self) -> None:
+        poison = self.workspace / "vercel.exe"
+        poison.write_bytes(b"MZ")
+        with (
+            patch(
+                "jarvis.trusted_executables.shutil.which",
+                return_value=str(poison),
+            ),
+            patch("jarvis.vercel_provider.subprocess.run") as real_runner,
+        ):
+            provider = VercelProvider(self.workspace)
+            status = provider.status()
+
+        self.assertFalse(status.available)
+        self.assertIsNone(status.cli_path)
+        real_runner.assert_not_called()
+
+    @unittest.skipUnless(os.name == "nt", "Windows Tasks trust boundary")
+    def test_default_resolution_rejects_windows_tasks_executable(self) -> None:
+        poison = windows_directory() / "Tasks" / "vercel.exe"
+        with (
+            patch(
+                "jarvis.trusted_executables.shutil.which",
+                return_value=str(poison),
+            ),
+            patch(
+                "jarvis.trusted_executables._ordinary_executable",
+                return_value=poison,
+            ),
+            patch("jarvis.vercel_provider.subprocess.run") as real_runner,
+        ):
+            status = VercelProvider(self.workspace).status()
+
+        self.assertFalse(status.available)
+        self.assertIsNone(status.cli_path)
+        real_runner.assert_not_called()
 
     def test_status_auth_and_project_listing_use_read_only_json_commands(self) -> None:
         runner = FakeRunner(

@@ -1,8 +1,11 @@
 # Public-release checklist
 
-This checklist records verified evidence for the published `v0.6.2` public-preview
-release and the operator or repository actions that remain pending. Do not infer
-completion of an unchecked item from a clean source scan.
+This is an immutable evidence record for the published `v0.6.2` public-preview
+release and the operator or repository actions that remained pending at that release.
+It is not the release attestation for the current `0.6.3` development candidate.
+Create and verify a new version-specific checklist before publishing another tag; do
+not carry checked items forward without fresh evidence or infer completion of an
+unchecked item from a clean source scan.
 
 ## Privacy and credentials
 

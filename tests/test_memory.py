@@ -239,6 +239,68 @@ class MemoryTests(unittest.TestCase):
             )
             self.assertIsNone(memory.pending_conversation_goal(first))
 
+    def test_conversation_goal_terminal_states_cannot_be_resurrected(self):
+        with Memory(Path(":memory:")) as memory:
+            conversation = memory.new_conversation("terminal goal")
+            goal_id = memory.begin_conversation_goal(
+                conversation,
+                "Finish exactly once.",
+                "conversation",
+            )
+            memory.finish_conversation_goal(
+                goal_id,
+                state="complete",
+                result_summary="Verified terminal result.",
+            )
+            before = dict(memory.db.execute(
+                "SELECT state, updated_at, last_result_summary FROM conversation_goals WHERE id=?",
+                (goal_id,),
+            ).fetchone())
+
+            # An exact repeat is idempotent and cannot rewrite terminal evidence.
+            memory.finish_conversation_goal(
+                goal_id,
+                state="complete",
+                result_summary="Replacement must not be stored.",
+            )
+            self.assertEqual(
+                dict(memory.db.execute(
+                    "SELECT state, updated_at, last_result_summary FROM conversation_goals WHERE id=?",
+                    (goal_id,),
+                ).fetchone()),
+                before,
+            )
+            with self.assertRaisesRegex(ValueError, "already terminal"):
+                memory.finish_conversation_goal(goal_id, state="incomplete", retryable=True)
+            with self.assertRaisesRegex(ValueError, "Unknown"):
+                memory.finish_conversation_goal(goal_id, state="active")
+
+    def test_paused_or_stopped_control_does_not_materialize_due_background_work(self):
+        start = datetime(2026, 8, 26, 12, 0, tzinfo=timezone.utc)
+        due = start + timedelta(hours=1)
+        for state in ("paused", "stopped"):
+            with self.subTest(state=state), Memory(Path(":memory:")) as memory:
+                memory.add_learning_topic("bounded background research", 12)
+                scheduled = memory.add_scheduled_job(
+                    "Background check",
+                    "Write a bounded local status note.",
+                    60,
+                    now=start,
+                )
+                learning_before = memory.list_learning_topics()[0]["next_run"]
+                schedule_before = scheduled["next_run_at"]
+                memory.set_control_state(state, "test control dominance")
+
+                self.assertEqual(memory.queue_due_learning(now=due), 0)
+                self.assertEqual(memory.queue_due_scheduled_jobs(now=due), 0)
+                self.assertEqual(memory.list_tasks(), [])
+                self.assertEqual(
+                    memory.list_learning_topics()[0]["next_run"], learning_before
+                )
+                self.assertEqual(
+                    memory.list_scheduled_jobs()[0]["next_run_at"], schedule_before
+                )
+
     def test_new_conversation_goal_supersedes_only_the_same_conversation(self):
         with Memory(Path(":memory:")) as memory:
             first = memory.new_conversation("first")
@@ -3076,6 +3138,8 @@ class MemoryTests(unittest.TestCase):
                     f"internal {secret}",
                     stamp="2026-08-15T00:00:00+00:00",
                     available_at="2026-08-15T00:00:00+00:00",
+                    initial_available_at=None,
+                    availability_mode="immediate",
                     max_attempts=1,
                     idempotency_key=None,
                 )

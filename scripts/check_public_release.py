@@ -10,6 +10,8 @@ they are staged.
 from __future__ import annotations
 
 import argparse
+import hashlib
+import os
 import re
 import subprocess
 import sys
@@ -132,6 +134,34 @@ _ALLOWED_EMAIL_ADDRESSES = {
     "noreply@anthropic.com",
 }
 _HISTORY_REF_RE = re.compile(r"(?:HEAD|[0-9a-fA-F]{40})\Z")
+_DANGEROUS_GIT_ENVIRONMENT = frozenset(
+    {
+        "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+        "GIT_COMMON_DIR",
+        "GIT_CONFIG_PARAMETERS",
+        "GIT_DIR",
+        "GIT_EXEC_PATH",
+        "GIT_GRAFT_FILE",
+        "GIT_INDEX_FILE",
+        "GIT_OBJECT_DIRECTORY",
+        "GIT_REPLACE_REF_BASE",
+        "GIT_SHALLOW_FILE",
+        "GIT_WORK_TREE",
+    }
+)
+
+
+def _sanitized_git_environment() -> dict[str, str]:
+    for name in os.environ:
+        normalized = name.upper()
+        if normalized in _DANGEROUS_GIT_ENVIRONMENT or normalized.startswith(
+            "GIT_CONFIG_"
+        ):
+            raise RuntimeError("Git execution environment contains a prohibited override")
+    environment = os.environ.copy()
+    environment["GIT_TERMINAL_PROMPT"] = "0"
+    environment["GCM_INTERACTIVE"] = "Never"
+    return environment
 
 
 def _resolve_trusted_git(repo: Path) -> Path:
@@ -149,19 +179,59 @@ def _git(
     repo: Path,
     *args: str,
     input_bytes: bytes | None = None,
+    allow_missing: bool = False,
 ) -> bytes:
+    environment = _sanitized_git_environment()
     completed = subprocess.run(
-        [str(git_executable), *args],
+        [
+            str(git_executable),
+            "--no-replace-objects",
+            "-c",
+            "core.fsmonitor=false",
+            *args,
+        ],
         cwd=repo,
         input=input_bytes,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         check=False,
+        env=environment,
     )
     if completed.returncode != 0:
+        if allow_missing and completed.returncode == 1:
+            return b""
         detail = completed.stderr.decode("utf-8", errors="replace").strip()
         raise RuntimeError(f"git {' '.join(args)} failed: {detail}")
     return completed.stdout
+
+
+def _path_label(path: str) -> str:
+    digest = hashlib.sha256(path.encode("utf-8", errors="surrogatepass")).hexdigest()[:12]
+    return f"tracked-path:{digest}"
+
+
+def _verify_git_topology(git_executable: Path, repo: Path) -> None:
+    if _git(git_executable, repo, "rev-parse", "--is-shallow-repository").strip() != b"false":
+        raise RuntimeError("shallow repositories are forbidden for public release")
+    if _git(git_executable, repo, "replace", "-l").strip():
+        raise RuntimeError("Git replace refs are forbidden for public release")
+    for relative in ("info/grafts", "objects/info/alternates"):
+        raw = _git(git_executable, repo, "rev-parse", "--git-path", relative)
+        path = Path(raw.decode("utf-8", errors="strict").strip())
+        if not path.is_absolute():
+            path = repo / path
+        if path.exists():
+            raise RuntimeError("Git grafts or alternate object databases are forbidden")
+    partial = _git(
+        git_executable,
+        repo,
+        "config",
+        "--get-regexp",
+        r"^(extensions\.partialclone|remote\..*\.promisor)$",
+        allow_missing=True,
+    )
+    if partial.strip():
+        raise RuntimeError("partial clones are forbidden for public release")
 
 
 def _indexed_files(git_executable: Path, repo: Path) -> list[tuple[str, str, str]]:
@@ -197,11 +267,11 @@ def _path_findings(path: str) -> list[str]:
     name = parts[-1].casefold()
 
     if top in _DISALLOWED_TOP_LEVEL_DIRECTORIES:
-        findings.append(f"private/generated directory is not publishable: {parts[0]}/")
+        findings.append("private/generated directory is not publishable")
     if top in _RUNTIME_DIRECTORIES_WITH_PLACEHOLDERS and not (
         len(parts) == 2 and parts[1] == ".gitkeep"
     ):
-        findings.append(f"runtime directory may contain local state: {parts[0]}/")
+        findings.append("runtime directory may contain local state")
     credential_parts = {part.casefold() for part in parts[:-1]}
     for credential_directory in (".aws", ".secrets", ".ssh"):
         if credential_directory in credential_parts:
@@ -210,11 +280,11 @@ def _path_findings(path: str) -> list[str]:
             )
 
     if name in _DISALLOWED_EXACT_NAMES:
-        findings.append(f"credential or local configuration filename: {parts[-1]}")
+        findings.append("credential or local configuration filename")
     if _ENV_FILE_RE.fullmatch(name) and name != ".env.example":
         findings.append("only .env.example may be tracked")
     if _CREDENTIAL_FILE_RE.fullmatch(name):
-        findings.append(f"credential-shaped JSON filename: {parts[-1]}")
+        findings.append("credential-shaped JSON filename")
     if _CODEX_TRANSCRIPT_RE.fullmatch(name):
         findings.append("generated Codex transcript/schema file")
 
@@ -223,7 +293,8 @@ def _path_findings(path: str) -> list[str]:
         if lower_path.endswith(suffix):
             findings.append(f"private/generated file type is not publishable: {suffix}")
             break
-    return findings
+    findings.extend(_content_findings(normalized))
+    return sorted(set(findings))
 
 
 def _decode_text(data: bytes) -> str | None:
@@ -308,11 +379,21 @@ def _validated_history_commit(
         "ascii", errors="strict"
     ).strip()
     ancestor = subprocess.run(
-        [str(git_executable), "merge-base", "--is-ancestor", commit_id, "HEAD"],
+        [
+            str(git_executable),
+            "--no-replace-objects",
+            "-c",
+            "core.fsmonitor=false",
+            "merge-base",
+            "--is-ancestor",
+            commit_id,
+            "HEAD",
+        ],
         cwd=repo,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.PIPE,
         check=False,
+        env=_sanitized_git_environment(),
     )
     if ancestor.returncode != 0:
         raise ValueError("history ref must be an ancestor of the checked-out snapshot")
@@ -340,6 +421,9 @@ def _validated_history_base(
     ancestor = subprocess.run(
         [
             str(git_executable),
+            "--no-replace-objects",
+            "-c",
+            "core.fsmonitor=false",
             "merge-base",
             "--is-ancestor",
             base_commit,
@@ -349,6 +433,7 @@ def _validated_history_base(
         stdout=subprocess.DEVNULL,
         stderr=subprocess.PIPE,
         check=False,
+        env=_sanitized_git_environment(),
     )
     if ancestor.returncode != 0:
         raise ValueError("history base must be an ancestor of the history ref")
@@ -422,6 +507,14 @@ def _history_identity_findings(
         if len(fields) != 5:
             raise RuntimeError("Git returned malformed commit identity metadata")
         commit_id, author_name, author_email, committer_name, committer_email = fields
+        raw_commit = _git(git_executable, repo, "cat-file", "commit", commit_id)
+        try:
+            raw_commit_text = raw_commit.decode("utf-8", errors="strict")
+        except UnicodeDecodeError:
+            findings.append(f"commit {commit_id} metadata is not valid UTF-8")
+            raw_commit_text = ""
+        for reason in _content_findings(raw_commit_text):
+            findings.append(f"commit {commit_id} raw metadata: {reason}")
         for role, name, email in (
             ("author", author_name, author_email),
             ("committer", committer_name, committer_email),
@@ -470,7 +563,9 @@ def check_release(
     history_ref: str = "HEAD",
     history_base: str | None = None,
 ) -> list[str]:
+    _sanitized_git_environment()
     git_executable = _resolve_trusted_git(repo)
+    _verify_git_topology(git_executable, repo)
     findings: list[str] = _history_identity_findings(
         git_executable,
         repo,
@@ -478,12 +573,13 @@ def check_release(
         history_base,
     )
     for path, object_id, mode in _indexed_files(git_executable, repo):
+        path_label = _path_label(path)
         for reason in _path_findings(path):
-            findings.append(f"{path}: {reason}")
+            findings.append(f"{path_label}: {reason}")
 
         if mode not in {"100644", "100755"}:
             findings.append(
-                f"{path}: tracked mode {mode} is not a regular file; "
+                f"{path_label}: tracked mode {mode} is not a regular file; "
                 "symlinks and submodules are blocked"
             )
             continue
@@ -491,19 +587,19 @@ def check_release(
         indexed = _git(git_executable, repo, "cat-file", "blob", object_id)
         if len(indexed) > MAX_TRACKED_FILE_BYTES:
             findings.append(
-                f"{path}: tracked file is {len(indexed)} bytes; limit is "
+                f"{path_label}: tracked file is {len(indexed)} bytes; limit is "
                 f"{MAX_TRACKED_FILE_BYTES} bytes"
             )
         else:
             indexed_text = _decode_text(indexed)
             if indexed_text is None:
                 findings.append(
-                    f"{path} [index]: non-UTF-8 or NUL-containing tracked content "
+                    f"{path_label} [index]: non-UTF-8 or NUL-containing tracked content "
                     "is blocked"
                 )
             else:
                 for reason in _content_findings(indexed_text):
-                    findings.append(f"{path} [index]: {reason}")
+                    findings.append(f"{path_label} [index]: {reason}")
 
         worktree_path = repo.joinpath(*PurePosixPath(path).parts)
         if worktree_path.is_file():
@@ -511,19 +607,19 @@ def check_release(
             if worktree != indexed:
                 if len(worktree) > MAX_TRACKED_FILE_BYTES:
                     findings.append(
-                        f"{path} [worktree]: file is {len(worktree)} bytes; limit is "
+                        f"{path_label} [worktree]: file is {len(worktree)} bytes; limit is "
                         f"{MAX_TRACKED_FILE_BYTES} bytes"
                     )
                 else:
                     worktree_text = _decode_text(worktree)
                     if worktree_text is None:
                         findings.append(
-                            f"{path} [worktree]: non-UTF-8 or NUL-containing "
+                            f"{path_label} [worktree]: non-UTF-8 or NUL-containing "
                             "tracked content is blocked"
                         )
                     else:
                         for reason in _content_findings(worktree_text):
-                            findings.append(f"{path} [worktree]: {reason}")
+                            findings.append(f"{path_label} [worktree]: {reason}")
 
     return sorted(set(findings))
 

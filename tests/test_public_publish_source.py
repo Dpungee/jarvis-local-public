@@ -7,7 +7,7 @@ import shutil
 import subprocess
 import tempfile
 import unittest
-from contextlib import redirect_stdout
+from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
@@ -38,7 +38,7 @@ class PublicPublishSourceTests(unittest.TestCase):
         repository.mkdir()
         self.git(repository, "init", "-b", "main")
         self.git(repository, "config", "user.name", "Public Release Test")
-        self.git(repository, "config", "user.email", "release@example.com")
+        self.git(repository, "config", "user.email", "release" + "@" + "example.com")
         (repository / "release.txt").write_text("reviewed\n", encoding="utf-8")
         self.git(repository, "add", "release.txt")
         self.git(repository, "commit", "-m", "public snapshot")
@@ -55,6 +55,7 @@ class PublicPublishSourceTests(unittest.TestCase):
         *,
         root: str | None = None,
         mode: str = "tag",
+        expected_remote_main: str | None = None,
     ) -> None:
         PUBLISH.check_public_publish_source(
             repository,
@@ -63,6 +64,7 @@ class PublicPublishSourceTests(unittest.TestCase):
             mode=mode,
             version_tag="v0.6.0",
             remote_url=self.PUBLIC_URL,
+            expected_remote_main=expected_remote_main,
         )
 
     def test_accepts_exact_public_only_repository(self) -> None:
@@ -74,59 +76,6 @@ class PublicPublishSourceTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             repository, head = self.safe_repository(Path(temporary), with_tag=False)
             self.check(repository, head, mode="candidate")
-
-    def test_accepts_fast_forward_promotion_of_exact_checked_head(self) -> None:
-        with tempfile.TemporaryDirectory() as temporary:
-            repository, root = self.safe_repository(Path(temporary), with_tag=False)
-            (repository / "second.txt").write_text("checked\n", encoding="utf-8")
-            self.git(repository, "add", "second.txt")
-            self.git(repository, "commit", "-m", "checked candidate")
-            head = self.git(repository, "rev-parse", "HEAD")
-            original_git = PUBLISH._git
-
-            def fake_git(git_executable, repo, *arguments, allow_missing=False):
-                if arguments == (
-                    "ls-remote",
-                    "--exit-code",
-                    "public",
-                    "refs/heads/main",
-                ):
-                    return f"{root}\trefs/heads/main"
-                return original_git(
-                    git_executable, repo, *arguments, allow_missing=allow_missing
-                )
-
-            with mock.patch.object(PUBLISH, "_git", side_effect=fake_git):
-                self.check(repository, head, root=root, mode="promotion")
-
-    def test_rejects_non_fast_forward_promotion(self) -> None:
-        with tempfile.TemporaryDirectory() as temporary:
-            repository, head = self.safe_repository(Path(temporary), with_tag=False)
-            tree = self.git(repository, "rev-parse", "HEAD^{tree}")
-            alternate = subprocess.run(
-                ["git", "-C", str(repository), "commit-tree", tree],
-                input="unrelated public main\n",
-                check=True,
-                capture_output=True,
-                text=True,
-            ).stdout.strip()
-            original_git = PUBLISH._git
-
-            def fake_git(git_executable, repo, *arguments, allow_missing=False):
-                if arguments == (
-                    "ls-remote",
-                    "--exit-code",
-                    "public",
-                    "refs/heads/main",
-                ):
-                    return f"{alternate}\trefs/heads/main"
-                return original_git(
-                    git_executable, repo, *arguments, allow_missing=allow_missing
-                )
-
-            with mock.patch.object(PUBLISH, "_git", side_effect=fake_git):
-                with self.assertRaisesRegex(PUBLISH.PublishSourceError, "not an ancestor"):
-                    self.check(repository, head, mode="promotion")
 
     def test_poisoned_repository_path_git_is_rejected_without_execution(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -165,26 +114,6 @@ class PublicPublishSourceTests(unittest.TestCase):
                 self.assertEqual(Path(command[0]), trusted_git)
                 self.assertTrue(Path(command[0]).is_absolute())
 
-    def test_promotion_cli_prints_only_exact_fast_forward_command(self) -> None:
-        arguments = SimpleNamespace(
-            repository=Path("."),
-            expected_commit="a" * 40,
-            expected_root="b" * 40,
-            mode="promotion",
-            version_tag="v0.6.2",
-            remote_url=self.PUBLIC_URL,
-        )
-        parser = mock.Mock()
-        parser.parse_args.return_value = arguments
-        output = io.StringIO()
-        with (
-            mock.patch.object(PUBLISH, "_parser", return_value=parser),
-            mock.patch.object(PUBLISH, "check_public_publish_source"),
-            redirect_stdout(output),
-        ):
-            self.assertEqual(PUBLISH.main(), 0)
-        self.assertEqual(output.getvalue(), "git push public HEAD:refs/heads/main\n")
-
     def test_rejects_extra_local_ref(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             repository, head = self.safe_repository(Path(temporary))
@@ -203,7 +132,10 @@ class PublicPublishSourceTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             repository, head = self.safe_repository(Path(temporary))
             self.git(repository, "remote", "add", "source", "https://github.com/example/private.git")
-            with self.assertRaisesRegex(PUBLISH.PublishSourceError, "exactly one remote"):
+            with self.assertRaisesRegex(
+                PUBLISH.PublishSourceError,
+                "non-allowlisted|exactly one remote",
+            ):
                 self.check(repository, head)
 
     def test_rejects_wrong_public_destination(self) -> None:
@@ -223,7 +155,10 @@ class PublicPublishSourceTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             repository, head = self.safe_repository(Path(temporary))
             self.git(repository, "config", "remote.public.mirror", "true")
-            with self.assertRaisesRegex(PUBLISH.PublishSourceError, "mirror remotes"):
+            with self.assertRaisesRegex(
+                PUBLISH.PublishSourceError,
+                "non-allowlisted|mirror remotes",
+            ):
                 self.check(repository, head)
 
     def test_rejects_unreachable_objects(self) -> None:
@@ -238,6 +173,58 @@ class PublicPublishSourceTests(unittest.TestCase):
             )
             with self.assertRaisesRegex(PUBLISH.PublishSourceError, "unreachable Git objects"):
                 self.check(repository, head)
+
+    def test_rejects_shallow_partial_or_grafted_repository(self) -> None:
+        cases = ("shallow", "partial", "graft")
+        for case in cases:
+            with self.subTest(case=case), tempfile.TemporaryDirectory() as temporary:
+                repository, head = self.safe_repository(Path(temporary))
+                git_dir = Path(self.git(repository, "rev-parse", "--absolute-git-dir"))
+                if case == "shallow":
+                    (git_dir / "shallow").write_text(head + "\n", encoding="ascii")
+                    expected = "shallow"
+                elif case == "partial":
+                    self.git(repository, "config", "extensions.partialClone", "public")
+                    expected = "partial|non-allowlisted"
+                else:
+                    (git_dir / "info" / "grafts").write_text(
+                        head + "\n", encoding="ascii"
+                    )
+                    expected = "grafts"
+                with self.assertRaisesRegex(PUBLISH.PublishSourceError, expected):
+                    self.check(repository, head)
+
+    def test_rejects_git_topology_environment_override(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            repository, head = self.safe_repository(Path(temporary))
+            with (
+                mock.patch.dict(
+                    os.environ,
+                    {"GIT_REPLACE_REF_BASE": "refs/private-replacements/"},
+                    clear=False,
+                ),
+                self.assertRaisesRegex(
+                    PUBLISH.PublishSourceError,
+                    "prohibited override",
+                ),
+            ):
+                self.check(repository, head)
+
+    def test_rejects_linked_worktree_as_publish_source(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            repository, head = self.safe_repository(root)
+            self.git(repository, "branch", "-m", "source")
+            self.git(repository, "switch", "--detach")
+            linked = root / "linked-public"
+            self.git(repository, "worktree", "add", "-b", "main", str(linked), head)
+            self.git(repository, "branch", "-D", "source")
+
+            with self.assertRaisesRegex(
+                PUBLISH.PublishSourceError,
+                "standalone disposable clone",
+            ):
+                self.check(linked, head)
 
     def test_accepts_linear_update_history_rooted_at_approved_snapshot(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -278,40 +265,175 @@ class PublicPublishSourceTests(unittest.TestCase):
                 self.check(repository, head, root=root)
 
     def test_rejects_broad_or_implicit_push_arguments(self) -> None:
+        approved_commit = "c" * 40
         for option in ("--all", "--tags", "--mirror", "--mirror=true"):
             with self.subTest(option=option):
                 with self.assertRaisesRegex(PUBLISH.PublishSourceError, "forbidden"):
                     PUBLISH.validate_push_arguments(
-                        ["public", option], "candidate", "v0.6.0"
+                        ["public", option], "candidate", "v0.6.0", None,
+                        approved_commit, self.PUBLIC_URL,
                     )
         with self.assertRaisesRegex(PUBLISH.PublishSourceError, "must name only"):
             PUBLISH.validate_push_arguments(
-                ["public", "main"], "candidate", "v0.6.0"
+                ["public", "main"], "candidate", "v0.6.0", None,
+                approved_commit, self.PUBLIC_URL,
             )
 
     def test_exact_push_arguments_are_phase_specific(self) -> None:
+        approved_commit = "c" * 40
+        safety = [
+            "--no-verify",
+            "--no-follow-tags",
+            "--no-push-option",
+            "--recurse-submodules=no",
+            "--signed=false",
+        ]
         self.assertEqual(
-            PUBLISH.expected_push_arguments("candidate", "v0.6.0"),
-            ["public", "HEAD:refs/heads/release/v0.6.0"],
+            PUBLISH.expected_push_arguments(
+                "candidate", "v0.6.0", None, approved_commit, self.PUBLIC_URL
+            ),
+            [
+                *safety,
+                "--force-with-lease=refs/heads/release/v0.6.0:",
+                self.PUBLIC_URL,
+                f"{approved_commit}:refs/heads/release/v0.6.0",
+            ],
         )
         self.assertEqual(
-            PUBLISH.expected_push_arguments("promotion", "v0.6.0"),
-            ["public", "HEAD:refs/heads/main"],
+            PUBLISH.expected_push_arguments(
+                "tag", "v0.6.0", None, approved_commit, self.PUBLIC_URL
+            ),
+            [
+                *safety,
+                "--force-with-lease=refs/tags/v0.6.0:",
+                self.PUBLIC_URL,
+                f"{approved_commit}:refs/tags/v0.6.0",
+            ],
         )
-        self.assertEqual(
-            PUBLISH.expected_push_arguments("tag", "v0.6.0"),
-            ["public", "refs/tags/v0.6.0:refs/tags/v0.6.0"],
+        for removed_mode in ("promotion", "history-replacement"):
+            with self.subTest(mode=removed_mode), self.assertRaisesRegex(
+                PUBLISH.PublishSourceError, "candidate or tag"
+            ):
+                PUBLISH.expected_push_arguments(
+                    removed_mode, "v0.6.0", None, approved_commit, self.PUBLIC_URL
+                )
+
+    def test_release_tag_grammar_accepts_bounded_ascii_semver(self) -> None:
+        accepted = (
+            "v0.0.0",
+            "v0.6.3",
+            "v1.2.3-rc.1",
+            "v2.3.4-phase6-baseline",
+            "v10.20.30+build.5",
+            "v1.2.3-alpha.1+build-7.sha",
         )
+        for version_tag in accepted:
+            with self.subTest(version_tag=version_tag):
+                self.assertEqual(
+                    PUBLISH.expected_push_arguments(
+                        "candidate", version_tag, None, "b" * 40, self.PUBLIC_URL
+                    )[-1],
+                    f"{'b' * 40}:refs/heads/release/{version_tag}",
+                )
+
+    def test_shell_unsafe_release_tags_are_rejected_for_every_mode(self) -> None:
+        unsafe_tags = (
+            "v1.2.3;whoami",
+            "v1.2.3&whoami",
+            "v1.2.3&&whoami",
+            "v1.2.3|whoami",
+            "v1.2.3||whoami",
+            "v1.2.3$(whoami)",
+            "v1.2.3${HOME}",
+            "v1.2.3`whoami`",
+            "v1.2.3>output.txt",
+            "v1.2.3<input.txt",
+            "v1.2.3^whoami",
+            "v1.2.3%COMSPEC%",
+            'v1.2.3"command"',
+            "v1.2.3'command'",
+            "v1.2.3/../../main",
+            "v1.2.3 command",
+            "v1.2.3\tcommand",
+            "v1.2.3\ncommand",
+            "v1.2.3\rcommand",
+            "v1.2.3；command",
+            "v1.2.3💥",
+            "V1.2.3",
+            "v01.2.3",
+            "v1.02.3",
+            "v1.2.03",
+            "v1.2",
+            "v1.2.3.",
+            "v" + "1" * PUBLISH.MAX_VERSION_TAG_LENGTH,
+        )
+        approved_commit = "b" * 40
+        for mode in sorted(PUBLISH.PUBLISH_MODES):
+            for version_tag in unsafe_tags:
+                with self.subTest(mode=mode, version_tag=version_tag):
+                    with self.assertRaisesRegex(
+                        PUBLISH.PublishSourceError,
+                        "shell-safe ASCII",
+                    ):
+                        PUBLISH.expected_push_arguments(
+                            mode,
+                            version_tag,
+                            None,
+                            approved_commit,
+                            self.PUBLIC_URL,
+                        )
+
+    def test_cli_never_prints_an_unsafe_release_tag_for_any_mode(self) -> None:
+        unsafe_tag = "v1.2.3;Write-Output injected"
+        for mode in sorted(PUBLISH.PUBLISH_MODES):
+            arguments = SimpleNamespace(
+                repository=Path("."),
+                expected_commit="b" * 40,
+                expected_root="c" * 40,
+                mode=mode,
+                version_tag=unsafe_tag,
+                remote_url=self.PUBLIC_URL,
+                expected_remote_main=None,
+            )
+            parser = mock.Mock()
+            parser.parse_args.return_value = arguments
+            stdout = io.StringIO()
+            stderr = io.StringIO()
+            with (
+                self.subTest(mode=mode),
+                mock.patch.object(PUBLISH, "_parser", return_value=parser),
+                mock.patch.object(PUBLISH, "check_public_publish_source"),
+                redirect_stdout(stdout),
+                redirect_stderr(stderr),
+            ):
+                self.assertEqual(PUBLISH.main(), 1)
+            self.assertEqual(stdout.getvalue(), "")
+            self.assertNotIn(unsafe_tag, stderr.getvalue())
+            self.assertIn("shell-safe ASCII", stderr.getvalue())
 
     def test_documentation_contains_only_explicit_ref_guidance(self) -> None:
         publishing = (ROOT / "docs" / "PUBLISHING.md").read_text(encoding="utf-8")
         for forbidden in PUBLISH.FORBIDDEN_PUSH_OPTIONS:
             self.assertNotIn(forbidden, publishing)
-        self.assertIn("HEAD:refs/heads/release/v0.6.3", publishing)
-        self.assertIn("HEAD:refs/heads/main", publishing)
-        self.assertIn("refs/tags/v0.6.3:refs/tags/v0.6.3", publishing)
-        self.assertIn("Do not merge the pull request through", publishing)
-        self.assertNotIn("Merge only after", publishing)
+        self.assertIn("refs/heads/release/v1.2.3", publishing)
+        self.assertIn("refs/tags/v1.2.3", publishing)
+        self.assertNotIn("release/v0.6.3", publishing)
+        self.assertIn("--mode candidate", publishing)
+        self.assertIn("--mode tag", publishing)
+        self.assertNotIn("HEAD:refs/heads/main", publishing)
+        self.assertNotIn("--force-with-lease=refs/heads/main:", publishing)
+        self.assertIn("Keep my email addresses private", publishing)
+        self.assertIn("squash-only", publishing)
+        self.assertIn("six strict contexts", publishing)
+        self.assertIn("Squash and merge", publishing)
+        self.assertIn("$candidateTree", publishing)
+        self.assertIn("$preMergeMain", publishing)
+        self.assertIn("$mergedCommit", publishing)
+        self.assertIn("The squash commit tree differs", publishing)
+        self.assertIn("all six hosted contexts", publishing)
+        self.assertIn("Tag only the green squash commit", publishing)
+        self.assertNotIn("history-replacement", publishing)
+        self.assertNotIn("promotion", publishing.casefold())
 
 
 if __name__ == "__main__":

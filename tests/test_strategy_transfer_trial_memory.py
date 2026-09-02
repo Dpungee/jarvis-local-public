@@ -163,9 +163,9 @@ class StrategyTransferTrialMemoryTests(unittest.TestCase):
         )
 
     def test_v39_migration_and_deterministic_balanced_blocks(self) -> None:
-        self.assertEqual(SCHEMA_VERSION, 43)
+        self.assertEqual(SCHEMA_VERSION, 44)
         with Memory(Path(":memory:")) as memory:
-            self.assertEqual(memory.db.execute("PRAGMA user_version").fetchone()[0], 43)
+            self.assertEqual(memory.db.execute("PRAGMA user_version").fetchone()[0], 44)
             for table in (
                 "strategy_transfer_trial_manifests",
                 "strategy_transfer_trial_assignments",
@@ -459,7 +459,7 @@ class StrategyTransferTrialMemoryTests(unittest.TestCase):
                 connection.close()
             with Memory(database) as recovered:
                 self.assertEqual(
-                    recovered.db.execute("PRAGMA user_version").fetchone()[0], 43
+                    recovered.db.execute("PRAGMA user_version").fetchone()[0], 44
                 )
                 columns = {
                     str(row["name"])

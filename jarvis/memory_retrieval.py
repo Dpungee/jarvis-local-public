@@ -267,6 +267,24 @@ def _memory_identity_capable_term(term: str) -> bool:
     return _structured_memory_identifier(canonical)
 
 
+def _memory_conjoined_term_pairs(query: str) -> set[tuple[str, str]]:
+    """Return terms explicitly joined as separate requested subjects."""
+    pairs: set[tuple[str, str]] = set()
+    identity_surface = r"[^\W_]+(?:[-_.:][^\W_]+)*"
+    pattern = re.compile(
+        rf"({identity_surface})"
+        rf"(?:\s+(?:and|plus)\s+|\s*[&+]\s*)"
+        rf"({identity_surface})",
+        re.I | re.UNICODE,
+    )
+    for match in pattern.finditer(str(query)):
+        left = _normalize_memory_token(match.group(1))
+        right = _normalize_memory_token(match.group(2))
+        if left and right:
+            pairs.add((left, right))
+    return pairs
+
+
 def _memory_identity_scope(
     query: str,
     query_terms: Iterable[str],
@@ -307,6 +325,28 @@ def _memory_identity_scope(
         elif proper:
             natural_proper.add(canonical)
 
+    # Natural-language retrieval verbs are an open class. If a capitalized
+    # sentence opener is followed by another capitalized term, the opener is
+    # framing rather than permission to displace that later named target merely
+    # because an unrelated stored record happens to start with the same word.
+    natural_proper_order = [
+        _normalize_memory_token(surface)
+        for surface in surfaces
+        if _normalize_memory_token(surface) in natural_proper
+    ]
+    meaningful_surfaces = [
+        surface for surface in surfaces
+        if _normalize_memory_token(surface) in ordered_set
+        and _normalize_memory_token(surface) not in _MEMORY_NON_SUBJECT_TERMS
+    ]
+    all_meaningful_title_cased = bool(meaningful_surfaces) and all(
+        surface[:1].isupper() for surface in meaningful_surfaces
+    )
+    conjoined_pairs = _memory_conjoined_term_pairs(query)
+    conjoined_proper_identities = any(
+        left in natural_proper and right in natural_proper
+        for left, right in conjoined_pairs
+    )
     first_tokens: set[str] = set()
     for row in rows:
         try:
@@ -320,6 +360,24 @@ def _memory_identity_scope(
         )
         if tokens:
             first_tokens.add(tokens[0])
+
+    if (
+        len(natural_proper_order) > 1
+        and not conjoined_proper_identities
+        and natural_proper_order[0] not in first_tokens
+        and not all_meaningful_title_cased
+    ):
+        # In ordinary sentence case, an unknown capitalized opener followed by
+        # a named stored subject is framing. Fully title-cased input carries no
+        # such grammatical signal, so its first term remains the target and an
+        # unknown identity abstains instead of borrowing the second term.
+        natural_proper.discard(natural_proper_order[0])
+
+    opener_subject_collision = bool(
+        len(natural_proper_order) > 1
+        and not conjoined_proper_identities
+        and natural_proper_order[0] in first_tokens
+    )
 
     sibling_conflicts = {
         term for term in ordered_terms
@@ -335,21 +393,39 @@ def _memory_identity_scope(
         if term not in _MEMORY_NON_SUBJECT_TERMS and term in first_tokens
     }
     # Sentence-initial capitalization alone is not a subject signal. Prefer a
-    # structured/internal-case identity, a sibling conflict, or the bounded
-    # corpus's actual first subject token before natural title case. This keeps
-    # arbitrary framing verbs ("Outline Atlas ...") from outranking Atlas while
-    # an otherwise unsupported proper name still fails closed as an identity.
+    # structured/internal-case identity or a sibling conflict first. A later
+    # natural proper target must then outrank a sentence-opening word that only
+    # happens to match some stored subject ("Outline Cobalt ..."); otherwise an
+    # unknown named target could borrow the framing word's record.
     candidates = (
-        explicit or sibling_conflicts or subject_matches or natural_proper
+        explicit or sibling_conflicts or natural_proper or subject_matches
     )
-    if (
-        re.search(r"\b(?:and|plus)\b|[&+]", str(query), re.I)
-        and len(candidates) > 1
-    ):
+    explicit_multi_fact_query = any(
+        left in candidates and right in candidates
+        for left, right in conjoined_pairs
+    )
+    if explicit_multi_fact_query and len(candidates) > 1:
         # The existing explicit multi-fact path intentionally returns separate
         # records ("Ember and Willow").  A single-record identity proof would
         # incorrectly require both subjects to co-occur.
         return [], []
+    if opener_subject_collision:
+        # A sentence opener that is also a stored subject is ambiguous: it may
+        # be the requested identity or merely an open-class framing verb. Do
+        # not let either interpretation borrow a different subject's record.
+        # Requiring every title-cased term as a co-occurring identity makes the
+        # exact phrase provable while separate records fail closed.
+        identities = list(dict.fromkeys(natural_proper_order))
+        ignored = (
+            _MEMORY_RETRIEVAL_SCOPE_VERBS
+            | _MEMORY_PRESENTATION_TERMS
+            | _MEMORY_FACT_CONTEXT_TERMS
+        )
+        anchors = [
+            term for term in ordered_terms
+            if term not in identities and term not in ignored
+        ]
+        return identities, anchors
     identity = next((term for term in ordered_terms if term in candidates), None)
     if identity is None:
         return [], []
@@ -933,9 +1009,11 @@ def _memory_resolve_sibling_identities(
             for term in identity_query_terms
         )
     }
-    explicit_multi_fact_query = re.search(
-        r"\b(?:and|plus)\b|[&+]", query, re.I
-    ) is not None
+    explicit_multi_fact_query = any(
+        set(_memory_term_variants(left)).intersection(candidate_identities)
+        and set(_memory_term_variants(right)).intersection(candidate_identities)
+        for left, right in _memory_conjoined_term_pairs(query)
+    )
     if (
         not named_candidate_identity
         and bool(identity_query_terms - matched_query_terms)

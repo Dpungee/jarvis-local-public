@@ -89,15 +89,27 @@ survive an exact-token postcheck after FTS discovery. Natural names use bounded
 inflection-aware proof, so a stored `Atlas` record remains addressable without
 letting an unknown `Cobalt` request reuse Atlas's matching topic words.
 
-Schema v43 also maintains a derived, hash-bound membership for privacy-clean
-learning records that fail the closed learning-quality contract. Eligible
-queries exclude current membership before lexical, fallback, semantic, and
-embedding limits are applied. The canonical external-content FTS index remains
-complete, which makes deletes, updates, and FTS rebuilds safe. Private, secret,
-missing-provenance, forged, and tampered records are deliberately not hidden by
-this quality membership; they retain conservative hard-shadow behavior during
-lexical discovery and ranking. Semantic SQL instead excludes ineligible rows,
-so this statement does not claim a semantic hard shadow.
+Schema v44 maintains an explicit, derived, hash-bound `ALLOW` or `DENY` quality
+decision for every authenticated, privacy-clean learning record. A valid
+`DENY` is removed before lexical, fallback, semantic, and embedding limits are
+applied, so low-quality rows cannot consume candidate capacity. Missing,
+private, secret, forged, or tampered material has no trusted decision and is
+therefore `UNKNOWN`: it remains a conservative hard shadow during lexical
+discovery and ranking, while semantic recall and embedding export require an
+exact current `ALLOW`. The canonical external-content FTS index stays complete,
+which keeps deletes, updates, and FTS rebuilds safe.
+
+Quality decisions are rebuilt from authenticated canonical rows when missing.
+Field changes invalidate the decision and any derived vector or lease; startup
+verifies the exact invalidation-trigger definitions rather than trusting their
+names. Semantic reads independently bind each stored vector digest to the exact
+text snapshot and reject invalid or non-finite vector arithmetic.
+
+Multi-query recall and its eligibility checks run in one SQLite snapshot.
+Consequently, a concurrent repair cannot validate current safe data while an
+older selected row leaks stale content or metadata. Claim-clock support
+timestamps are also privacy-screened and timezone-validated before they can
+affect or appear in recall output.
 
 Recall caches are byte-bounded using recursive accounting. Raw structured claim
 fields are represented in keys by digests, not retained as cache values, and a

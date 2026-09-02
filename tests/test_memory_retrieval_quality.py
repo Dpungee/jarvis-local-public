@@ -195,9 +195,37 @@ class MemoryRetrievalQualityTests(unittest.TestCase):
                 memory.search("Summarize Cobalt kiln coolant inspection"),
                 [],
             )
+            memory.remember_verified(
+                "Outline kiln coolant inspection occurs every Thursday.",
+                "fact",
+                "framing collision fixture",
+                origin="verified_import",
+            )
+            self.assertEqual(
+                memory.search("Outline Cobalt kiln coolant inspection"),
+                [],
+            )
+            self.assertEqual(
+                memory.search("Outline Cobalt kiln and coolant inspection"),
+                [],
+            )
             self.assertEqual(
                 [item["content"] for item in memory.search("kiln coolant inspection")],
-                [beacon, atlas],
+                [
+                    "Outline kiln coolant inspection occurs every Thursday.",
+                    beacon,
+                    atlas,
+                ],
+            )
+            memory.remember_verified(
+                "Kiln coolant inspection occurs every Wednesday.",
+                "fact",
+                "title-case collision fixture",
+                origin="verified_import",
+            )
+            self.assertEqual(
+                memory.search("Cobalt Kiln Coolant Inspection"),
+                [],
             )
 
     def test_private_or_secret_query_never_conditions_ordinary_memory(self) -> None:
@@ -225,6 +253,28 @@ class MemoryRetrievalQualityTests(unittest.TestCase):
                 ),
                 [],
             )
+
+    def test_conjoined_structured_identities_return_each_exact_record(self) -> None:
+        case = "CASE-9931 status is open."
+        job = "JOB-44 status is queued."
+        with Memory(Path(":memory:")) as memory:
+            for content in (case, job):
+                memory.remember_verified(
+                    content,
+                    "fact",
+                    "structured multi-identity fixture",
+                    origin="verified_import",
+                )
+            for connector in ("and", "plus", "&"):
+                with self.subTest(connector=connector):
+                    results = memory.search(
+                        f"CASE-9931 {connector} JOB-44",
+                        limit=4,
+                    )
+                    self.assertEqual(
+                        {item["content"] for item in results},
+                        {case, job},
+                    )
 
     def test_candidate_pool_is_independent_of_requested_output_limit(self) -> None:
         target = "overflowprobe exact quasar target sentinel"
@@ -830,7 +880,7 @@ class MemoryRetrievalQualityTests(unittest.TestCase):
             )
             self.assertEqual(memory.search("Explain Ollama context"), [])
 
-    def test_v43_backfills_quality_membership_without_pruning_fts(self) -> None:
+    def test_v44_backfills_quality_decisions_without_pruning_fts(self) -> None:
         quality_tag = "jarvis-quality-contract:1"
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "quality-migration.db"
@@ -855,15 +905,22 @@ class MemoryRetrievalQualityTests(unittest.TestCase):
                     f"{quality_tag}\nhttps://docs.ollama.com/context-length",
                     origin="verified_import",
                 )
+                official_id = int(memory.db.execute(
+                    "SELECT id FROM memories WHERE content LIKE 'OFFICIAL_MIGRATION%'"
+                ).fetchone()[0])
             raw = sqlite3.connect(path)
             try:
                 for trigger in (
                     "ordinary_memory_quality_memory_changed",
+                    "ordinary_memory_quality_provenance_inserted",
                     "ordinary_memory_quality_provenance_changed",
                     "ordinary_memory_quality_provenance_deleted",
+                    "ordinary_memory_quality_assessment_inserted",
+                    "ordinary_memory_quality_assessment_changed",
+                    "ordinary_memory_quality_assessment_deleted",
                 ):
                     raw.execute(f"DROP TRIGGER IF EXISTS {trigger}")
-                raw.execute("DROP TABLE ordinary_memory_quality_quarantine")
+                raw.execute("DROP TABLE ordinary_memory_quality_assessments")
                 raw.execute(
                     """INSERT INTO memory_embeddings(
                            memory_id, model, dimensions, content_sha256,
@@ -883,16 +940,24 @@ class MemoryRetrievalQualityTests(unittest.TestCase):
                                  '2026-09-01T00:00:00+00:00')""",
                     (blog_id, content_sha256),
                 )
-                raw.execute("PRAGMA user_version=42")
+                raw.execute("PRAGMA user_version=43")
                 raw.commit()
             finally:
                 raw.close()
 
             with Memory(path) as migrated:
-                quarantined = migrated.db.execute(
-                    "SELECT memory_id FROM ordinary_memory_quality_quarantine"
+                assessments = migrated.db.execute(
+                    """SELECT memory_id, recall_allowed
+                       FROM ordinary_memory_quality_assessments ORDER BY memory_id"""
                 ).fetchall()
-                self.assertEqual([int(row[0]) for row in quarantined], [blog_id])
+                self.assertEqual(
+                    [(int(row[0]), int(row[1])) for row in assessments],
+                    [(blog_id, 0), (official_id, 1)],
+                )
+                self.assertEqual(
+                    migrated.db.execute("PRAGMA user_version").fetchone()[0],
+                    44,
+                )
                 self.assertEqual(
                     migrated.db.execute(
                         "SELECT COUNT(*) FROM memory_embeddings WHERE memory_id=?",

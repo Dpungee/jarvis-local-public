@@ -12,7 +12,10 @@ the claim matcher return exactly what the slower code returned.
 from __future__ import annotations
 
 import json
+import math
 import random
+import sqlite3
+import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -422,6 +425,276 @@ class StagedLexicalDiscoveryTests(unittest.TestCase):
         self.assertEqual(len(leased), 1)
         self.assertIn("zephyr embedding calibration", leased[0]["content"])
 
+    def test_quality_noop_updates_preserve_explicit_decisions(self) -> None:
+        quality_tag = "jarvis-quality-contract:1"
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "quality-noop.db"
+            with Memory(path) as memory:
+                memory.remember_verified(
+                    "BLOG_NOOP_SENTINEL Ollama claim",
+                    "learning",
+                    f"{quality_tag}\nhttps://independent-notes.example/noop/",
+                    origin="verified_import",
+                )
+                memory.remember_verified(
+                    "OFFICIAL_NOOP_SENTINEL Ollama fact",
+                    "learning",
+                    f"{quality_tag}\nhttps://docs.ollama.com/context-length",
+                    origin="verified_import",
+                )
+                blog_id = int(memory.db.execute(
+                    "SELECT id FROM memories WHERE content LIKE 'BLOG_NOOP%'"
+                ).fetchone()[0])
+                before = tuple(memory.db.execute(
+                    """SELECT recorded_at, contract_version, recall_allowed,
+                              content_sha256, source_is_null, source_sha256,
+                              provenance_sha256
+                       FROM ordinary_memory_quality_assessments WHERE memory_id=?""",
+                    (blog_id,),
+                ).fetchone())
+                raw = sqlite3.connect(path, isolation_level=None)
+                try:
+                    raw.execute(
+                        """UPDATE memories SET created_at=created_at, kind=kind,
+                                  content=content, source=source WHERE id=?""",
+                        (blog_id,),
+                    )
+                    raw.execute(
+                        """UPDATE ordinary_memory_provenance
+                           SET memory_id=memory_id, origin=origin, eligible=eligible,
+                               content_sha256=content_sha256,
+                               provenance_sha256=provenance_sha256
+                           WHERE memory_id=?""",
+                        (blog_id,),
+                    )
+                finally:
+                    raw.close()
+                after = tuple(memory.db.execute(
+                    """SELECT recorded_at, contract_version, recall_allowed,
+                              content_sha256, source_is_null, source_sha256,
+                              provenance_sha256
+                       FROM ordinary_memory_quality_assessments WHERE memory_id=?""",
+                    (blog_id,),
+                ).fetchone())
+                self.assertEqual(after, before)
+                with patch("jarvis.memory.MAX_MEMORY_SEARCH_CANDIDATES", 4):
+                    results = memory.search("Explain Ollama context", limit=3)
+                self.assertEqual(len(results), 1)
+                self.assertIn("OFFICIAL_NOOP_SENTINEL", results[0]["content"])
+
+    def test_missing_quality_decisions_fail_closed_for_recall_and_embedding(self) -> None:
+        quality_tag = "jarvis-quality-contract:1"
+        with Memory(Path(":memory:")) as memory:
+            for index in range(6):
+                memory.remember_verified(
+                    f"BLOG_UNKNOWN_SENTINEL_{index} Ollama claim",
+                    "learning",
+                    f"{quality_tag}\nhttps://independent-notes.example/{index}/",
+                    origin="verified_import",
+                )
+            memory.remember_verified(
+                "OFFICIAL_UNKNOWN_SENTINEL Ollama fact",
+                "learning",
+                f"{quality_tag}\nhttps://docs.ollama.com/context-length",
+                origin="verified_import",
+            )
+            memory.db.execute(
+                """DELETE FROM ordinary_memory_quality_assessments
+                   WHERE recall_allowed=0"""
+            )
+            with patch("jarvis.memory.MAX_MEMORY_SEARCH_CANDIDATES", 4):
+                self.assertEqual(memory.search("Explain Ollama context"), [])
+            pending = memory.pending_memory_embeddings("quality-unknown", limit=20)
+            self.assertEqual(
+                [item["content"] for item in pending],
+                ["OFFICIAL_UNKNOWN_SENTINEL Ollama fact"],
+            )
+
+            official_id = int(memory.db.execute(
+                "SELECT id FROM memories WHERE content LIKE 'OFFICIAL_UNKNOWN%'"
+            ).fetchone()[0])
+            memory.db.execute(
+                """DELETE FROM ordinary_memory_quality_assessments
+                   WHERE memory_id=?""",
+                (official_id,),
+            )
+            self.assertEqual(memory.search("OFFICIAL_UNKNOWN_SENTINEL Ollama"), [])
+            self.assertEqual(
+                memory.pending_memory_embeddings("quality-unknown", limit=20),
+                [],
+            )
+
+    def test_reopen_rebuilds_missing_authenticated_quality_decision(self) -> None:
+        quality_tag = "jarvis-quality-contract:1"
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "quality-reconcile.db"
+            with Memory(path) as memory:
+                memory.remember_verified(
+                    "OFFICIAL_RECONCILE_SENTINEL Ollama fact",
+                    "learning",
+                    f"{quality_tag}\nhttps://docs.ollama.com/context-length",
+                    origin="verified_import",
+                )
+                memory_id = int(memory.db.execute(
+                    "SELECT id FROM memories WHERE content LIKE 'OFFICIAL_RECONCILE%'"
+                ).fetchone()[0])
+            raw = sqlite3.connect(path)
+            try:
+                raw.execute(
+                    "DELETE FROM ordinary_memory_quality_assessments WHERE memory_id=?",
+                    (memory_id,),
+                )
+                raw.commit()
+            finally:
+                raw.close()
+            with Memory(path) as reopened:
+                decision = reopened.db.execute(
+                    """SELECT recall_allowed
+                       FROM ordinary_memory_quality_assessments WHERE memory_id=?""",
+                    (memory_id,),
+                ).fetchone()
+                self.assertEqual(int(decision[0]), 1)
+                self.assertEqual(
+                    len(reopened.search("OFFICIAL_RECONCILE_SENTINEL Ollama")),
+                    1,
+                )
+
+    def test_reopen_replaces_same_name_noop_quality_trigger(self) -> None:
+        quality_tag = "jarvis-quality-contract:1"
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "quality-trigger-repair.db"
+            with Memory(path) as memory:
+                memory.remember_verified(
+                    "OFFICIAL_TRIGGER_SENTINEL Ollama fact",
+                    "learning",
+                    f"{quality_tag}\nhttps://docs.ollama.com/context-length",
+                    origin="verified_import",
+                )
+                pending = memory.pending_memory_embeddings("trigger-test", limit=1)
+                memory.store_memory_embeddings(
+                    "trigger-test", pending, [[1.0, 0.0]]
+                )
+                memory_id = int(pending[0]["memory_id"])
+            raw = sqlite3.connect(path)
+            try:
+                raw.execute("DROP TRIGGER ordinary_memory_quality_memory_changed")
+                raw.execute(
+                    """CREATE TRIGGER ordinary_memory_quality_memory_changed
+                       AFTER UPDATE ON memories BEGIN SELECT 1; END"""
+                )
+                raw.execute(
+                    "UPDATE memories SET source=source || ' tampered' WHERE id=?",
+                    (memory_id,),
+                )
+                raw.commit()
+            finally:
+                raw.close()
+            with Memory(path) as reopened:
+                self.assertEqual(
+                    reopened.db.execute(
+                        """SELECT COUNT(*)
+                           FROM ordinary_memory_quality_assessments WHERE memory_id=?""",
+                        (memory_id,),
+                    ).fetchone()[0],
+                    0,
+                )
+                self.assertEqual(
+                    reopened.db.execute(
+                        "SELECT COUNT(*) FROM memory_embeddings WHERE memory_id=?",
+                        (memory_id,),
+                    ).fetchone()[0],
+                    0,
+                )
+                trigger_sql = str(reopened.db.execute(
+                    """SELECT sql FROM sqlite_master
+                       WHERE type='trigger'
+                         AND name='ordinary_memory_quality_memory_changed'"""
+                ).fetchone()[0])
+                self.assertIn(
+                    "DELETE FROM ordinary_memory_quality_assessments",
+                    trigger_sql,
+                )
+
+    def test_invalid_quality_source_digests_cannot_starve_embedding_batch(self) -> None:
+        quality_tag = "jarvis-quality-contract:1"
+        with Memory(Path(":memory:")) as memory:
+            for index in range(4):
+                memory.remember_verified(
+                    f"OFFICIAL_SOURCE_BINDING_{index} Ollama fact",
+                    "learning",
+                    f"{quality_tag}\nhttps://docs.ollama.com/{index}",
+                    origin="verified_import",
+                )
+            _remember(memory, "The zephyr source-digest calibration is verified.")
+            memory.db.execute(
+                """UPDATE ordinary_memory_quality_assessments
+                   SET source_sha256=?""",
+                ("0" * 64,),
+            )
+            with patch("jarvis.memory.MAX_MEMORY_SEARCH_CANDIDATES", 4):
+                pending = memory.pending_memory_embeddings(
+                    "source-binding", limit=1
+                )
+            self.assertEqual(len(pending), 1)
+            self.assertIn("zephyr source-digest calibration", pending[0]["content"])
+
+    def test_real_learning_mutation_invalidates_decision_vectors_and_leases(self) -> None:
+        quality_tag = "jarvis-quality-contract:1"
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "quality-mutation.db"
+            with Memory(path) as memory:
+                memory.remember_verified(
+                    "OFFICIAL_MUTATION_SENTINEL Ollama fact",
+                    "learning",
+                    f"{quality_tag}\nhttps://docs.ollama.com/context-length",
+                    origin="verified_import",
+                )
+                pending = memory.pending_memory_embeddings("quality-mutation", limit=1)
+                memory.store_memory_embeddings(
+                    "quality-mutation", pending, [[1.0, 0.0]]
+                )
+                memory_id = int(pending[0]["memory_id"])
+                content_sha256 = str(pending[0]["content_sha256"])
+                memory.db.execute(
+                    """INSERT INTO memory_embedding_leases(
+                           memory_id, model, content_sha256, lease_owner,
+                           lease_expires_at, attempt_count, last_error, updated_at
+                       ) VALUES (?, 'quality-lease', ?, 'quality-worker',
+                                 '2099-01-01T00:00:00+00:00', 1, NULL,
+                                 '2026-09-02T00:00:00+00:00')""",
+                    (memory_id, content_sha256),
+                )
+                raw = sqlite3.connect(path, isolation_level=None)
+                try:
+                    raw.execute(
+                        "UPDATE memories SET source=source || ' changed' WHERE id=?",
+                        (memory_id,),
+                    )
+                finally:
+                    raw.close()
+                for table in (
+                    "ordinary_memory_quality_assessments",
+                    "memory_embeddings",
+                    "memory_embedding_leases",
+                ):
+                    self.assertEqual(
+                        memory.db.execute(
+                            f"SELECT COUNT(*) FROM {table} WHERE memory_id=?",
+                            (memory_id,),
+                        ).fetchone()[0],
+                        0,
+                    )
+                self.assertEqual(
+                    memory.search("OFFICIAL_MUTATION_SENTINEL Ollama"),
+                    [],
+                )
+                self.assertEqual(
+                    memory.semantic_memory_search(
+                        [1.0, 0.0], "quality-mutation", limit=1
+                    ),
+                    [],
+                )
+
     def test_maximum_query_uses_bounded_frequency_statements(self) -> None:
         def token(index: int) -> str:
             letters = []
@@ -596,6 +869,46 @@ class ClaimTermMatchingTests(unittest.TestCase):
             }
             self.assertEqual(whole, per_term, (query, record))
 
+    def test_explicit_claim_identity_outranks_generic_support_inference(self) -> None:
+        with Memory(Path(":memory:")) as memory:
+            for index in range(3):
+                memory.remember_claim(
+                    f"cluster node {index}",
+                    "solvent ratio",
+                    f"one to {index + 2}",
+                    source="operator fixture",
+                    authority="operator",
+                )
+            target_id = memory.remember_claim(
+                "NorthAlderwick cluster",
+                "solvent ratio",
+                "one to four",
+                source="operator fixture",
+                authority="operator",
+            )
+            results = memory.current_claims(
+                "NorthAlderwick cluster solvent ratio",
+                limit=8,
+            )
+            self.assertEqual(
+                [(item["claim_id"], item["subject"]) for item in results],
+                [(target_id, "NorthAlderwick cluster")],
+            )
+            self.assertEqual(
+                [
+                    item["claim_id"]
+                    for item in memory.current_claims("NorthAlderwick", limit=8)
+                ],
+                [target_id],
+            )
+            self.assertEqual(
+                memory.current_claims(
+                    "SouthAlderwick cluster solvent ratio",
+                    limit=8,
+                ),
+                [],
+            )
+
     def test_documented_rules_hold(self) -> None:
         self.assertEqual(
             _claim_matched_query_terms({"inspection"}, {"inspect"}), {"inspection"}
@@ -659,6 +972,258 @@ class SemanticEligibilityTests(unittest.TestCase):
                 memory.semantic_memory_search([1.0, 0.0], "scale-test", limit=3),
                 [],
             )
+
+    def test_semantic_read_requires_vector_digest_to_match_exact_content(self) -> None:
+        with Memory(Path(":memory:")) as memory:
+            _remember(memory, "Semantic digest binding anchor record.")
+            pending = memory.pending_memory_embeddings("digest-test", limit=1)
+            memory.store_memory_embeddings(
+                "digest-test", pending, [[1.0, 0.0]]
+            )
+            memory.db.execute(
+                """UPDATE memory_embeddings SET content_sha256=?
+                   WHERE memory_id=? AND model='digest-test'""",
+                ("0" * 64, int(pending[0]["memory_id"])),
+            )
+            self.assertEqual(
+                memory.semantic_memory_search([1.0, 0.0], "digest-test", limit=1),
+                [],
+            )
+
+    def test_semantic_similarity_never_returns_nonfinite_score(self) -> None:
+        with Memory(Path(":memory:")) as memory:
+            _remember(memory, "Semantic finite-score anchor record.")
+            pending = memory.pending_memory_embeddings("finite-test", limit=1)
+            memory.store_memory_embeddings(
+                "finite-test", pending, [[1.0, 1.0]]
+            )
+            results = memory.semantic_memory_search(
+                [1e308, 1e308], "finite-test", limit=1
+            )
+            self.assertEqual(len(results), 1)
+            self.assertTrue(math.isfinite(float(results[0]["semantic_score"])))
+            with self.assertRaisesRegex(ValueError, "invalid norm"):
+                memory.semantic_memory_search(
+                    [1e308, 1e308, 1e308, 1e308],
+                    "finite-test",
+                    limit=1,
+                )
+
+    def test_semantic_claim_validation_cannot_approve_a_different_snapshot(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "semantic-snapshot.db"
+            with Memory(path) as reader, Memory(path) as writer:
+                reader.remember_claim(
+                    "ReleaseService",
+                    "deployment status",
+                    "ready",
+                    source="snapshot fixture",
+                    authority="verified",
+                )
+                pending = reader.pending_memory_embeddings("scale-test", limit=10)
+                reader.store_memory_embeddings(
+                    "scale-test", pending, [[1.0, 0.0] for _item in pending]
+                )
+                memory_id = int(pending[0]["memory_id"])
+                canonical = str(pending[0]["content"])
+                embedded = dict(reader.db.execute(
+                    """SELECT memory_id, model, dimensions, content_sha256,
+                              embedding_json, embedding_blob, vector_norm,
+                              created_at, updated_at
+                       FROM memory_embeddings WHERE memory_id=? AND model=?""",
+                    (memory_id, "scale-test"),
+                ).fetchone())
+                writer.db.execute(
+                    "UPDATE memories SET content=? WHERE id=?",
+                    ("ReleaseService deployment status: delayed", memory_id),
+                )
+                # The mutation trigger correctly purges the old vector. Reinsert
+                # the captured row to model an out-of-band stale-vector write;
+                # semantic recall must still bind validation to its read snapshot.
+                writer.db.execute(
+                    """INSERT INTO memory_embeddings(
+                           memory_id, model, dimensions, content_sha256,
+                           embedding_json, embedding_blob, vector_norm,
+                           created_at, updated_at
+                       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    tuple(embedded[key] for key in (
+                        "memory_id", "model", "dimensions", "content_sha256",
+                        "embedding_json", "embedding_blob", "vector_norm",
+                        "created_at", "updated_at",
+                    )),
+                )
+                validator = reader._claim_memory_recall_eligible
+                repaired = False
+
+                def repair_then_validate(candidate_id: int, **kwargs: object) -> bool:
+                    nonlocal repaired
+                    repaired = True
+                    writer.db.execute(
+                        "UPDATE memories SET content=? WHERE id=?",
+                        (canonical, memory_id),
+                    )
+                    return validator(candidate_id, **kwargs)
+
+                with patch.object(
+                    reader,
+                    "_claim_memory_recall_eligible",
+                    side_effect=repair_then_validate,
+                ):
+                    self.assertEqual(
+                        reader.semantic_memory_search(
+                            [1.0, 0.0], "scale-test", limit=1
+                        ),
+                        [],
+                    )
+                # Exact vector-to-content binding rejects the stale row before
+                # the current-state validator can be asked to repair/approve it.
+                self.assertFalse(repaired)
+                self.assertFalse(reader.db.in_transaction)
+
+    def test_lexical_claim_validation_cannot_approve_a_different_snapshot(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "lexical-snapshot.db"
+            with Memory(path) as reader, Memory(path) as writer:
+                reader.remember_claim(
+                    "ReleaseService",
+                    "deployment status",
+                    "ready",
+                    source="snapshot fixture",
+                    authority="verified",
+                )
+                memory_id, canonical = reader.db.execute(
+                    "SELECT id, content FROM memories WHERE kind='claim'"
+                ).fetchone()
+                writer.db.execute(
+                    "UPDATE memories SET content=? WHERE id=?",
+                    ("ReleaseService deployment status: delayed", int(memory_id)),
+                )
+                validator = reader._claim_memory_recall_eligible
+
+                def repair_then_validate(candidate_id: int, **kwargs: object) -> bool:
+                    writer.db.execute(
+                        "UPDATE memories SET content=? WHERE id=?",
+                        (str(canonical), int(memory_id)),
+                    )
+                    return validator(candidate_id, **kwargs)
+
+                with patch.object(
+                    reader,
+                    "_claim_memory_recall_eligible",
+                    side_effect=repair_then_validate,
+                ):
+                    self.assertEqual(
+                        reader.search("ReleaseService deployment status"),
+                        [],
+                    )
+                self.assertFalse(reader.db.in_transaction)
+
+    def test_pending_embedding_cannot_export_a_different_claim_snapshot(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "embedding-snapshot.db"
+            with Memory(path) as reader, Memory(path) as writer:
+                reader.remember_claim(
+                    "ReleaseService",
+                    "deployment status",
+                    "ready",
+                    source="snapshot fixture",
+                    authority="verified",
+                )
+                memory_id, canonical = reader.db.execute(
+                    "SELECT id, content FROM memories WHERE kind='claim'"
+                ).fetchone()
+                writer.db.execute(
+                    "UPDATE memories SET content=? WHERE id=?",
+                    ("ReleaseService deployment status: delayed", int(memory_id)),
+                )
+                validator = reader._claim_memory_recall_eligible
+
+                def repair_then_validate(candidate_id: int, **kwargs: object) -> bool:
+                    writer.db.execute(
+                        "UPDATE memories SET content=? WHERE id=?",
+                        (str(canonical), int(memory_id)),
+                    )
+                    return validator(candidate_id, **kwargs)
+
+                with patch.object(
+                    reader,
+                    "_claim_memory_recall_eligible",
+                    side_effect=repair_then_validate,
+                ):
+                    self.assertEqual(
+                        reader.pending_memory_embeddings("snapshot-model", limit=1),
+                        [],
+                    )
+                self.assertFalse(reader.db.in_transaction)
+
+    def test_claim_output_metadata_is_screened_at_every_recall_boundary(self) -> None:
+        payload = "m" * 40
+        credential = "ghp_" + payload
+        with Memory(Path(":memory:")) as memory:
+            claim_id = memory.remember_claim(
+                "ReleaseService",
+                "deployment status",
+                "ready",
+                source="metadata fixture",
+                authority="verified",
+            )
+            memory_id = int(memory.db.execute(
+                "SELECT memory_id FROM memory_claims WHERE id=?", (claim_id,)
+            ).fetchone()[0])
+            memory.db.execute(
+                "UPDATE memory_claims SET updated_at=? WHERE id=?",
+                (credential, claim_id),
+            )
+            self.assertEqual(memory.current_claims("deployment status ready"), [])
+
+            memory.db.execute(
+                "UPDATE memory_claims SET updated_at=created_at WHERE id=?",
+                (claim_id,),
+            )
+            memory.db.execute(
+                "UPDATE memories SET created_at=? WHERE id=?",
+                (credential, memory_id),
+            )
+            self.assertEqual(memory.search("ReleaseService deployment status"), [])
+            self.assertEqual(
+                memory.semantic_memory_search([1.0, 0.0], "missing-model"),
+                [],
+            )
+
+    def test_secondary_claim_identity_rows_never_inherit_cache_admission_by_id(self) -> None:
+        payload = "i" * 40
+        credential = "ghp_" + payload
+        with Memory(Path(":memory:")) as memory:
+            claim_id = memory.remember_claim(
+                "ReleaseService",
+                "deployment status",
+                "ready",
+                source="identity cache fixture",
+                authority="verified",
+            )
+            validator = memory._claim_rows_recall_eligible
+            calls = 0
+
+            def mutate_after_admission(rows: object, **kwargs: object) -> set[int]:
+                nonlocal calls
+                admitted = validator(rows, **kwargs)
+                calls += 1
+                if calls == 1:
+                    memory.db.execute(
+                        "UPDATE memory_claims SET subject=? WHERE id=?",
+                        (f"ReleaseService {credential}", claim_id),
+                    )
+                return admitted
+
+            with patch.object(
+                memory,
+                "_claim_rows_recall_eligible",
+                side_effect=mutate_after_admission,
+            ):
+                memory.current_claims("ReleaseService deployment status")
+            rendered = repr(memory._recall_cache._entries)
+            self.assertNotIn(payload, rendered)
+            self.assertNotIn(credential, rendered)
 
 
 class RecallCacheTests(unittest.TestCase):

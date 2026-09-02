@@ -108,6 +108,18 @@ def now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def _recall_timestamp_valid(value: Any) -> bool:
+    """Accept only privacy-clean, timezone-aware ISO timestamps at read boundaries."""
+    text = str(value or "")
+    if not text or contains_secret(text) or contains_private_identifier(text):
+        return False
+    try:
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        return False
+    return parsed.tzinfo is not None and parsed.utcoffset() is not None
+
+
 def _ordinary_memory_provenance_material_from_fields(
     memory_id: int,
     created_at: str,
@@ -147,6 +159,36 @@ def _ordinary_memory_provenance_digest_from_material(
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
+def _sqlite_sha256_text(value: Any) -> str:
+    """Deterministic SQLite helper for exact text-to-digest joins."""
+    return hashlib.sha256(str(value or "").encode("utf-8")).hexdigest()
+
+
+def _sqlite_ordinary_memory_provenance_sha256(
+    memory_id: Any,
+    created_at: Any,
+    kind: Any,
+    content: Any,
+    source: Any,
+    origin: Any,
+    eligible: Any,
+) -> str:
+    """Recompute an ordinary-memory receipt inside bounded recall SQL."""
+    try:
+        material = _ordinary_memory_provenance_material_from_fields(
+            int(memory_id),
+            str(created_at),
+            str(kind),
+            str(content),
+            None if source is None else str(source),
+            origin=str(origin),
+            eligible=bool(int(eligible)),
+        )
+    except (TypeError, ValueError, OverflowError):
+        return ""
+    return _ordinary_memory_provenance_digest_from_material(material)
+
+
 def training_prompt_split(prompt: str, task_kind: str) -> str:
     """Keep every response for one normalized task prompt in the same data split."""
     split_key = json.dumps(
@@ -162,7 +204,7 @@ def training_prompt_split(prompt: str, task_kind: str) -> str:
     return "train" if bucket < 80 else "validation" if bucket < 90 else "test"
 
 
-SCHEMA_VERSION = 43
+SCHEMA_VERSION = 44
 
 _ORDINARY_MEMORY_PROVENANCE_ORIGINS = frozenset({
     "explicit_operator_memory",
@@ -173,7 +215,7 @@ _ORDINARY_MEMORY_PROVENANCE_ORIGINS = frozenset({
 })
 
 
-def _learning_quality_quarantined_record(
+def _learning_quality_assessment(
     memory_id: Any,
     created_at: Any,
     kind: Any,
@@ -183,23 +225,23 @@ def _learning_quality_quarantined_record(
     eligible: Any,
     content_sha256: Any,
     provenance_sha256: Any,
-) -> int:
-    """Identify provenance-valid, privacy-clean learning rows barred from recall."""
+) -> bool | None:
+    """Return ALLOW/DENY for an authenticated clean learning row, else UNKNOWN."""
     try:
         if str(kind).casefold() != "learning":
-            return 0
+            return None
         normalized_eligible = bool(int(eligible))
         normalized_origin = str(origin)
         if (
             normalized_eligible
             and normalized_origin not in _ORDINARY_MEMORY_PROVENANCE_ORIGINS
         ) or (not normalized_eligible and normalized_origin != "unverified"):
-            return 0
+            return None
         normalized_content = str(content)
         if str(content_sha256) != hashlib.sha256(
             normalized_content.encode("utf-8")
         ).hexdigest():
-            return 0
+            return None
         normalized_source = None if source is None else str(source)
         material = _ordinary_memory_provenance_material_from_fields(
             int(memory_id),
@@ -213,7 +255,7 @@ def _learning_quality_quarantined_record(
         if str(provenance_sha256) != (
             _ordinary_memory_provenance_digest_from_material(material)
         ):
-            return 0
+            return None
         recall_material = "\n".join((
             normalized_content,
             "" if normalized_source is None else normalized_source,
@@ -222,30 +264,76 @@ def _learning_quality_quarantined_record(
             contains_secret(recall_material)
             or contains_private_identifier(recall_material)
         ):
-            return 0
-        # Learning rows are audit/research artifacts governed by the explicit
-        # quality contract: valid-but-unverified or low-authority examples must
-        # not influence model-facing ranking. Ordinary unverified facts retain
-        # the separate hard-shadow policy in _rank_generic_recall_rows.
-        return int(
-            not normalized_eligible
-            or not learning_memory_record_allowed(
+            return None
+        return bool(
+            normalized_eligible
+            and learning_memory_record_allowed(
                 content=normalized_content,
                 source="" if normalized_source is None else normalized_source,
             )
         )
     except (TypeError, ValueError, OverflowError):
-        return 0
+        return None
 
 
-_LEARNING_QUALITY_VISIBLE_SQL = f"""
-AND NOT EXISTS (
-    SELECT 1 FROM ordinary_memory_quality_quarantine AS omq
-    WHERE omq.memory_id=m.id
-      AND omq.contract_version={TRAINING_QUALITY_CONTRACT_VERSION}
-      AND omq.content_sha256=omp.content_sha256
-      AND omq.provenance_sha256=omp.provenance_sha256
+def _learning_quality_quarantined_record(
+    memory_id: Any,
+    created_at: Any,
+    kind: Any,
+    content: Any,
+    source: Any,
+    origin: Any,
+    eligible: Any,
+    content_sha256: Any,
+    provenance_sha256: Any,
+) -> int:
+    """Compatibility predicate used by the v43-to-v44 migration."""
+    decision = _learning_quality_assessment(
+        memory_id,
+        created_at,
+        kind,
+        content,
+        source,
+        origin,
+        eligible,
+        content_sha256,
+        provenance_sha256,
+    )
+    return int(decision is False)
+
+
+_LEARNING_QUALITY_ASSESSMENT_JOIN_SQL = f"""
+LEFT JOIN ordinary_memory_quality_assessments AS omqa
+  ON omqa.memory_id=m.id
+ AND lower(m.kind)='learning'
+ AND omqa.contract_version={TRAINING_QUALITY_CONTRACT_VERSION}
+ AND omqa.content_sha256=omp.content_sha256
+ AND omqa.provenance_sha256=omp.provenance_sha256
+ AND omqa.source_is_null=(m.source IS NULL)
+ AND omp.content_sha256=jarvis_sha256(m.content)
+ AND omqa.source_sha256=jarvis_sha256(COALESCE(m.source, ''))
+ AND omp.provenance_sha256=jarvis_ordinary_memory_provenance_sha256(
+       m.id, m.created_at, m.kind, m.content, m.source,
+       omp.origin, omp.eligible
+ )
+"""
+_LEARNING_QUALITY_SELECT_SQL = """
+omqa.recall_allowed AS ordinary_quality_allowed,
+omqa.contract_version AS ordinary_quality_contract_version,
+omqa.content_sha256 AS ordinary_quality_content_sha256,
+omqa.source_is_null AS ordinary_quality_source_is_null,
+omqa.source_sha256 AS ordinary_quality_source_sha256,
+omqa.provenance_sha256 AS ordinary_quality_provenance_sha256
+"""
+_LEARNING_QUALITY_LEXICAL_SQL = """
+AND (
+    lower(m.kind)<>'learning'
+    OR omqa.recall_allowed IS NULL
+    OR omqa.recall_allowed=1
 )
+"""
+_LEARNING_QUALITY_ALLOWED_SQL = """
+AND (lower(m.kind)<>'learning' OR omqa.recall_allowed=1)
 """
 
 LESSON_DEFAULT_TTL_DAYS = 180
@@ -800,6 +888,51 @@ def _with_recall_cache(method: Any) -> Any:
     return wrapper
 
 
+def _with_read_snapshot(method: Any) -> Any:
+    """Keep every read and validation in one coherent SQLite snapshot.
+
+    Recall methods may be nested (hybrid recall calls semantic recall) or may
+    run inside an existing transaction. Only the outermost standalone reader
+    owns the deferred transaction and rolls it back after the read.
+    """
+
+    @functools.wraps(method)
+    def wrapper(self: Any, *args: Any, **kwargs: Any) -> Any:
+        self._ensure_open()
+        owns_snapshot = not self.db.in_transaction
+        if owns_snapshot:
+            self.db.execute("BEGIN")
+        try:
+            return method(self, *args, **kwargs)
+        finally:
+            if owns_snapshot and self.db.in_transaction:
+                self.db.rollback()
+
+    return wrapper
+
+
+def _with_immediate_snapshot(method: Any) -> Any:
+    """Serialize a recall that also persists deterministic read telemetry."""
+
+    @functools.wraps(method)
+    def wrapper(self: Any, *args: Any, **kwargs: Any) -> Any:
+        self._ensure_open()
+        owns_transaction = not self.db.in_transaction
+        if owns_transaction:
+            self.db.execute("BEGIN IMMEDIATE")
+        try:
+            result = method(self, *args, **kwargs)
+        except BaseException:
+            if owns_transaction and self.db.in_transaction:
+                self.db.rollback()
+            raise
+        if owns_transaction and self.db.in_transaction:
+            self.db.commit()
+        return result
+
+    return wrapper
+
+
 def _bounded_limit(value: int, maximum: int) -> int:
     return max(0, min(int(value), maximum))
 
@@ -898,6 +1031,15 @@ class Memory:
             isolation_level=None,
         )
         self.db.row_factory = sqlite3.Row
+        self.db.create_function(
+            "jarvis_sha256", 1, _sqlite_sha256_text, deterministic=True
+        )
+        self.db.create_function(
+            "jarvis_ordinary_memory_provenance_sha256",
+            7,
+            _sqlite_ordinary_memory_provenance_sha256,
+            deterministic=True,
+        )
         try:
             self.db.execute("PRAGMA foreign_keys=ON")
             self.db.execute(f"PRAGMA busy_timeout={busy_timeout_ms}")
@@ -1247,6 +1389,22 @@ class Memory:
             if version < 43:
                 self._migrate_v43()
                 version = 43
+            quality_schema_healthy = False
+            if version < 44:
+                self._migrate_v44()
+                version = 44
+            else:
+                quality_schema_healthy = (
+                    self._learning_quality_schema_healthy_locked()
+                )
+                if not quality_schema_healthy:
+                    self._migrate_v44()
+            # Decisions are derived from authenticated canonical rows. Repair
+            # missing/stale decisions and deterministically restore trigger
+            # definitions on every open, including a healthy-looking v44 DB.
+            self._reconcile_learning_quality_assessments_locked(
+                reinstall_triggers=not quality_schema_healthy
+            )
             self.db.execute(f"PRAGMA user_version={version}")
 
     def _migrate_v1(self) -> None:
@@ -3564,6 +3722,280 @@ class Memory:
                END"""
         )
 
+    def _migrate_v44(self) -> None:
+        """Replace negative quarantine membership with explicit tri-state decisions."""
+        for trigger in (
+            "ordinary_memory_quality_memory_changed",
+            "ordinary_memory_quality_provenance_inserted",
+            "ordinary_memory_quality_provenance_changed",
+            "ordinary_memory_quality_provenance_deleted",
+            "ordinary_memory_quality_assessment_inserted",
+            "ordinary_memory_quality_assessment_changed",
+            "ordinary_memory_quality_assessment_deleted",
+        ):
+            self.db.execute(f"DROP TRIGGER IF EXISTS {trigger}")
+        self.db.execute("DROP TABLE IF EXISTS ordinary_memory_quality_quarantine")
+        self.db.execute("DROP TABLE IF EXISTS ordinary_memory_quality_assessments")
+        self._create_learning_quality_assessment_schema_locked()
+
+    def _create_learning_quality_assessment_schema_locked(self) -> None:
+        self.db.execute(
+            f"""CREATE TABLE IF NOT EXISTS ordinary_memory_quality_assessments (
+                    memory_id INTEGER PRIMARY KEY,
+                    recorded_at TEXT NOT NULL,
+                    contract_version INTEGER NOT NULL CHECK(
+                        contract_version={TRAINING_QUALITY_CONTRACT_VERSION}
+                    ),
+                    recall_allowed INTEGER NOT NULL CHECK(recall_allowed IN (0,1)),
+                    content_sha256 TEXT NOT NULL CHECK(length(content_sha256)=64),
+                    source_is_null INTEGER NOT NULL CHECK(source_is_null IN (0,1)),
+                    source_sha256 TEXT NOT NULL CHECK(length(source_sha256)=64),
+                    provenance_sha256 TEXT NOT NULL CHECK(length(provenance_sha256)=64),
+                    FOREIGN KEY(memory_id) REFERENCES memories(id) ON DELETE CASCADE
+                )"""
+        )
+
+    def _learning_quality_schema_healthy_locked(self) -> bool:
+        table = self.db.execute(
+            """SELECT 1 FROM sqlite_master
+               WHERE type='table' AND name='ordinary_memory_quality_assessments'"""
+        ).fetchone()
+        if table is None:
+            return False
+        columns = {
+            str(row["name"]) for row in self.db.execute(
+                "PRAGMA table_info(ordinary_memory_quality_assessments)"
+            ).fetchall()
+        }
+        if columns != {
+            "memory_id", "recorded_at", "contract_version", "recall_allowed",
+            "content_sha256", "source_is_null", "source_sha256",
+            "provenance_sha256",
+        }:
+            return False
+        def canonical_sql(value: str) -> str:
+            return " ".join(
+                str(value).replace(" IF NOT EXISTS", "", 1).split()
+            ).casefold()
+
+        expected: dict[str, str] = {}
+        for statement in self._learning_quality_assessment_trigger_statements():
+            match = re.match(
+                r"\s*CREATE\s+TRIGGER(?:\s+IF\s+NOT\s+EXISTS)?\s+([^\s]+)",
+                statement,
+                re.I,
+            )
+            if match is None:
+                return False
+            expected[match.group(1)] = canonical_sql(statement)
+        actual = {
+            str(row["name"]): canonical_sql(str(row["sql"] or ""))
+            for row in self.db.execute(
+                """SELECT name, sql FROM sqlite_master
+                   WHERE type='trigger' AND name LIKE 'ordinary_memory_quality_%'"""
+            ).fetchall()
+        }
+        return actual == expected
+
+    @staticmethod
+    def _learning_quality_assessment_trigger_statements() -> tuple[str, ...]:
+        return (
+            """CREATE TRIGGER IF NOT EXISTS ordinary_memory_quality_memory_changed
+               AFTER UPDATE OF created_at,kind,content,source ON memories
+               WHEN NEW.created_at IS NOT OLD.created_at
+                 OR NEW.kind IS NOT OLD.kind
+                 OR NEW.content IS NOT OLD.content
+                 OR NEW.source IS NOT OLD.source
+               BEGIN
+                   DELETE FROM ordinary_memory_quality_assessments
+                   WHERE memory_id IN (OLD.id, NEW.id);
+                   DELETE FROM memory_embeddings WHERE memory_id IN (OLD.id, NEW.id);
+                   DELETE FROM memory_embedding_leases
+                   WHERE memory_id IN (OLD.id, NEW.id);
+               END""",
+            """CREATE TRIGGER IF NOT EXISTS ordinary_memory_quality_provenance_inserted
+               AFTER INSERT ON ordinary_memory_provenance
+               BEGIN
+                   DELETE FROM ordinary_memory_quality_assessments
+                   WHERE memory_id=NEW.memory_id;
+                   DELETE FROM memory_embeddings WHERE memory_id=NEW.memory_id;
+                   DELETE FROM memory_embedding_leases WHERE memory_id=NEW.memory_id;
+               END""",
+            """CREATE TRIGGER IF NOT EXISTS ordinary_memory_quality_provenance_changed
+               AFTER UPDATE OF memory_id,origin,eligible,content_sha256,provenance_sha256
+               ON ordinary_memory_provenance
+               WHEN NEW.memory_id IS NOT OLD.memory_id
+                 OR NEW.origin IS NOT OLD.origin
+                 OR NEW.eligible IS NOT OLD.eligible
+                 OR NEW.content_sha256 IS NOT OLD.content_sha256
+                 OR NEW.provenance_sha256 IS NOT OLD.provenance_sha256
+               BEGIN
+                   DELETE FROM ordinary_memory_quality_assessments
+                   WHERE memory_id IN (OLD.memory_id, NEW.memory_id);
+                   DELETE FROM memory_embeddings
+                   WHERE memory_id IN (OLD.memory_id, NEW.memory_id);
+                   DELETE FROM memory_embedding_leases
+                   WHERE memory_id IN (OLD.memory_id, NEW.memory_id);
+               END""",
+            """CREATE TRIGGER IF NOT EXISTS ordinary_memory_quality_provenance_deleted
+               AFTER DELETE ON ordinary_memory_provenance
+               BEGIN
+                   DELETE FROM ordinary_memory_quality_assessments
+                   WHERE memory_id=OLD.memory_id;
+                   DELETE FROM memory_embeddings WHERE memory_id=OLD.memory_id;
+                   DELETE FROM memory_embedding_leases WHERE memory_id=OLD.memory_id;
+               END""",
+            """CREATE TRIGGER IF NOT EXISTS ordinary_memory_quality_assessment_inserted
+               AFTER INSERT ON ordinary_memory_quality_assessments
+               BEGIN
+                   DELETE FROM memory_embeddings WHERE memory_id=NEW.memory_id;
+                   DELETE FROM memory_embedding_leases WHERE memory_id=NEW.memory_id;
+               END""",
+            """CREATE TRIGGER IF NOT EXISTS ordinary_memory_quality_assessment_changed
+               AFTER UPDATE ON ordinary_memory_quality_assessments
+               WHEN NEW.memory_id IS NOT OLD.memory_id
+                 OR NEW.contract_version IS NOT OLD.contract_version
+                 OR NEW.recall_allowed IS NOT OLD.recall_allowed
+                 OR NEW.content_sha256 IS NOT OLD.content_sha256
+                 OR NEW.source_is_null IS NOT OLD.source_is_null
+                 OR NEW.source_sha256 IS NOT OLD.source_sha256
+                 OR NEW.provenance_sha256 IS NOT OLD.provenance_sha256
+               BEGIN
+                   DELETE FROM ordinary_memory_quality_assessments
+                   WHERE memory_id IN (OLD.memory_id, NEW.memory_id);
+                   DELETE FROM memory_embeddings
+                   WHERE memory_id IN (OLD.memory_id, NEW.memory_id);
+                   DELETE FROM memory_embedding_leases
+                   WHERE memory_id IN (OLD.memory_id, NEW.memory_id);
+               END""",
+            """CREATE TRIGGER IF NOT EXISTS ordinary_memory_quality_assessment_deleted
+               AFTER DELETE ON ordinary_memory_quality_assessments
+               BEGIN
+                   DELETE FROM memory_embeddings WHERE memory_id=OLD.memory_id;
+                   DELETE FROM memory_embedding_leases WHERE memory_id=OLD.memory_id;
+               END""",
+        )
+
+    def _install_learning_quality_assessment_triggers_locked(self) -> None:
+        # A same-name trigger is not proof of the expected fail-closed body.
+        # Recreate every trigger in this namespace inside the startup
+        # transaction so direct database edits cannot preserve a no-op or an
+        # extra trigger with side effects.
+        rows = self.db.execute(
+            """SELECT name FROM sqlite_master
+               WHERE type='trigger' AND name LIKE 'ordinary_memory_quality_%'"""
+        ).fetchall()
+        for row in rows:
+            quoted_name = str(row["name"]).replace('"', '""')
+            self.db.execute(f'DROP TRIGGER IF EXISTS "{quoted_name}"')
+        for statement in self._learning_quality_assessment_trigger_statements():
+            self.db.execute(statement)
+
+    def _reconcile_learning_quality_assessments_locked(
+        self,
+        *,
+        reinstall_triggers: bool,
+    ) -> None:
+        """Repair derived decisions/triggers from canonical rows on every open."""
+        self._create_learning_quality_assessment_schema_locked()
+        rows = self.db.execute(
+            """SELECT m.id AS memory_id, m.created_at, m.kind, m.content, m.source,
+                      omp.origin, omp.eligible, omp.content_sha256,
+                      omp.provenance_sha256
+               FROM memories AS m
+               LEFT JOIN ordinary_memory_provenance AS omp ON omp.memory_id=m.id
+               LEFT JOIN ordinary_memory_quality_assessments AS omqa
+                 ON omqa.memory_id=m.id
+               WHERE lower(m.kind)='learning'
+                 AND omqa.memory_id IS NULL"""
+        ).fetchall()
+        stamp = now_iso()
+        for row in rows:
+            decision = _learning_quality_assessment(
+                row["memory_id"], row["created_at"], row["kind"], row["content"],
+                row["source"], row["origin"], row["eligible"],
+                row["content_sha256"], row["provenance_sha256"],
+            )
+            memory_id = int(row["memory_id"])
+            if decision is None:
+                self.db.execute(
+                    """DELETE FROM ordinary_memory_quality_assessments
+                       WHERE memory_id=?""",
+                    (memory_id,),
+                )
+                continue
+            source_sha256 = hashlib.sha256(
+                str(row["source"] or "").encode("utf-8")
+            ).hexdigest()
+            self.db.execute(
+                """INSERT INTO ordinary_memory_quality_assessments(
+                       memory_id, recorded_at, contract_version, recall_allowed,
+                       content_sha256, source_is_null, source_sha256,
+                       provenance_sha256
+                   ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                   ON CONFLICT(memory_id) DO UPDATE SET
+                       recorded_at=excluded.recorded_at,
+                       contract_version=excluded.contract_version,
+                       recall_allowed=excluded.recall_allowed,
+                       content_sha256=excluded.content_sha256,
+                       source_is_null=excluded.source_is_null,
+                       source_sha256=excluded.source_sha256,
+                       provenance_sha256=excluded.provenance_sha256
+                   WHERE contract_version IS NOT excluded.contract_version
+                      OR recall_allowed IS NOT excluded.recall_allowed
+                      OR content_sha256 IS NOT excluded.content_sha256
+                      OR source_is_null IS NOT excluded.source_is_null
+                      OR source_sha256 IS NOT excluded.source_sha256
+                      OR provenance_sha256 IS NOT excluded.provenance_sha256""",
+                (
+                    memory_id, stamp, TRAINING_QUALITY_CONTRACT_VERSION,
+                    int(decision), str(row["content_sha256"]),
+                    int(row["source"] is None),
+                    source_sha256,
+                    str(row["provenance_sha256"]),
+                ),
+            )
+        self.db.execute(
+            """DELETE FROM ordinary_memory_quality_assessments
+               WHERE NOT EXISTS (
+                   SELECT 1 FROM memories AS m
+                   WHERE m.id=ordinary_memory_quality_assessments.memory_id
+                     AND lower(m.kind)='learning'
+               )"""
+        )
+        self.db.execute(
+            """DELETE FROM memory_embeddings
+               WHERE EXISTS (
+                   SELECT 1 FROM memories AS m
+                   LEFT JOIN ordinary_memory_quality_assessments AS omqa
+                     ON omqa.memory_id=m.id
+                   WHERE m.id=memory_embeddings.memory_id
+                     AND lower(m.kind)='learning'
+                     AND (
+                         COALESCE(omqa.recall_allowed, 0)<>1
+                         OR memory_embeddings.content_sha256
+                            IS NOT omqa.content_sha256
+                     )
+               )"""
+        )
+        self.db.execute(
+            """DELETE FROM memory_embedding_leases
+               WHERE EXISTS (
+                   SELECT 1 FROM memories AS m
+                   LEFT JOIN ordinary_memory_quality_assessments AS omqa
+                     ON omqa.memory_id=m.id
+                   WHERE m.id=memory_embedding_leases.memory_id
+                     AND lower(m.kind)='learning'
+                     AND (
+                         COALESCE(omqa.recall_allowed, 0)<>1
+                         OR memory_embedding_leases.content_sha256
+                            IS NOT omqa.content_sha256
+                     )
+               )"""
+        )
+        if reinstall_triggers:
+            self._install_learning_quality_assessment_triggers_locked()
+
     @staticmethod
     def _project_id(value: int | None) -> int:
         if value is None:
@@ -5150,6 +5582,7 @@ class Memory:
             results.append(item)
         return results
 
+    @_with_read_snapshot
     def conversation_scoped_memory_messages(
         self,
         conversation_id: int,
@@ -5909,7 +6342,7 @@ class Memory:
         )
 
     def _sync_learning_quality_quarantine_locked(self, memory_id: int) -> None:
-        """Refresh one derived quality marker after canonical provenance writes."""
+        """Refresh one explicit learning-quality decision after canonical writes."""
         row = self.db.execute(
             """SELECT m.id AS memory_id, m.created_at, m.kind, m.content, m.source,
                       omp.origin, omp.eligible, omp.content_sha256,
@@ -5919,52 +6352,87 @@ class Memory:
                WHERE m.id=?""",
             (int(memory_id),),
         ).fetchone()
-        if row is None or not _learning_quality_quarantined_record(
-            row["memory_id"],
-            row["created_at"],
-            row["kind"],
-            row["content"],
-            row["source"],
-            row["origin"],
-            row["eligible"],
-            row["content_sha256"],
-            row["provenance_sha256"],
-        ):
+        decision = None if row is None else _learning_quality_assessment(
+            row["memory_id"], row["created_at"], row["kind"], row["content"],
+            row["source"], row["origin"], row["eligible"],
+            row["content_sha256"], row["provenance_sha256"],
+        )
+        if row is None or decision is None:
             self.db.execute(
-                "DELETE FROM ordinary_memory_quality_quarantine WHERE memory_id=?",
+                "DELETE FROM ordinary_memory_quality_assessments WHERE memory_id=?",
+                (int(memory_id),),
+            )
+            self.db.execute(
+                "DELETE FROM memory_embeddings WHERE memory_id=?", (int(memory_id),)
+            )
+            self.db.execute(
+                "DELETE FROM memory_embedding_leases WHERE memory_id=?",
                 (int(memory_id),),
             )
             return
+        source_sha256 = hashlib.sha256(
+            str(row["source"] or "").encode("utf-8")
+        ).hexdigest()
+        expected = (
+            TRAINING_QUALITY_CONTRACT_VERSION,
+            int(decision),
+            str(row["content_sha256"]),
+            int(row["source"] is None),
+            source_sha256,
+            str(row["provenance_sha256"]),
+        )
+        current = self.db.execute(
+            """SELECT contract_version, recall_allowed, content_sha256,
+                      source_is_null, source_sha256, provenance_sha256
+               FROM ordinary_memory_quality_assessments WHERE memory_id=?""",
+            (int(memory_id),),
+        ).fetchone()
+        if current is not None and tuple(current) != expected:
+            # The assessment UPDATE trigger invalidates changed rows. Delete
+            # first, then insert the freshly derived decision atomically.
+            self.db.execute(
+                "DELETE FROM ordinary_memory_quality_assessments WHERE memory_id=?",
+                (int(memory_id),),
+            )
         self.db.execute(
-            """INSERT INTO ordinary_memory_quality_quarantine(
-                   memory_id, recorded_at, contract_version, content_sha256,
-                   source_sha256, provenance_sha256
-               ) VALUES (?, ?, ?, ?, ?, ?)
+            """INSERT INTO ordinary_memory_quality_assessments(
+                   memory_id, recorded_at, contract_version, recall_allowed,
+                   content_sha256, source_is_null, source_sha256,
+                   provenance_sha256
+               ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                ON CONFLICT(memory_id) DO UPDATE SET
                    recorded_at=excluded.recorded_at,
                    contract_version=excluded.contract_version,
+                   recall_allowed=excluded.recall_allowed,
                    content_sha256=excluded.content_sha256,
+                   source_is_null=excluded.source_is_null,
                    source_sha256=excluded.source_sha256,
-                   provenance_sha256=excluded.provenance_sha256""",
+                   provenance_sha256=excluded.provenance_sha256
+               WHERE contract_version IS NOT excluded.contract_version
+                  OR recall_allowed IS NOT excluded.recall_allowed
+                  OR content_sha256 IS NOT excluded.content_sha256
+                  OR source_is_null IS NOT excluded.source_is_null
+                  OR source_sha256 IS NOT excluded.source_sha256
+                  OR provenance_sha256 IS NOT excluded.provenance_sha256""",
             (
                 int(memory_id),
                 now_iso(),
                 TRAINING_QUALITY_CONTRACT_VERSION,
+                int(decision),
                 str(row["content_sha256"]),
-                hashlib.sha256(
-                    str(row["source"] or "").encode("utf-8")
-                ).hexdigest(),
+                int(row["source"] is None),
+                source_sha256,
                 str(row["provenance_sha256"]),
             ),
         )
-        self.db.execute(
-            "DELETE FROM memory_embeddings WHERE memory_id=?",
-            (int(memory_id),),
-        )
-        self.db.execute(
-            "DELETE FROM memory_embedding_leases WHERE memory_id=?",
-            (int(memory_id),),
-        )
+        if not decision:
+            self.db.execute(
+                "DELETE FROM memory_embeddings WHERE memory_id=?", (int(memory_id),)
+            )
+            self.db.execute(
+                "DELETE FROM memory_embedding_leases WHERE memory_id=?",
+                (int(memory_id),),
+            )
 
     def _ordinary_memory_provenance_validation(
         self,
@@ -6042,6 +6510,30 @@ class Memory:
             actual_source_sha256 = hashlib.sha256(
                 (source or "").encode("utf-8")
             ).hexdigest()
+            quality_binding: tuple[Any, ...] | None = None
+            if kind.casefold() == "learning":
+                quality_allowed_raw = row["ordinary_quality_allowed"]
+                quality_contract_raw = row["ordinary_quality_contract_version"]
+                quality_content_sha256 = str(
+                    row["ordinary_quality_content_sha256"] or ""
+                )
+                quality_source_is_null_raw = row[
+                    "ordinary_quality_source_is_null"
+                ]
+                quality_source_sha256 = str(
+                    row["ordinary_quality_source_sha256"] or ""
+                )
+                quality_provenance_sha256 = str(
+                    row["ordinary_quality_provenance_sha256"] or ""
+                )
+                quality_binding = (
+                    quality_allowed_raw,
+                    quality_contract_raw,
+                    quality_content_sha256,
+                    quality_source_is_null_raw,
+                    quality_source_sha256,
+                    quality_provenance_sha256,
+                )
         except (KeyError, TypeError, ValueError, OverflowError):
             return False
         cache = _ACTIVE_RECALL_CACHE.get()
@@ -6060,6 +6552,10 @@ class Memory:
                 bytes.fromhex(actual_source_sha256),
                 _ordinary_cache_field_digest(stored_content_sha256),
                 _ordinary_cache_field_digest(stored_provenance_sha256),
+                None if quality_binding is None else tuple(
+                    _ordinary_cache_field_digest(value)
+                    for value in quality_binding
+                ),
             )
             cached = cache.get(cache_key)
         if cached is not None:
@@ -6091,10 +6587,33 @@ class Memory:
                     or contains_private_identifier(recall_material)
                 )
             if valid and kind.casefold() == "learning":
-                valid = learning_memory_record_allowed(
-                    content=content,
-                    source=source or "",
-                )
+                if quality_binding is None:
+                    valid = False
+                else:
+                    (
+                        quality_allowed_raw,
+                        quality_contract_raw,
+                        quality_content_sha256,
+                        quality_source_is_null_raw,
+                        quality_source_sha256,
+                        quality_provenance_sha256,
+                    ) = quality_binding
+                    valid = (
+                        quality_allowed_raw is not None
+                        and int(quality_allowed_raw) == 1
+                        and int(quality_contract_raw)
+                        == TRAINING_QUALITY_CONTRACT_VERSION
+                        and quality_content_sha256 == actual_content_sha256
+                        and int(quality_source_is_null_raw)
+                        == int(source is None)
+                        and quality_source_sha256 == actual_source_sha256
+                        and quality_provenance_sha256
+                        == stored_provenance_sha256
+                        and learning_memory_record_allowed(
+                            content=content,
+                            source=source or "",
+                        )
+                    )
         except (TypeError, ValueError, OverflowError):
             valid = False
         if cache is not None and cache_key is not None:
@@ -6117,13 +6636,15 @@ class Memory:
 
     def _ordinary_memory_recall_eligible(self, memory_id: int) -> bool:
         row = self.db.execute(
-            """SELECT m.id, m.created_at, m.kind, m.content, m.source,
+            f"""SELECT m.id, m.created_at, m.kind, m.content, m.source,
                       omp.origin AS ordinary_origin,
                       omp.eligible AS ordinary_eligible,
                       omp.content_sha256 AS ordinary_content_sha256,
-                      omp.provenance_sha256 AS ordinary_provenance_sha256
+                      omp.provenance_sha256 AS ordinary_provenance_sha256,
+                      {_LEARNING_QUALITY_SELECT_SQL}
                FROM memories AS m
                LEFT JOIN ordinary_memory_provenance AS omp ON omp.memory_id=m.id
+               {_LEARNING_QUALITY_ASSESSMENT_JOIN_SQL}
                WHERE m.id=?""",
             (int(memory_id),),
         ).fetchone()
@@ -6139,9 +6660,10 @@ class Memory:
     ) -> bool:
         """Keep private claim material local and outside model-facing recall."""
         row = self.db.execute(
-            """SELECT c.id AS claim_id, c.memory_id, c.created_at,
+            """SELECT c.id AS claim_id, c.memory_id, c.created_at, c.updated_at,
+                      c.claim_key,
                       c.subject, c.predicate, c.value, c.value_sha256,
-                      c.source, c.authority, c.scope, c.status
+                      c.source, c.authority, c.confidence, c.scope, c.status
                FROM memory_claims AS c
                WHERE c.memory_id=?
                  AND c.status IN ('active', 'disputed')""",
@@ -6153,8 +6675,9 @@ class Memory:
             [row], project_id=project_id
         )
 
-    @staticmethod
+    @classmethod
     def _claim_recall_material_eligible(
+        cls,
         row: Mapping[str, Any],
         memory_row: Mapping[str, Any] | None,
         evidence_rows: Sequence[Mapping[str, Any]],
@@ -6164,7 +6687,25 @@ class Memory:
         """Validate one already-fetched claim without issuing database reads."""
         if memory_row is None or str(memory_row["memory_kind"] or "") != "claim":
             return False
-        if str(row["status"] or "") not in {"active", "disputed"}:
+        row_keys = set(row.keys())
+        created_at = str(row["created_at"] or "")
+        updated_at = str(
+            row["updated_at"] if "updated_at" in row_keys else created_at
+        )
+        if not (
+            _recall_timestamp_valid(created_at)
+            and _recall_timestamp_valid(updated_at)
+        ):
+            return False
+        try:
+            if datetime.fromisoformat(updated_at.replace("Z", "+00:00")) < (
+                datetime.fromisoformat(created_at.replace("Z", "+00:00"))
+            ):
+                return False
+        except ValueError:
+            return False
+        status = str(row["status"] or "")
+        if status not in {"active", "disputed"}:
             return False
         scope = str(row["scope"] or "")
         if scope not in visible_scopes:
@@ -6174,8 +6715,27 @@ class Memory:
         value = str(row["value"] or "")
         source = str(row["source"] or "")
         authority = str(row["authority"] or "")
+        if authority not in _CLAIM_AUTHORITY_WEIGHT:
+            return False
+        if "claim_key" in row_keys and str(row["claim_key"] or "") != (
+            cls._claim_identity(subject, predicate)
+        ):
+            return False
+        if "confidence" in row_keys:
+            try:
+                confidence = float(row["confidence"])
+            except (TypeError, ValueError):
+                return False
+            if not math.isfinite(confidence) or not 0.0 <= confidence <= 1.0:
+                return False
+        memory_created_at = str(memory_row["memory_created_at"] or "")
+        if (
+            not _recall_timestamp_valid(memory_created_at)
+            or memory_created_at != created_at
+        ):
+            return False
         canonical_content = _claim_memory_content(
-            subject, predicate, value, scope, str(row["created_at"])
+            subject, predicate, value, scope, created_at
         )
         if str(memory_row["memory_content"] or "") != canonical_content:
             # Claims are returned from their structured fields.  If either the
@@ -6226,15 +6786,29 @@ class Memory:
                 break
         if not supported:
             return False
-        # Scan fields independently.  Joining a benign predicate such as
+        # Scan atomic fields independently. Joining a benign predicate such as
         # "review token" to its value with punctuation can look like a
         # credential assignment even though neither stored field is secret.
-        # Inputs are also checked at the write boundary; this second check
-        # protects recall if the database is modified out of band.
+        # The canonical memory content/source were authenticated by exact
+        # equality above, so scanning those synthesized strings again would
+        # introduce the same cross-field false positive. Inputs are also
+        # checked at the write boundary; this second check protects recall if
+        # the database is modified out of band.
         return all(
             not contains_secret(field)
             and not contains_private_identifier(field)
-            for field in (subject, predicate, value, source)
+            for field in (
+                created_at,
+                updated_at,
+                subject,
+                predicate,
+                value,
+                source,
+                authority,
+                scope,
+                status,
+                memory_created_at,
+            )
         )
 
     def _claim_rows_recall_eligible(
@@ -6267,7 +6841,8 @@ class Memory:
                 chunk = memory_ids[offset:offset + _CLAIM_RECALL_BATCH_SIZE]
                 placeholders = ",".join("?" for _memory_id in chunk)
                 memory_rows = self.db.execute(
-                    f"""SELECT id AS memory_id, kind AS memory_kind,
+                    f"""SELECT id AS memory_id, created_at AS memory_created_at,
+                               kind AS memory_kind,
                                content AS memory_content, source AS memory_source
                         FROM memories WHERE id IN ({placeholders})""",
                     chunk,
@@ -6410,13 +6985,22 @@ class Memory:
             if len(eligible) >= max_results:
                 break
             try:
-                recall_eligible = (
-                    self._claim_memory_recall_eligible(int(item["memory_id"]))
-                    if str(item["kind"]) == "claim"
-                    else self._ordinary_memory_recall_eligible(
-                        int(item["memory_id"])
+                if str(item["kind"]) == "claim":
+                    recall_eligible = (
+                        self._claim_output_snapshot_safe(item)
+                        and self._claim_memory_recall_eligible(
+                            int(item["memory_id"])
+                        )
                     )
-                )
+                else:
+                    snapshot = dict(item)
+                    snapshot["id"] = int(item["memory_id"])
+                    recall_eligible = (
+                        self._ordinary_memory_row_recall_eligible(snapshot)
+                        and self._ordinary_memory_recall_eligible(
+                            int(item["memory_id"])
+                        )
+                    )
             except sqlite3.DatabaseError:
                 return [], True
             if not recall_eligible:
@@ -6429,6 +7013,12 @@ class Memory:
                 "ordinary_eligible",
                 "ordinary_content_sha256",
                 "ordinary_provenance_sha256",
+                "ordinary_quality_allowed",
+                "ordinary_quality_contract_version",
+                "ordinary_quality_content_sha256",
+                "ordinary_quality_source_is_null",
+                "ordinary_quality_source_sha256",
+                "ordinary_quality_provenance_sha256",
             ):
                 item.pop(field, None)
             eligible.append(item)
@@ -6436,6 +7026,32 @@ class Memory:
             for item in eligible:
                 item.pop("memory_id", None)
         return eligible, shadowed
+
+    @staticmethod
+    def _claim_output_snapshot_safe(row: Mapping[str, Any]) -> bool:
+        """Screen every claim-memory field that can leave generic recall."""
+        try:
+            if str(row["kind"] or "") != "claim":
+                return False
+            fields = (
+                str(row["created_at"] or ""),
+                str(row["content"] or ""),
+                str(row["source"] or ""),
+                str(row["claim_status"] or ""),
+                str(row["claim_authority"] or ""),
+            )
+        except (KeyError, TypeError):
+            return False
+        return (
+            _recall_timestamp_valid(fields[0])
+            and fields[3] in {"active", "disputed"}
+            and fields[4] in _CLAIM_AUTHORITY_WEIGHT
+            and all(
+                not contains_secret(field)
+                and not contains_private_identifier(field)
+                for field in fields
+            )
+        )
 
     def _generic_recall_query_rows(
         self,
@@ -6487,9 +7103,10 @@ class Memory:
                JOIN memories AS m ON m.id=memory_fts.rowid
                LEFT JOIN memory_claims AS c ON c.memory_id=m.id
                LEFT JOIN ordinary_memory_provenance AS omp ON omp.memory_id=m.id
+               {_LEARNING_QUALITY_ASSESSMENT_JOIN_SQL}
                WHERE memory_fts MATCH ?
                  AND m.kind<>'lesson'
-                 {_LEARNING_QUALITY_VISIBLE_SQL}
+                 {_LEARNING_QUALITY_LEXICAL_SQL}
                  AND (m.kind<>'claim' OR (
                      c.scope='global' AND c.status IN ('active', 'disputed')
                      {claim_shadow_sql}
@@ -6499,7 +7116,8 @@ class Memory:
                       omp.origin AS ordinary_origin,
                       omp.eligible AS ordinary_eligible,
                       omp.content_sha256 AS ordinary_content_sha256,
-                      omp.provenance_sha256 AS ordinary_provenance_sha256
+                      omp.provenance_sha256 AS ordinary_provenance_sha256,
+                      {_LEARNING_QUALITY_SELECT_SQL}
                {visible_sql}
                ORDER BY memory_fts.rank, m.id DESC LIMIT ?"""
         def fts_rows(match: str) -> list[sqlite3.Row] | None:
@@ -6575,14 +7193,16 @@ class Memory:
                                omp.origin AS ordinary_origin,
                                omp.eligible AS ordinary_eligible,
                                omp.content_sha256 AS ordinary_content_sha256,
-                               omp.provenance_sha256 AS ordinary_provenance_sha256
+                               omp.provenance_sha256 AS ordinary_provenance_sha256,
+                               {_LEARNING_QUALITY_SELECT_SQL}
                         FROM memories AS m
                         LEFT JOIN memory_claims AS c ON c.memory_id=m.id
                         LEFT JOIN ordinary_memory_provenance AS omp
                           ON omp.memory_id=m.id
+                        {_LEARNING_QUALITY_ASSESSMENT_JOIN_SQL}
                         WHERE ({where})
                           AND m.kind<>'lesson'
-                          {_LEARNING_QUALITY_VISIBLE_SQL}
+                          {_LEARNING_QUALITY_LEXICAL_SQL}
                           AND (m.kind<>'claim' OR (
                               c.scope='global' AND c.status IN ('active', 'disputed')
                               {claim_shadow_sql}
@@ -8354,6 +8974,7 @@ class Memory:
             }
 
     @_with_recall_cache
+    @_with_immediate_snapshot
     def current_claims(
         self,
         query: str = "",
@@ -8381,6 +9002,11 @@ class Memory:
         clock_mode = str(clock_mode).strip().casefold()
         if clock_mode not in {"disabled", "shadow", "enforce"}:
             raise ValueError("Claim clock mode must be disabled, shadow, or enforce")
+        read_at = str(as_of or now_iso())
+        if clock_mode != "disabled" and not _recall_timestamp_valid(read_at):
+            raise ValueError(
+                "Claim clock as_of must be a privacy-clean timezone-aware timestamp"
+            )
         stale_threshold = float(stale_threshold)
         if not math.isfinite(stale_threshold) or not 0.5 <= stale_threshold <= 0.99:
             raise ValueError("Claim stale threshold must be between 0.5 and 0.99")
@@ -8583,11 +9209,13 @@ class Memory:
                         or str(row["claim_key"]) not in project_identity_keys
                     )
                 }
-            raw_named_subject_heads: set[str] = set()
+            explicit_named_subject_heads: set[str] = set()
+            support_inferred_subject_heads: set[str] = set()
             for identity_row in identity_rows_by_id.values():
-                identity_cache_allowed = (
-                    int(identity_row["claim_id"]) in eligible_candidate_ids
-                )
+                # This is a later, narrower SELECT with only a partial claim
+                # snapshot. Never transfer cache admission by ID from the
+                # earlier full-row validation.
+                identity_cache_allowed = False
                 identity_subject_terms = _memory_tokens(
                     str(identity_row["subject"]),
                     meaningful_only=True,
@@ -8620,15 +9248,21 @@ class Memory:
                     meaningful_only=True,
                     cache_allowed=identity_cache_allowed,
                 ))
-                if (
-                    proper_or_structured_head
-                    or _claim_matched_query_terms(
-                        raw_query_term_set,
-                        identity_support_terms,
-                        cache_allowed=identity_cache_allowed,
-                    )
+                if proper_or_structured_head:
+                    explicit_named_subject_heads.add(identity_head)
+                elif _claim_matched_query_terms(
+                    raw_query_term_set,
+                    identity_support_terms,
+                    cache_allowed=identity_cache_allowed,
                 ):
-                    raw_named_subject_heads.add(identity_head)
+                    support_inferred_subject_heads.add(identity_head)
+            # An explicit proper/structured subject is stronger evidence than
+            # a generic head inferred only because its predicate shares topic
+            # words with the query. Without this priority, filler claims such
+            # as "cluster node" can manufacture false identity ambiguity.
+            raw_named_subject_heads = (
+                explicit_named_subject_heads or support_inferred_subject_heads
+            )
             if (
                 len(raw_named_subject_heads) > 1
                 and not explicit_multi_fact_query
@@ -9198,23 +9832,36 @@ class Memory:
                    FROM memory_claim_volatility WHERE predicate=?""",
                 (normalized,),
             ).fetchone()
-            support = self.db.execute(
-                """SELECT MAX(observed_at) AS supported_at
-                   FROM memory_claim_observations WHERE claim_id=?""",
+            support_rows = self.db.execute(
+                """SELECT observed_at
+                   FROM memory_claim_observations WHERE claim_id=?
+                   ORDER BY id DESC LIMIT 4001""",
                 (int(item["claim_id"]),),
-            ).fetchone()
+            ).fetchall()
             hazard = (
                 float(fit["hazard_per_day"])
                 if fit is not None else DEFAULT_HAZARD_PER_DAY
             )
             pair_count = int(fit["pair_count"]) if fit is not None else 0
             vocabulary_size = int(fit["vocabulary_size"]) if fit is not None else 2
-            supported_at = str(
-                support["supported_at"]
-                if support is not None and support["supported_at"]
-                else item["updated_at"]
-            )
-            elapsed = claim_age_days(supported_at, as_of)
+            supported_at = str(item["updated_at"])
+            if len(support_rows) <= 4000 and _recall_timestamp_valid(read_at):
+                read_time = datetime.fromisoformat(
+                    read_at.replace("Z", "+00:00")
+                )
+                valid_support: list[tuple[datetime, str]] = []
+                for support in support_rows:
+                    candidate = str(support["observed_at"] or "")
+                    if not _recall_timestamp_valid(candidate):
+                        continue
+                    parsed_candidate = datetime.fromisoformat(
+                        candidate.replace("Z", "+00:00")
+                    )
+                    if parsed_candidate <= read_time:
+                        valid_support.append((parsed_candidate, candidate))
+                if valid_support:
+                    supported_at = max(valid_support, key=lambda pair: pair[0])[1]
+            elapsed = claim_age_days(supported_at, read_at)
             immutable = protected_predicate(normalized)
             stored_confidence = float(item["confidence"])
             effective = claim_effective_confidence(
@@ -9262,7 +9909,7 @@ class Memory:
                        last_read_at=excluded.last_read_at""",
                 (
                     int(item["claim_id"]), stale_read, effective, clock_status,
-                    str(as_of or now_iso()),
+                    read_at,
                 ),
             )
         return items
@@ -9348,6 +9995,9 @@ class Memory:
             vector.append(number)
         if not any(vector):
             raise ValueError("Memory embedding must not be the zero vector")
+        norm = math.hypot(*vector)
+        if not math.isfinite(norm) or norm <= 0:
+            raise ValueError("Memory embedding has an invalid norm")
         return vector
 
     @classmethod
@@ -9358,7 +10008,7 @@ class Memory:
             stored = list(struct.unpack(f"<{len(vector)}f", blob))
         except (OverflowError, struct.error):
             raise ValueError("Memory embedding cannot be represented as float32") from None
-        norm = math.sqrt(sum(component * component for component in stored))
+        norm = math.hypot(*stored)
         if not math.isfinite(norm) or norm <= 0:
             raise ValueError("Memory embedding has an invalid float32 norm")
         return stored, blob, norm
@@ -9377,8 +10027,8 @@ class Memory:
             except struct.error:
                 vector = []
             if vector and all(math.isfinite(value) for value in vector):
-                norm = math.sqrt(sum(value * value for value in vector))
-                if norm > 0:
+                norm = math.hypot(*vector)
+                if math.isfinite(norm) and norm > 0:
                     return vector, norm
         try:
             vector = cls._embedding_vector(
@@ -9386,9 +10036,9 @@ class Memory:
             )
         except (ValueError, json.JSONDecodeError):
             raise ValueError("Stored memory embedding is invalid") from None
-        norm = math.sqrt(sum(value * value for value in vector))
-        if not norm:
-            raise ValueError("Stored memory embedding is zero")
+        norm = math.hypot(*vector)
+        if not math.isfinite(norm) or norm <= 0:
+            raise ValueError("Stored memory embedding has an invalid norm")
         return vector, norm
 
     @staticmethod
@@ -9492,6 +10142,7 @@ class Memory:
                 (MAX_QUERY_EMBEDDING_CACHE,),
             )
 
+    @_with_read_snapshot
     def pending_memory_embeddings(
         self,
         model: str,
@@ -9504,14 +10155,22 @@ class Memory:
         if not limit:
             return []
         rows = self.db.execute(
-            f"""SELECT m.id, m.kind, m.content, e.content_sha256, e.embedding_blob
+            f"""SELECT m.id, m.created_at, m.kind, m.content, m.source,
+                      c.status AS claim_status, c.authority AS claim_authority,
+                      omp.origin AS ordinary_origin,
+                      omp.eligible AS ordinary_eligible,
+                      omp.content_sha256 AS ordinary_content_sha256,
+                      omp.provenance_sha256 AS ordinary_provenance_sha256,
+                      {_LEARNING_QUALITY_SELECT_SQL},
+                      e.content_sha256, e.embedding_blob
                FROM memories AS m
                LEFT JOIN memory_embeddings AS e
                  ON e.memory_id=m.id AND e.model=?
                LEFT JOIN memory_claims AS c ON c.memory_id=m.id
                LEFT JOIN ordinary_memory_provenance AS omp ON omp.memory_id=m.id
+               {_LEARNING_QUALITY_ASSESSMENT_JOIN_SQL}
                WHERE m.kind<>'lesson'
-                 {_LEARNING_QUALITY_VISIBLE_SQL}
+                 {_LEARNING_QUALITY_ALLOWED_SQL}
                  AND (m.kind<>'claim' OR (
                      c.scope='global' AND c.status IN ('active', 'disputed')
                  ))
@@ -9525,11 +10184,19 @@ class Memory:
         ).fetchall()
         pending: list[dict[str, Any]] = []
         for row in rows:
-            if not (
-                self._claim_memory_recall_eligible(int(row["id"]))
-                if str(row["kind"]) == "claim"
-                else self._ordinary_memory_recall_eligible(int(row["id"]))
-            ):
+            if str(row["kind"]) == "claim":
+                snapshot_eligible = self._claim_output_snapshot_safe(row)
+                current_eligible = (
+                    snapshot_eligible
+                    and self._claim_memory_recall_eligible(int(row["id"]))
+                )
+            else:
+                snapshot_eligible = self._ordinary_memory_row_recall_eligible(row)
+                current_eligible = (
+                    snapshot_eligible
+                    and self._ordinary_memory_recall_eligible(int(row["id"]))
+                )
+            if not current_eligible:
                 continue
             content = str(row["content"])
             digest = hashlib.sha256(content.encode("utf-8")).hexdigest()
@@ -9576,8 +10243,9 @@ class Memory:
                    LEFT JOIN memory_claims AS c ON c.memory_id=m.id
                    LEFT JOIN ordinary_memory_provenance AS omp
                      ON omp.memory_id=m.id
+                   {_LEARNING_QUALITY_ASSESSMENT_JOIN_SQL}
                    WHERE m.kind<>'lesson'
-                     {_LEARNING_QUALITY_VISIBLE_SQL}
+                     {_LEARNING_QUALITY_ALLOWED_SQL}
                      AND (m.kind<>'claim' OR (
                          c.scope='global' AND c.status IN ('active', 'disputed')
                      ))
@@ -9755,6 +10423,7 @@ class Memory:
         return 0.5 + (observed - 0.5) * confidence
 
     @_with_recall_cache
+    @_with_read_snapshot
     def semantic_memory_search(
         self,
         query_vector: list[float],
@@ -9772,11 +10441,17 @@ class Memory:
         claim_shadow_sql, claim_shadow_parameters = self._global_claim_shadow_clause(
             project_scope
         )
-        query_norm = math.sqrt(sum(value * value for value in query))
+        query_norm = math.hypot(*query)
         rows = self.db.execute(
             f"""SELECT m.id, m.created_at, m.kind, m.content, m.source,
                       c.status AS claim_status, c.authority AS claim_authority,
-                      e.dimensions, e.embedding_json, e.embedding_blob, e.vector_norm,
+                      omp.origin AS ordinary_origin,
+                      omp.eligible AS ordinary_eligible,
+                      omp.content_sha256 AS ordinary_content_sha256,
+                      omp.provenance_sha256 AS ordinary_provenance_sha256,
+                      {_LEARNING_QUALITY_SELECT_SQL},
+                      e.dimensions, e.content_sha256 AS embedding_content_sha256,
+                      e.embedding_json, e.embedding_blob, e.vector_norm,
                       COALESCE(s.resolved, 0) AS utility_resolved,
                       COALESCE(s.utility, 0.5) AS utility
                FROM memory_embeddings AS e
@@ -9784,9 +10459,10 @@ class Memory:
                LEFT JOIN memory_claims AS c ON c.memory_id=m.id
                LEFT JOIN memory_statistics AS s ON s.memory_id=m.id
                LEFT JOIN ordinary_memory_provenance AS omp ON omp.memory_id=m.id
+               {_LEARNING_QUALITY_ASSESSMENT_JOIN_SQL}
                WHERE e.model=? AND e.dimensions=?
                  AND m.kind<>'lesson'
-                 {_LEARNING_QUALITY_VISIBLE_SQL}
+                 {_LEARNING_QUALITY_ALLOWED_SQL}
                  AND (m.kind<>'claim' OR (
                      c.scope='global' AND c.status IN ('active', 'disputed')
                      {claim_shadow_sql}
@@ -9807,6 +10483,12 @@ class Memory:
         scored: list[tuple[float, int, dict[str, Any]]] = []
         for raw in rows:
             row = dict(raw)
+            content = str(row.get("content") or "")
+            embedded_digest = str(row.pop("embedding_content_sha256", "") or "")
+            if embedded_digest != hashlib.sha256(
+                content.encode("utf-8")
+            ).hexdigest():
+                continue
             try:
                 vector, stored_norm = self._embedding_from_storage(
                     row.pop("embedding_blob", None),
@@ -9817,17 +10499,18 @@ class Memory:
                 continue
             row.pop("vector_norm", None)
             norm = stored_norm
-            if not norm:
+            if not math.isfinite(norm) or norm <= 0:
                 continue
-            dot_product = sum(a * b for a, b in zip(query, vector, strict=True))
-            # OpenAI's v3 embeddings are L2-normalized. Preserve correctness for
-            # custom/test embedders while avoiding a division on the common path.
-            if abs(query_norm - 1.0) <= 1e-3 and abs(norm - 1.0) <= 1e-3:
-                similarity = dot_product
-            else:
-                similarity = dot_product / (query_norm * norm)
-            if similarity <= 0:
+            # Normalize before multiplication so finite high-magnitude inputs
+            # cannot overflow a dot product into inf/NaN and bypass the
+            # non-positive similarity check.
+            similarity = math.fsum(
+                (left / query_norm) * (right / norm)
+                for left, right in zip(query, vector, strict=True)
+            )
+            if not math.isfinite(similarity) or similarity <= 0:
                 continue
+            similarity = min(1.0, similarity)
             utility = self._learned_memory_utility(row)
             adjusted = similarity * (0.9 + 0.2 * utility)
             memory_id = int(row.pop("id"))
@@ -9846,16 +10529,38 @@ class Memory:
         for _adjusted, memory_id, row in scored:
             if len(results) >= limit:
                 break
-            if not (
-                self._claim_memory_recall_eligible(memory_id)
-                if str(row["kind"]) == "claim"
-                else self._ordinary_memory_recall_eligible(memory_id)
-            ):
+            if str(row["kind"]) == "claim":
+                recall_eligible = (
+                    self._claim_output_snapshot_safe(row)
+                    and self._claim_memory_recall_eligible(memory_id)
+                )
+            else:
+                snapshot = dict(row)
+                snapshot["id"] = memory_id
+                recall_eligible = (
+                    self._ordinary_memory_row_recall_eligible(snapshot)
+                    and self._ordinary_memory_recall_eligible(memory_id)
+                )
+            if not recall_eligible:
                 continue
+            for field in (
+                "ordinary_origin",
+                "ordinary_eligible",
+                "ordinary_content_sha256",
+                "ordinary_provenance_sha256",
+                "ordinary_quality_allowed",
+                "ordinary_quality_contract_version",
+                "ordinary_quality_content_sha256",
+                "ordinary_quality_source_is_null",
+                "ordinary_quality_source_sha256",
+                "ordinary_quality_provenance_sha256",
+            ):
+                row.pop(field, None)
             results.append(row)
         return results
 
     @_with_recall_cache
+    @_with_read_snapshot
     def hybrid_memory_search(
         self,
         query: str,
@@ -11103,6 +11808,7 @@ class Memory:
         )
         return lesson_id
 
+    @_with_read_snapshot
     def match_lessons(
         self,
         query: str,
@@ -11112,6 +11818,7 @@ class Memory:
         project_id: int | None = None,
     ) -> list[dict[str, Any]]:
         """Match fresh proven lessons inside one project, or fail closed."""
+        evaluation_at = now_iso()
         if family not in self.PREDICTION_FAMILIES:
             raise ValueError(f"Unknown lesson family: {family}")
         if contains_secret(str(query)):
@@ -11383,7 +12090,9 @@ class Memory:
                 str(row["outcome_status"] or "") == "complete"
                 and self._lesson_provenance_validation(int(row["id"]))[0]
                 and self._lesson_control_validation(
-                    int(row["id"]), project_id=normalized_project
+                    int(row["id"]),
+                    project_id=normalized_project,
+                    as_of=evaluation_at,
                 )[0]
             )
         ]
@@ -11441,7 +12150,9 @@ class Memory:
                 and str(item.get("outcome_status") or "") == "complete"
                 and self._lesson_provenance_validation(memory_id)[0]
                 and self._lesson_control_validation(
-                    memory_id, project_id=normalized_project
+                    memory_id,
+                    project_id=normalized_project,
+                    as_of=evaluation_at,
                 )[0]
             )
             eligibility[memory_id] = valid
@@ -11875,6 +12586,7 @@ class Memory:
             return None
         return canonical.replace("+00:00", "Z")
 
+    @_with_read_snapshot
     def strategy_transfer_candidates(
         self,
         target_family: str,
@@ -15899,6 +16611,7 @@ class Memory:
                 raise ValueError("Lesson lifecycle changed concurrently")
 
     @_with_recall_cache
+    @_with_read_snapshot
     def search(
         self,
         query: str,
@@ -16118,6 +16831,7 @@ class Memory:
         ).fetchall()
         return [dict(row) for row in rows]
 
+    @_with_read_snapshot
     def verified_operator_preferences(self, limit: int = 2) -> list[dict[str, Any]]:
         """Return newest explicitly stored preferences with valid provenance."""
         self._ensure_open()

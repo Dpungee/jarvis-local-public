@@ -70,20 +70,28 @@ class PublicReleaseCheckTests(unittest.TestCase):
         author_email: str,
         *,
         committer_email: str | None = None,
+        author_date: str | None = None,
+        committer_date: str | None = None,
+        committer_name: str = "Release Tester",
         message: str = "fixture",
     ) -> None:
+        identity_environment = {
+            "GIT_AUTHOR_NAME": "Release Tester",
+            "GIT_AUTHOR_EMAIL": author_email,
+            "GIT_COMMITTER_NAME": committer_name,
+            "GIT_COMMITTER_EMAIL": committer_email or author_email,
+        }
+        if author_date is not None:
+            identity_environment["GIT_AUTHOR_DATE"] = author_date
+        if committer_date is not None:
+            identity_environment["GIT_COMMITTER_DATE"] = committer_date
         self._git(
             "commit",
             "--quiet",
             "--allow-empty",
             "-m",
             message,
-            environment={
-                "GIT_AUTHOR_NAME": "Release Tester",
-                "GIT_AUTHOR_EMAIL": author_email,
-                "GIT_COMMITTER_NAME": "Release Tester",
-                "GIT_COMMITTER_EMAIL": committer_email or author_email,
-            },
+            environment=identity_environment,
         )
 
     def _head(self) -> str:
@@ -94,6 +102,37 @@ class PublicReleaseCheckTests(unittest.TestCase):
             capture_output=True,
             text=True,
         ).stdout.strip()
+
+    def _install_raw_commit(self, extra_header: bytes) -> str:
+        parent = self._head()
+        tree = subprocess.run(
+            ["git", "rev-parse", "HEAD^{tree}"],
+            cwd=self.repo,
+            check=True,
+            capture_output=True,
+        ).stdout.strip()
+        identity = b"Release Tester <release@example.com> 1700000000 +0000"
+        raw = b"\n".join(
+            (
+                b"tree " + tree,
+                b"parent " + parent.encode("ascii"),
+                b"author " + identity,
+                b"committer " + identity,
+                extra_header,
+                b"",
+                b"raw commit fixture",
+                b"",
+            )
+        )
+        commit_id = subprocess.run(
+            ["git", "hash-object", "-t", "commit", "-w", "--stdin"],
+            cwd=self.repo,
+            input=raw,
+            check=True,
+            capture_output=True,
+        ).stdout.decode("ascii").strip()
+        self._git("update-ref", "HEAD", commit_id)
+        return commit_id
 
     def test_github_no_reply_commit_and_tag_identities_are_allowed(self) -> None:
         email = "12345+release-tester@users.noreply.github.com"
@@ -301,17 +340,65 @@ class PublicReleaseCheckTests(unittest.TestCase):
             self.assertEqual(Path(command[0]), trusted_git)
             self.assertTrue(Path(command[0]).is_absolute())
 
-    def test_workflow_passes_the_pr_head_to_the_history_scan(self) -> None:
+    def test_workflow_uses_exact_ranges_and_limits_manual_runs_to_main(self) -> None:
         workflow = (
             Path(__file__).resolve().parents[1] / ".github" / "workflows" / "ci.yml"
         ).read_text(encoding="utf-8")
         self.assertIn("github.event.pull_request.head.sha", workflow)
         self.assertIn("github.event.pull_request.base.sha", workflow)
         self.assertIn("github.event.before", workflow)
+        exact_head_checkout = (
+            "ref: ${{ github.event_name == 'pull_request' && "
+            "github.event.pull_request.head.sha || github.sha }}"
+        )
+        self.assertEqual(workflow.count("uses: actions/checkout@"), 3)
+        self.assertEqual(workflow.count("persist-credentials: false"), 3)
+        self.assertEqual(workflow.count(exact_head_checkout), 3)
         self.assertIn("workflow_dispatch", workflow)
-        self.assertIn("refs/heads/main", workflow)
+        self.assertIn(
+            'if [[ "$GITHUB_EVENT_NAME" == "workflow_dispatch" ]]; then', workflow
+        )
+        self.assertIn('[[ "$GITHUB_REF" == "refs/heads/main" ]] || exit 1', workflow)
+        self.assertIn(
+            'PUBLIC_RELEASE_HISTORY_BASE="$(git rev-parse '
+            '"${PUBLIC_RELEASE_HISTORY_REF}^")"',
+            workflow,
+        )
+        self.assertIn(
+            'git merge-base --is-ancestor "$PUBLIC_RELEASE_HISTORY_BASE" '
+            '"$PUBLIC_RELEASE_HISTORY_REF"',
+            workflow,
+        )
         self.assertIn('--history-ref "$PUBLIC_RELEASE_HISTORY_REF"', workflow)
         self.assertIn('--history-base "$PUBLIC_RELEASE_HISTORY_BASE"', workflow)
+        self.assertIn(
+            'echo "gitleaks_base=$PUBLIC_RELEASE_HISTORY_BASE" >> "$GITHUB_OUTPUT"',
+            workflow,
+        )
+        self.assertIn('GITLEAKS_VERSION: "8.30.1"', workflow)
+        self.assertIn("Scan exact validated Git range for secrets", workflow)
+        self.assertIn(
+            '[[ "$(git rev-parse HEAD)" == "$PUBLIC_RELEASE_HISTORY_REF" ]]',
+            workflow,
+        )
+        self.assertIn(
+            '--log-opts="--no-merges --first-parent '
+            '${PUBLIC_RELEASE_GITLEAKS_BASE}..${PUBLIC_RELEASE_HISTORY_REF}"',
+            workflow,
+        )
+        self.assertLess(
+            workflow.index("Check public-release privacy boundary"),
+            workflow.index("Scan Git history for secrets"),
+        )
+        self.assertLess(
+            workflow.index("Scan Git history for secrets"),
+            workflow.index("Scan exact validated Git range for secrets"),
+        )
+        self.assertNotIn("--history-rewrite-base", workflow)
+        self.assertNotIn("--history-rewrite-common", workflow)
+        self.assertNotIn("--history-rewrite-tip", workflow)
+        self.assertNotIn("PUBLIC_RELEASE_FORCED", workflow)
+        self.assertNotIn("PUBLIC_RELEASE_HEAD_BRANCH", workflow)
 
     def test_personal_commit_email_blocks_release(self) -> None:
         blocked_email = self._blocked_email()
@@ -347,6 +434,44 @@ class PublicReleaseCheckTests(unittest.TestCase):
             findings,
         )
         self.assertNotIn(self._blocked_email(), "\n".join(findings))
+
+    def test_private_data_in_nonstandard_commit_header_blocks_release(self) -> None:
+        self._commit("release@example.com")
+        blocked = self._blocked_email()
+        self._install_raw_commit(b"x-contact " + blocked.encode("utf-8"))
+        findings = check_release(self.repo)
+        self.assertTrue(any("raw metadata: non-example email" in f for f in findings))
+        self.assertNotIn(blocked, "\n".join(findings))
+
+    def test_non_utf8_commit_metadata_blocks_release(self) -> None:
+        self._commit("release@example.com")
+        self._install_raw_commit(b"x-owner \xff")
+        findings = check_release(self.repo)
+        self.assertTrue(any("metadata is not valid UTF-8" in f for f in findings))
+
+    def test_sensitive_tracked_filename_is_redacted_from_findings(self) -> None:
+        blocked = self._blocked_email()
+        filename = f"contact-{blocked}.txt"
+        (self.repo / filename).write_text("public fixture\n", encoding="utf-8")
+        self._git("add", filename)
+        self._commit("release@example.com")
+        findings = check_release(self.repo)
+        self.assertTrue(any("tracked-path:" in f for f in findings), findings)
+        rendered = "\n".join(findings)
+        self.assertNotIn(blocked, rendered)
+        self.assertNotIn(filename, rendered)
+
+    def test_git_topology_environment_override_blocks_ordinary_scan(self) -> None:
+        self._commit("release@example.com")
+        with (
+            mock.patch.dict(
+                os.environ,
+                {"GIT_REPLACE_REF_BASE": "refs/private-replacements/"},
+                clear=False,
+            ),
+            self.assertRaisesRegex(RuntimeError, "prohibited override"),
+        ):
+            check_release(self.repo)
 
     def test_commit_message_private_data_blocks_release(self) -> None:
         self._commit(

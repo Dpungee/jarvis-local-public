@@ -109,12 +109,11 @@ For the easiest supported path, use a Codex CLI or Claude CLI subscription login
 v0.6.3 first-run wizard configures those subscription providers; Ollama is supported,
 but its local-model selection is still a manual setup path.
 
-1. Clone this repository with Git to test the current v0.6.3 development candidate.
-   **Exact release source archive:** for a tagged release, use the latest artifact on the
-   [Releases page](https://github.com/Dpungee/jarvis-local-public/releases) and follow
-   the instructions for that tagged version. Do not assume an untagged candidate has
-   release assets. The Python wheel is for Python installation, not the double-click
-   Windows setup described here.
+1. **Exact release source archive:** for the published `v0.6.3` public preview,
+   download that exact tag or its source archive from the
+   [Releases page](https://github.com/Dpungee/jarvis-local-public/releases/tag/v0.6.3).
+   A clone of `main` may contain newer unreleased work. The Python wheel is for Python
+   installation, not the double-click Windows setup described here.
 2. Install a supported Python version if necessary, then open the extracted project
    folder.
 3. Double-click `setup.bat`. The public-preview installer adds Jarvis and its document
@@ -150,11 +149,9 @@ professional review in high-stakes domains. See [Security](SECURITY.md),
 Before changing repository visibility, complete the
 [public-release checklist](docs/PUBLIC_RELEASE_CHECKLIST.md).
 
-This checkout is the **JARVIS Local 0.6.3 development candidate (alpha)**. A Git tag or
-release asset is published only after that exact commit passes the sanitized public-release
-checks and isolated package smoke tests. Do not treat an untagged checkout as a published
-release. Separate first-launch validation under a clean Windows user remains a
-stabilization gate.
+The latest published public preview is **JARVIS Local v0.6.3 (alpha)**. Use the exact
+tag when you need the attested release; `main` may be ahead of it. Separate first-launch
+validation under a clean Windows user remains a stabilization follow-up.
 
 <details>
 <summary><strong>Open the detailed operations and engineering reference</strong></summary>

@@ -28,6 +28,7 @@ jobs:
           ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
 
       - name: Check public-release privacy boundary
+        id: release_privacy
         env:
           PUBLIC_RELEASE_HISTORY_REF: ${{ github.event.pull_request.head.sha || github.sha }}
           PUBLIC_RELEASE_HISTORY_BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
@@ -38,12 +39,27 @@ jobs:
           fi
           [[ "$PUBLIC_RELEASE_HISTORY_BASE" =~ ^[0-9a-fA-F]{40}$ ]] || exit 1
           [[ ! "$PUBLIC_RELEASE_HISTORY_BASE" =~ ^0+$ ]] || exit 1
+          git merge-base --is-ancestor "$PUBLIC_RELEASE_HISTORY_BASE" "$PUBLIC_RELEASE_HISTORY_REF"
           python scripts/check_public_release.py --history-ref "$PUBLIC_RELEASE_HISTORY_REF" --history-base "$PUBLIC_RELEASE_HISTORY_BASE"
+          echo "gitleaks_base=$PUBLIC_RELEASE_HISTORY_BASE" >> "$GITHUB_OUTPUT"
 
       - name: Scan Git history for secrets
         uses: gitleaks/gitleaks-action@e0c47f4f8be36e29cdc102c57e68cb5cbf0e8d1e # v3.0.0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITLEAKS_VERSION: "8.30.1"
+
+      - name: Scan exact validated Git range for secrets
+        env:
+          PUBLIC_RELEASE_GITLEAKS_BASE: ${{ steps.release_privacy.outputs.gitleaks_base }}
+          PUBLIC_RELEASE_HISTORY_REF: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          [[ "$PUBLIC_RELEASE_GITLEAKS_BASE" =~ ^[0-9a-fA-F]{40}$ ]] || exit 1
+          [[ "$PUBLIC_RELEASE_HISTORY_REF" =~ ^[0-9a-fA-F]{40}$ ]] || exit 1
+          [[ "$(git rev-parse HEAD)" == "$PUBLIC_RELEASE_HISTORY_REF" ]] || exit 1
+          git merge-base --is-ancestor "$PUBLIC_RELEASE_GITLEAKS_BASE" "$PUBLIC_RELEASE_HISTORY_REF"
+          gitleaks git --redact --no-banner \
+            --log-opts="--no-merges --first-parent ${PUBLIC_RELEASE_GITLEAKS_BASE}..${PUBLIC_RELEASE_HISTORY_REF}" .
 
   test:
     name: Python ${{ matrix.python-version }} on Windows
@@ -59,6 +75,7 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
 
       - name: Set up Python
         uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
@@ -93,6 +110,7 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
 
       - name: Set up Python
         uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0

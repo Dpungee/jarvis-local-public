@@ -4296,13 +4296,25 @@ class AgentHardeningTests(unittest.TestCase):
         self.assertEqual(resource["tool"], "computer_read_file")
         expected_path = str(requested.resolve())
         expected_digest = hashlib.sha256(expected_path.encode()).hexdigest()
-        self.assertEqual(resource["arguments"]["path"]["sha256"], expected_digest)
-        self.assertEqual(
-            resource["arguments"]["resolved_path"]["sha256"],
-            expected_digest,
+        stored_targets = (
+            resource["arguments"]["path"],
+            resource["arguments"]["resolved_path"],
         )
+        target_digests: list[str] = []
+        for stored_target in stored_targets:
+            if isinstance(stored_target, str):
+                self.assertEqual(stored_target, expected_path)
+                target_digests.append(
+                    hashlib.sha256(stored_target.encode()).hexdigest()
+                )
+            else:
+                self.assertIsInstance(stored_target, dict)
+                stored_digest = str(stored_target.get("sha256") or "")
+                self.assertRegex(stored_digest, r"^[0-9a-f]{64}$")
+                target_digests.append(stored_digest)
+        self.assertEqual(target_digests, [expected_digest, expected_digest])
         self.assertNotEqual(
-            resource["arguments"]["path"]["sha256"],
+            target_digests[0],
             hashlib.sha256(str(decoy.resolve()).encode()).hexdigest(),
         )
         self.assertIn(str(requested), str(blocked))

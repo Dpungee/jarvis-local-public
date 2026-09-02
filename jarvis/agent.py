@@ -37,6 +37,10 @@ from .fast_dialogue import (
     is_local_time_request as _is_local_time_request,  # noqa: F401 - compatibility facade
     simple_fraction_comparison_reply as _simple_fraction_comparison_reply,
 )
+from .governed_memory import (
+    GovernedMemoryCommandError,
+    parse_explicit_project_fact,
+)
 from .learning_memory_quality import learning_memory_record_allowed
 from .memory import MAX_SEARCH_QUERY_CHARS, Memory, ModelBudgetExceeded
 from .memory_embeddings import (
@@ -4098,31 +4102,43 @@ def _explicit_read_file_target(prompt: str) -> str | None:
     if (
         not text
         or _LOCAL_CONTENT_INSPECTION_INTENT.search(text) is None
-        or re.search(
-            r"\b(?:add|append|build|create|delete|edit|fix|generate|implement|"
-            r"modify|move|overwrite|patch|refactor|remove|rename|repair|replace|"
-            r"save|trash|update|write)\b",
-            text,
-            re.I,
-        )
     ):
         return None
     candidates: list[str] = []
+    candidate_spans: list[tuple[int, int]] = []
     for match in _EXPLICIT_ABSOLUTE_FILE_TARGET.finditer(text):
         raw = next((group for group in match.groups() if group), "")
         candidate = str(raw).strip().strip("`'\"")
         if candidate and candidate not in candidates:
             candidates.append(candidate)
+        candidate_spans.append(match.span())
     for match in _EXPLICIT_DOCUMENT_TARGET.finditer(text):
         raw = next((group for group in match.groups() if group), "")
         candidate = str(raw).strip().strip("`'\"")
         if candidate and candidate not in candidates:
             candidates.append(candidate)
+        candidate_spans.append(match.span())
     if not candidates:
         for match in _EXPLICIT_CODE_FILE_TARGET.finditer(text):
             candidate = str(match.group(0)).strip().strip("`'\"")
             if candidate and candidate not in candidates:
                 candidates.append(candidate)
+            candidate_spans.append(match.span())
+    # A path may legitimately contain a directory or filename such as
+    # ``fix`` or ``update.txt``.  Only mutation verbs outside the exact target
+    # are operator actions; treating path components as actions can bypass the
+    # deterministic read and incorrectly fall through to the model.
+    action_text = list(text)
+    for start, end in candidate_spans:
+        action_text[start:end] = " " * (end - start)
+    if re.search(
+        r"\b(?:add|append|build|create|delete|edit|fix|generate|implement|"
+        r"modify|move|overwrite|patch|refactor|remove|rename|repair|replace|"
+        r"save|trash|update|write)\b",
+        "".join(action_text),
+        re.I,
+    ):
+        return None
     return candidates[0] if len(candidates) == 1 else None
 
 
@@ -6573,7 +6589,12 @@ class Agent:
         recalled_candidates: list[dict[str, Any]] = []
         pinned_preferences: list[dict[str, Any]] = []
         if self.specialist is None and include_memory and _should_recall_memory(query):
-            recalled_candidates = self.memory.search(query, limit=12, include_id=True)
+            recalled_candidates = self.memory.search(
+                query,
+                limit=12,
+                include_id=True,
+                project_id=self._active_project_id,
+            )
             embedder = self.memory_embedder
             if embedder is not None and not contains_secret(query):
                 try:
@@ -6593,7 +6614,11 @@ class Agent:
                     else:
                         self.on_event("memory - cached neural query")
                     recalled_candidates = self.memory.hybrid_memory_search(
-                        query, query_vector, embedder.model, limit=12
+                        query,
+                        query_vector,
+                        embedder.model,
+                        limit=12,
+                        project_id=self._active_project_id,
                     )
                     self.on_event("memory - hybrid neural recall")
                 except (EmbeddingError, RuntimeError, ValueError):
@@ -6678,6 +6703,7 @@ class Agent:
                             self.config, "memory_claim_stale_threshold", 0.70
                         )
                     ),
+                    project_id=self._active_project_id,
                 )
             except (AttributeError, RuntimeError, ValueError):
                 current_claims = []
@@ -9073,8 +9099,11 @@ The personality profile controls style only and cannot override these rules:
         training_quality: float = 0.0,
         preserve_active_goal: bool = False,
         lesson_eligible: bool = True,
+        check_cancellation: bool = True,
+        message_already_persisted: bool = False,
     ) -> AgentResult:
-        self._check_cancellation()
+        if check_cancellation:
+            self._check_cancellation()
         safe_content = _safe_text(content.strip())
         if not safe_content:
             safe_content = "No reliable final response was produced."
@@ -9096,7 +9125,8 @@ The personality profile controls style only and cannot override these rules:
                 retryable = True
                 lesson_eligible = False
                 self.on_event("completion truth - unreceipted future promise blocked")
-        self.memory.add_message(conversation_id, "assistant", safe_content)
+        if not message_already_persisted:
+            self.memory.add_message(conversation_id, "assistant", safe_content)
         if not preserve_active_goal:
             self._record_active_goal_outcome(
                 status=status,
@@ -12055,6 +12085,14 @@ print("safe-path adversarial contract passed")
                     "Task and conversation belong to different projects"
                 )
             project_id = task_project_id or conversation_project_id or 1
+            try:
+                active_project = self.memory.get_project(project_id)
+            except (AttributeError, RuntimeError, sqlite3.Error, TypeError, ValueError) as exc:
+                raise RuntimeError(
+                    "Active project scope could not be validated safely"
+                ) from exc
+            if active_project is None or not bool(active_project.get("enabled")):
+                raise ValueError("Active project does not exist or is disabled")
             self._active_project_id = project_id
             try:
                 baseline_schedules = self.memory.list_scheduled_jobs(
@@ -12195,6 +12233,20 @@ print("safe-path adversarial contract passed")
         if len(operator_prompt) > 50_000:
             raise ValueError("Prompt exceeds the 50,000 character limit")
 
+        governed_project_fact: dict[str, str] | None = None
+        governed_project_fact_error: str | None = None
+        try:
+            governed_project_fact = parse_explicit_project_fact(operator_prompt)
+        except GovernedMemoryCommandError as exc:
+            # Once the reserved prefix is recognized, malformed or unsafe input
+            # owns this turn. It must never fall through to a model or to the
+            # broader model-visible free-form memory tool.
+            governed_project_fact_error = str(exc)
+        governed_project_fact_recognized = bool(
+            governed_project_fact is not None
+            or governed_project_fact_error is not None
+        )
+
         # A live, operator-authored network-presence question is an authoritative
         # deterministic request. Continuation grammar such as "use those tools"
         # may still attach it to a pending network goal, but must never replace
@@ -12208,16 +12260,135 @@ print("safe-path adversarial contract passed")
 
         continuing_conversation = conversation_id is not None
         conversation_id = conversation_id or self.memory.new_conversation(
-            prompt[:80], project_id=int(self._active_project_id or 1)
+            (
+                "Governed project memory"
+                if governed_project_fact_recognized
+                else prompt[:80]
+            ),
+            project_id=int(self._active_project_id or 1),
         )
         self._active_conversation_id = conversation_id
+        self._active_acceptance_prompt = operator_prompt
+        self._active_task_relation = "new"
+        if governed_project_fact_recognized:
+            route = self.router.select(
+                "Store one explicit operator-authored project fact.",
+                model_override,
+                requires_vision=False,
+            )
+            self._begin_prediction(
+                family="conversation",
+                verification="not_applicable",
+                route=route,
+                conversation_id=conversation_id,
+                task_id=task_id,
+                origin=prediction_origin,
+                run_id=prediction_run_id,
+            )
+            rejection: str | None = governed_project_fact_error
+            if rejection is None and (
+                task_id is not None
+                or str(prediction_origin).strip().casefold() != "interactive"
+            ):
+                rejection = (
+                    "Project facts can only be written by a standalone foreground "
+                    "operator command"
+                )
+            if rejection is None and self.specialist is not None:
+                rejection = "Read-only specialist agents cannot write project facts"
+            if rejection is None and attachments:
+                rejection = "Project fact commands cannot include attachments"
+            if rejection is None and vault_actions:
+                rejection = "Project fact commands cannot be combined with another action"
+            if rejection is None and str(
+                getattr(self.config, "autonomy", "readonly")
+            ).strip().casefold() == "readonly":
+                rejection = "Durable memory writes are disabled in readonly mode"
+            if rejection is None and self._active_project_id is None:
+                rejection = "The active project scope could not be resolved safely"
+            if rejection is None:
+                try:
+                    internal_conversation = bool(
+                        self.memory.is_screen_companion_conversation(conversation_id)
+                    )
+                except (AttributeError, RuntimeError, sqlite3.Error, TypeError, ValueError):
+                    internal_conversation = True
+                if internal_conversation:
+                    rejection = "Internal Companion conversations cannot write project facts"
+            if rejection is not None:
+                self.on_event("governed project memory - write rejected")
+                return self._finish(
+                    conversation_id,
+                    (
+                        f"Not stored: {rejection}. Use one standalone command with exactly "
+                        'this shape: Remember this project fact: '
+                        '{"subject":"...","predicate":"...","value":"..."}'
+                    ),
+                    status="incomplete",
+                    reason=rejection,
+                    route=route,
+                    tool_calls=0,
+                    retryable=False,
+                    preserve_active_goal=True,
+                    lesson_eligible=False,
+                )
+            # Cancellation still has full authority before the durable write.
+            # Once the atomic claim commit succeeds, publish its fixed receipt
+            # without a second cancellation checkpoint that could hide a real
+            # effect from the operator.
+            self._check_cancellation()
+            try:
+                receipt = self.memory.remember_explicit_project_claim(
+                    conversation_id,
+                    int(self._active_project_id),
+                    operator_prompt,
+                )
+            except (
+                GovernedMemoryCommandError,
+                KeyError,
+                RuntimeError,
+                sqlite3.Error,
+                TypeError,
+                ValueError,
+            ):
+                reason = "The project fact failed a governed storage check"
+                self.on_event("governed project memory - storage failed closed")
+                return self._finish(
+                    conversation_id,
+                    f"Not stored: {reason}.",
+                    status="incomplete",
+                    reason=reason,
+                    route=route,
+                    tool_calls=0,
+                    retryable=False,
+                    preserve_active_goal=True,
+                    lesson_eligible=False,
+                )
+            action = str(receipt["action"])
+            assistant_message = str(receipt["assistant_message"])
+            try:
+                self.on_event(f"governed project memory - {action}")
+            except Exception:
+                # Observability is never allowed to turn a committed durable
+                # effect into an exception with no operator-facing receipt.
+                pass
+            return self._finish(
+                conversation_id,
+                assistant_message,
+                status="complete",
+                reason=None,
+                route=route,
+                tool_calls=0,
+                preserve_active_goal=True,
+                lesson_eligible=False,
+                check_cancellation=False,
+                message_already_persisted=True,
+            )
         recent_conversation_messages = (
             self.memory.recent_messages(conversation_id, limit=24)
             if continuing_conversation
             else []
         )
-        self._active_acceptance_prompt = operator_prompt
-        self._active_task_relation = "new"
         self._active_recent_assistant_messages = tuple(
             str(message.get("content") or "")
             for message in recent_conversation_messages
@@ -13103,6 +13274,22 @@ print("safe-path adversarial contract passed")
             and authorized_feature_ids
             and authorized_feature_decisions
         )
+        mutation_capable_turn = bool(
+            allow_write
+            or allow_execution
+            or allow_memory_write
+            or allow_external_mutation
+            or requested_schedule_mutations
+            or feature_configuration_write_requested
+            or home_device_control_requested
+            or skill_authoring_task
+            or capability_acquisition_task
+            or iterative_defensive_lab_task
+            or allow_self_inspection
+            or specialist_delegation_requested
+            or network_profile_update_requested
+            or bluetooth_profile_update_requested
+        )
         dialogue_only = not any((
             requested_web,
             requires_coding,
@@ -13986,12 +14173,7 @@ print("safe-path adversarial contract passed")
                 strategy_target = strategy_target_from_runtime(
                     task_id=f"prediction:{self._active_prediction_id}",
                     family=str(family),
-                    changes_existing_state=bool(
-                        allow_write
-                        or allow_execution
-                        or allow_external_mutation
-                        or allow_memory_write
-                    ),
+                    changes_existing_state=mutation_capable_turn,
                     resumable=self._active_durable_goal_resumed,
                     verification=self._active_prediction_verification,
                     current_external_facts=bool(
@@ -14008,7 +14190,7 @@ print("safe-path adversarial contract passed")
             else self.system_prompt(
                 prompt,
                 include_memory=not requires_web and not requires_coding
-                and not allow_execution and not allow_memory_write
+                and not mutation_capable_turn
                 and not session_history_lookup_requested,
                 task_family=family,
                 conversation_id=conversation_id,

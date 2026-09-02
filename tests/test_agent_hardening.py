@@ -4243,6 +4243,18 @@ class AgentHardeningTests(unittest.TestCase):
         )
         prompt = f"Read the exact file {requested} and tell me what it says."
         self.assertEqual(_explicit_read_file_target(prompt), str(requested))
+        path_with_action_word = r"C:\safe\fix\note.txt"
+        self.assertEqual(
+            _explicit_read_file_target(
+                f"Read the exact file {path_with_action_word} and tell me what it says."
+            ),
+            path_with_action_word,
+        )
+        self.assertIsNone(
+            _explicit_read_file_target(
+                f"Read the exact file {path_with_action_word} and update it."
+            )
+        )
         self.assertIsNone(
             _explicit_read_file_target("Inspect, update, and test a.py using README.md")
         )

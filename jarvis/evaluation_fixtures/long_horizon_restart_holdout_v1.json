@@ -2,7 +2,7 @@
   "schema": "jarvis.long-horizon-restart-holdout.v1",
   "evaluator_version": "1.0.0",
   "config_sha256": "71518b73be1ca12f3e32c7b6a8d990a6ed91e2833ed3fe1c1813d8814093b227",
-  "runtime_sha256": "d6282bcf476b3853aab546b92c840c1f5a980fcbe5f9b6983a955929cd7e4291",
+  "runtime_sha256": "cfa1237d53ef32a6764e9b5f6aed1b893382c4dea5fe0cbbf8a2193ec7d8b6c1",
   "templates": [
     {
       "template_id": "build_flow",
@@ -947,5 +947,5 @@
       "workflow_id": "wf10"
     }
   ],
-  "fixture_manifest_sha256": "17f097729dac6f8442e79ed8b8d60ffebf1cadfd679679312982e6ea0cf27faa"
+  "fixture_manifest_sha256": "fedb7c3bd6f106892fd4048b63ec8b3dca68070e38f339af861b878b5567c424"
 }

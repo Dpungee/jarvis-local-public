@@ -20,6 +20,28 @@ _NAMESPACED_SENSITIVE_KEY_PATTERN = (
 SENSITIVE_KEY = re.compile(
     rf"^(?:{_NAMESPACED_SENSITIVE_KEY_PATTERN})$", re.I
 )
+_SENSITIVE_KEY_PHRASE_PATTERN = (
+    r"password|passwd|api[\s_.-]?key|access[\s_.-]?key|secret[\s_.-]?key|"
+    r"private[\s_.-]?key|access[\s_.-]?token|refresh[\s_.-]?token|"
+    r"session[\s_.-]?token|auth[\s_.-]?token|oauth[\s_.-]?token|"
+    r"id[\s_.-]?token|client[\s_.-]?secret|authorization|credentials?|"
+    r"session[\s_.-]?cookie|cookie|recovery[\s_.-]?code|mfa[\s_.-]?code"
+)
+SENSITIVE_KEY_PHRASE = re.compile(
+    rf"(?<![A-Za-z0-9])(?:{_SENSITIVE_KEY_PHRASE_PATTERN})(?![A-Za-z0-9])",
+    re.I,
+)
+_GENERIC_SECRET_DESCRIPTOR_PATTERN = (
+    r"value|field|content|current|credentials?|auth|authentication|"
+    r"authorization|login|account|key"
+)
+GENERIC_SECRET_DESCRIPTOR_PHRASE = re.compile(
+    rf"(?<![A-Za-z0-9])(?:"
+    rf"(?:token|secret)[\s._/\\-]+(?:{_GENERIC_SECRET_DESCRIPTOR_PATTERN})|"
+    rf"(?:{_GENERIC_SECRET_DESCRIPTOR_PATTERN})[\s._/\\-]+(?:token|secret)"
+    rf")(?![A-Za-z0-9])",
+    re.I,
+)
 SECRET_VALUE = re.compile(
     r"(?i)(-----BEGIN [A-Z _.-]*PRIVATE[ _.-]*KEY-----.*?"
     r"-----END [A-Z _.-]*PRIVATE[ _.-]*KEY-----|"
@@ -261,6 +283,20 @@ def contains_obfuscated_secret(value: str) -> bool:
 def is_sensitive_key(value: str) -> bool:
     normalized = _secret_detection_view(value).strip().strip("\"'")
     return SENSITIVE_KEY.fullmatch(normalized) is not None
+
+
+def contains_explicit_sensitive_key_phrase(value: str) -> bool:
+    """Return whether canonical text contains an established credential key."""
+    return SENSITIVE_KEY_PHRASE.search(_secret_detection_view(value)) is not None
+
+
+def contains_sensitive_key_phrase(value: str) -> bool:
+    """Return whether canonical text contains a bounded credential-key name."""
+    detection = _secret_detection_view(value)
+    return (
+        SENSITIVE_KEY_PHRASE.search(detection) is not None
+        or GENERIC_SECRET_DESCRIPTOR_PHRASE.search(detection) is not None
+    )
 
 
 def is_redacted_descriptor(value: Any) -> bool:

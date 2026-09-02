@@ -234,8 +234,8 @@ class LongHorizonTests(unittest.TestCase):
         )
 
     def test_schema_v40_and_normal_five_stage_completion(self) -> None:
-        self.assertEqual(SCHEMA_VERSION, 41)
-        self.assertEqual(self.memory.db.execute("PRAGMA user_version").fetchone()[0], 41)
+        self.assertEqual(SCHEMA_VERSION, 44)
+        self.assertEqual(self.memory.db.execute("PRAGMA user_version").fetchone()[0], 44)
         plan_id = self.store.create_plan(self.manifest())
         for _ in range(5):
             self.complete_claim(plan_id)
@@ -300,7 +300,7 @@ class LongHorizonTests(unittest.TestCase):
             row["name"]
             for row in self.memory.db.execute("PRAGMA table_info(long_horizon_plans)")
         }
-        self.assertEqual(self.memory.db.execute("PRAGMA user_version").fetchone()[0], 41)
+        self.assertEqual(self.memory.db.execute("PRAGMA user_version").fetchone()[0], 44)
         self.assertIn("manifest_sha256", columns)
         self.assertNotIn("unsafe", columns)
 

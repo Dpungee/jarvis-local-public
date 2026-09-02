@@ -6,6 +6,7 @@ from jarvis.memory import _redacted_json_value
 from jarvis.redaction import (
     contains_obfuscated_secret,
     contains_private_identifier,
+    contains_sensitive_key_phrase,
     contains_secret,
     is_redacted_descriptor,
     is_sensitive_key,
@@ -85,6 +86,31 @@ class SharedRedactionTests(unittest.TestCase):
             with self.subTest(key=key):
                 self.assertFalse(is_sensitive_key(key))
                 self.assertFalse(contains_secret(f"{key}=ordinary"))
+
+    def test_generic_token_and_secret_descriptors_are_bounded(self):
+        for phrase in (
+            "token value",
+            "secret value",
+            "authentication token value",
+            "current token",
+            "secret field",
+            "account secret",
+            "login token",
+            "\uff54\uff4f\uff4b\uff45\uff4e\u3000\uff56\uff41\uff4c\uff55\uff45",
+        ):
+            with self.subTest(phrase=phrase):
+                self.assertTrue(contains_sensitive_key_phrase(phrase))
+
+        for phrase in (
+            "review token",
+            "handoff token",
+            "token budget",
+            "token bucket algorithm",
+            "secret sharing algorithm",
+            "secretary value",
+        ):
+            with self.subTest(phrase=phrase):
+                self.assertFalse(contains_sensitive_key_phrase(phrase))
 
     def test_unicode_obfuscation_cannot_hide_secret_assignments_or_keys(self):
         opaque_value = "ordinary-looking-secret-value"

@@ -1519,7 +1519,11 @@ class WindowsScriptTests(unittest.TestCase):
         self._write_cmd(self.fake_bin / "python.cmd", ["@echo off", "exit /b 37"])
         shutil.copy2(ROOT / "start_jarvis.bat", self.project / "start_jarvis.bat")
         completed = subprocess.run(
-            [str(COMSPEC), "/d", "/c", "call start_jarvis.bat"],
+            # Resolve the script explicitly. When
+            # NoDefaultCurrentDirectoryInExePath is set, cmd.exe does not
+            # search the working directory, and a bare name fails to resolve
+            # before the batch file can propagate its exit code.
+            [str(COMSPEC), "/d", "/c", "call .\start_jarvis.bat"],
             cwd=self.project,
             env=self._base_env(),
             stdin=subprocess.DEVNULL,

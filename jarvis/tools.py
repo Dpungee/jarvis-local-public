@@ -6768,7 +6768,10 @@ class ToolBox:
         ]
 
     def recall(self, query: str) -> list[dict[str, Any]]:
-        return self.memory.search(query)
+        context = self._agent_execution_context.get()
+        if context is None:
+            return self.memory.search(query)
+        return self.memory.search(query, project_id=context[0])
 
     def session_search(
         self,

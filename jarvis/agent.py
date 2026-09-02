@@ -4102,31 +4102,43 @@ def _explicit_read_file_target(prompt: str) -> str | None:
     if (
         not text
         or _LOCAL_CONTENT_INSPECTION_INTENT.search(text) is None
-        or re.search(
-            r"\b(?:add|append|build|create|delete|edit|fix|generate|implement|"
-            r"modify|move|overwrite|patch|refactor|remove|rename|repair|replace|"
-            r"save|trash|update|write)\b",
-            text,
-            re.I,
-        )
     ):
         return None
     candidates: list[str] = []
+    candidate_spans: list[tuple[int, int]] = []
     for match in _EXPLICIT_ABSOLUTE_FILE_TARGET.finditer(text):
         raw = next((group for group in match.groups() if group), "")
         candidate = str(raw).strip().strip("`'\"")
         if candidate and candidate not in candidates:
             candidates.append(candidate)
+        candidate_spans.append(match.span())
     for match in _EXPLICIT_DOCUMENT_TARGET.finditer(text):
         raw = next((group for group in match.groups() if group), "")
         candidate = str(raw).strip().strip("`'\"")
         if candidate and candidate not in candidates:
             candidates.append(candidate)
+        candidate_spans.append(match.span())
     if not candidates:
         for match in _EXPLICIT_CODE_FILE_TARGET.finditer(text):
             candidate = str(match.group(0)).strip().strip("`'\"")
             if candidate and candidate not in candidates:
                 candidates.append(candidate)
+            candidate_spans.append(match.span())
+    # A path may legitimately contain a directory or filename such as
+    # ``fix`` or ``update.txt``.  Only mutation verbs outside the exact target
+    # are operator actions; treating path components as actions can bypass the
+    # deterministic read and incorrectly fall through to the model.
+    action_text = list(text)
+    for start, end in candidate_spans:
+        action_text[start:end] = " " * (end - start)
+    if re.search(
+        r"\b(?:add|append|build|create|delete|edit|fix|generate|implement|"
+        r"modify|move|overwrite|patch|refactor|remove|rename|repair|replace|"
+        r"save|trash|update|write)\b",
+        "".join(action_text),
+        re.I,
+    ):
+        return None
     return candidates[0] if len(candidates) == 1 else None
 
 

@@ -1,11 +1,15 @@
 from __future__ import annotations
 
+import contextvars
+import hashlib
 import math
 import re
 import sqlite3
+import sys
 import unicodedata
-from collections import Counter
-from collections.abc import Iterable
+from collections import Counter, OrderedDict
+from collections.abc import Iterable, Iterator, Set as AbstractSet
+from contextlib import contextmanager
 from typing import Any
 
 from .redaction import normalize_private_identifier_text
@@ -14,21 +18,40 @@ from .redaction import normalize_private_identifier_text
 MAX_MEMORY_QUERY_TERMS = 8
 MAX_MEMORY_SEARCH_CANDIDATES = 2_000
 _MAX_MEMORY_QUERY_TERM_CANDIDATES = 64
+_RowCachePolicy = bool | AbstractSet[int]
+
+
+def _row_cache_admitted(
+    row: sqlite3.Row | dict[str, Any],
+    policy: _RowCachePolicy,
+) -> bool:
+    """Apply a prevalidated per-row cache policy without inspecting its text."""
+    if isinstance(policy, bool):
+        return policy
+    try:
+        keys = set(row.keys())
+        key = "id" if "id" in keys else "memory_id"
+        return int(row[key]) in policy
+    except (KeyError, TypeError, ValueError):
+        return False
 
 _MEMORY_SEARCH_STOPWORDS = frozenset({
     "about", "after", "again", "also", "am", "an", "and", "any", "are", "as", "at", "be", "been",
     "before", "being", "between", "both", "but", "by", "can", "could", "did", "do",
-    "come", "does", "doing", "each", "either", "every",
-    "explain", "fictional", "for", "from", "had", "has", "have", "having", "here", "hers", "him",
+    "come", "describe", "does", "doing", "each", "either", "every",
+    "explain", "fictional", "for", "from", "give", "had", "has", "have", "having", "here", "hers", "him",
     "his", "how", "if", "in", "including", "into", "invented", "is", "it", "its", "itself", "just", "keep", "later", "many",
     "more", "most", "must", "my", "not", "of", "off", "on", "once", "one", "only", "or", "other",
     "our", "ours", "out", "over", "own",
-    "please", "same", "say", "she", "should", "so", "some", "such", "tell", "than", "that", "the",
+    "please", "same", "say", "she", "should", "so", "some", "such", "summarize", "tell", "than", "that", "the",
     "their", "theirs", "them", "themselves", "then", "there", "these", "they", "this",
     "those", "through", "to", "too", "under", "until", "up", "using", "very", "was",
     "we", "were", "what",
     "when", "where", "which", "while", "who", "whom", "why", "will", "with", "would",
     "use", "want", "you", "your", "yours", "yourself", "yourselves",
+    "anybody", "anyone", "anything", "everybody", "everyone", "everything",
+    "kindly", "maybe", "nobody", "nothing", "perhaps", "somebody", "someone",
+    "something", "whatever", "whenever", "whether", "wherever", "whoever",
 })
 _LIKE_LITERAL_EDGE_CHARS = "\"'`.,!?;:()[]{}<>"
 _AUTHORITY_EVASION_TERMS = frozenset({
@@ -162,8 +185,26 @@ _MEMORY_QUANTIFIER_CLASSES = {
     "exclusive": frozenset({"exactly", "only"}),
 }
 _MEMORY_RETRIEVAL_SCOPE_VERBS = frozenset({
-    "find", "get", "list", "lookup", "me", "recall", "remember", "remind", "retrieve",
-    "return", "search", "show",
+    "describe", "explain", "find", "get", "give", "list", "lookup", "me",
+    "recall", "remember", "remind", "retrieve", "return", "search", "show",
+    "summarize",
+})
+_MEMORY_PRESENTATION_TERMS = frozenset({
+    "briefly", "current", "currently", "latest", "now", "quickly",
+    "recent", "recently", "today", "tomorrow", "urgent", "urgently",
+    "yesterday",
+})
+_MEMORY_FACT_CONTEXT_TERMS = frozenset({
+    "context", "fact", "family", "knowledge", "learn", "learned", "memory", "note",
+    "project", "pull", "record", "saved", "scope", "stored", "task",
+})
+_MEMORY_NON_SUBJECT_TERMS = frozenset({
+    *_MEMORY_RETRIEVAL_SCOPE_VERBS,
+    *_MEMORY_PRESENTATION_TERMS,
+    *_MEMORY_FACT_CONTEXT_TERMS,
+    "channel", "constant", "data", "date", "day", "detail", "details",
+    "information", "ratio", "result", "results", "schedule", "setting",
+    "state", "status", "time", "value", "version",
 })
 
 
@@ -211,6 +252,117 @@ def _structured_memory_identifier(token: str) -> bool:
         and any(character.isalpha() for character in canonical)
         and any(character.isdigit() for character in canonical)
     )
+
+
+def _memory_identity_capable_term(term: str) -> bool:
+    """Return whether one token is unambiguously an identifier by shape.
+
+    Natural-language length is not an identity signal: words such as
+    ``recently`` and ``retrieve`` previously caused false abstentions merely for
+    having seven characters.  Proper/CamelCase and subject-position identities
+    require the original query or candidate records and are handled by
+    ``_memory_identity_scope`` instead.
+    """
+    canonical = _normalize_memory_token(term)
+    return _structured_memory_identifier(canonical)
+
+
+def _memory_identity_scope(
+    query: str,
+    query_terms: Iterable[str],
+    rows: Iterable[sqlite3.Row | dict[str, Any]] = (),
+    *,
+    content_key: str = "content",
+    row_cache_allowed: _RowCachePolicy = True,
+) -> tuple[list[str], list[str]]:
+    """Return one explicit subject identity and its required fact anchors.
+
+    Identity is derived from structure, preserved query case, or the first
+    meaningful subject token of the bounded raw candidate pool.  A sibling
+    suffix conflict also makes the query token an identity.  Arbitrary word
+    length never does.  The first query-ordered identity wins; multi-identity
+    requests remain governed by the existing ambiguity/multi-fact logic.
+    """
+    ordered_terms = list(dict.fromkeys(
+        _normalize_memory_token(term) for term in query_terms
+        if _normalize_memory_token(term)
+    ))
+    if not ordered_terms:
+        return [], []
+    ordered_set = set(ordered_terms)
+    explicit: set[str] = {
+        term for term in ordered_terms if _structured_memory_identifier(term)
+    }
+    natural_proper: set[str] = set()
+
+    surfaces = re.findall(r"[^\W_]+", str(query), re.UNICODE)
+    for index, surface in enumerate(surfaces):
+        canonical = _normalize_memory_token(surface)
+        if canonical not in ordered_set or canonical in _MEMORY_NON_SUBJECT_TERMS:
+            continue
+        proper = bool(surface[:1].isupper())
+        internal_case = any(character.isupper() for character in surface[1:])
+        if internal_case:
+            explicit.add(canonical)
+        elif proper:
+            natural_proper.add(canonical)
+
+    first_tokens: set[str] = set()
+    for row in rows:
+        try:
+            content = str(row[content_key] or "")
+        except (KeyError, TypeError):
+            continue
+        tokens = _memory_tokens(
+            content,
+            meaningful_only=True,
+            cache_allowed=_row_cache_admitted(row, row_cache_allowed),
+        )
+        if tokens:
+            first_tokens.add(tokens[0])
+
+    sibling_conflicts = {
+        term for term in ordered_terms
+        if term not in _MEMORY_NON_SUBJECT_TERMS
+        and any(
+            _memory_identity_conflict((term,), (subject,), ())
+            for subject in first_tokens
+            if subject != term
+        )
+    }
+    subject_matches = {
+        term for term in ordered_terms
+        if term not in _MEMORY_NON_SUBJECT_TERMS and term in first_tokens
+    }
+    # Sentence-initial capitalization alone is not a subject signal. Prefer a
+    # structured/internal-case identity, a sibling conflict, or the bounded
+    # corpus's actual first subject token before natural title case. This keeps
+    # arbitrary framing verbs ("Outline Atlas ...") from outranking Atlas while
+    # an otherwise unsupported proper name still fails closed as an identity.
+    candidates = (
+        explicit or sibling_conflicts or subject_matches or natural_proper
+    )
+    if (
+        re.search(r"\b(?:and|plus)\b|[&+]", str(query), re.I)
+        and len(candidates) > 1
+    ):
+        # The existing explicit multi-fact path intentionally returns separate
+        # records ("Ember and Willow").  A single-record identity proof would
+        # incorrectly require both subjects to co-occur.
+        return [], []
+    identity = next((term for term in ordered_terms if term in candidates), None)
+    if identity is None:
+        return [], []
+    ignored = (
+        _MEMORY_RETRIEVAL_SCOPE_VERBS
+        | _MEMORY_PRESENTATION_TERMS
+        | _MEMORY_FACT_CONTEXT_TERMS
+    )
+    anchors = [
+        term for term in ordered_terms
+        if term != identity and term not in ignored
+    ]
+    return [identity], anchors
 
 
 def _memory_identity_conflict(
@@ -278,7 +430,166 @@ def _memory_identity_conflict(
     return False
 
 
-def _memory_tokens(value: str, *, meaningful_only: bool) -> list[str]:
+_MEMORY_TOKEN_CACHE_MAX_CHARS = 2_000
+RECALL_CACHE_MAX_BYTES = 8 * 1024 * 1024
+RECALL_CACHE_MAX_ENTRIES = 32_768
+
+
+class RecallCache:
+    """Per-store memo for the pure helpers recall calls on every candidate row.
+
+    Free text is keyed by digest, so raw memory or query text is never retained
+    as a key; values are the derived tokens or signatures.  The cache is
+    byte-bounded with oldest-first eviction, belongs to exactly one
+    ``Memory`` instance, and is cleared when that store deletes rows or
+    closes, so nothing outlives the database session.  Helpers find the active
+    cache through a context variable that ``Memory`` sets only for the
+    duration of one recall call; outside one, every helper is a plain pure
+    function with no memo at all.
+    """
+
+    __slots__ = ("_entries", "_bytes", "max_bytes", "max_entries", "hits", "misses")
+
+    def __init__(
+        self,
+        *,
+        max_bytes: int = RECALL_CACHE_MAX_BYTES,
+        max_entries: int = RECALL_CACHE_MAX_ENTRIES,
+    ) -> None:
+        self._entries: OrderedDict[tuple[Any, ...], tuple[Any, int]] = OrderedDict()
+        self._bytes = 0
+        self.max_bytes = max(0, int(max_bytes))
+        self.max_entries = max(0, int(max_entries))
+        self.hits = 0
+        self.misses = 0
+
+    def __len__(self) -> int:
+        return len(self._entries)
+
+    @property
+    def size_bytes(self) -> int:
+        return self._bytes
+
+    def get(self, key: tuple[Any, ...]) -> Any | None:
+        # Insertion-ordered eviction (oldest first) keeps lookups a plain
+        # dictionary read; recall touches thousands of entries per call, so a
+        # move-to-end on every hit would cost more than it saves.
+        entry = self._entries.get(key)
+        if entry is None:
+            self.misses += 1
+            return None
+        self.hits += 1
+        return entry[0]
+
+    @staticmethod
+    def _measured_size(value: Any, seen: set[int] | None = None) -> int:
+        """Return a conservative recursive size for cache-supported values.
+
+        Caller-provided string lengths substantially undercount Python object
+        storage (especially tuples and frozensets).  Cache entries are small,
+        immutable helper results, so measuring them on a miss is preferable to
+        allowing an advertised byte bound to exceed its process-memory budget
+        by an order of magnitude.  Shared objects are counted once within one
+        entry and may be counted again across entries; that overcount is a safe
+        bias for eviction.
+        """
+        if seen is None:
+            seen = set()
+        identity = id(value)
+        if identity in seen:
+            return 0
+        seen.add(identity)
+        measured = sys.getsizeof(value)
+        if isinstance(value, dict):
+            measured += sum(
+                RecallCache._measured_size(key, seen)
+                + RecallCache._measured_size(item, seen)
+                for key, item in value.items()
+            )
+        elif isinstance(value, (tuple, list, set, frozenset, OrderedDict)):
+            measured += sum(
+                RecallCache._measured_size(item, seen) for item in value
+            )
+        return measured
+
+    def put(self, key: tuple[Any, ...], value: Any, size: int) -> None:
+        # Preserve the private size-hint argument for compatibility, but never
+        # trust it as the byte bound.  Include conservative OrderedDict entry
+        # overhead in addition to the recursively measured key and value.
+        measured = self._measured_size((key, value)) + 128
+        size = max(1, int(size), measured)
+        if size > self.max_bytes or not self.max_entries:
+            return
+        existing = self._entries.pop(key, None)
+        if existing is not None:
+            self._bytes -= existing[1]
+        self._entries[key] = (value, size)
+        self._bytes += size
+        while self._entries and (
+            self._bytes > self.max_bytes or len(self._entries) > self.max_entries
+        ):
+            _key, (_value, old_size) = self._entries.popitem(last=False)
+            self._bytes -= old_size
+
+    def clear(self) -> None:
+        self._entries.clear()
+        self._bytes = 0
+
+    def keys(self) -> list[tuple[Any, ...]]:
+        return list(self._entries)
+
+    @contextmanager
+    def activate(self) -> Iterator["RecallCache"]:
+        token = _ACTIVE_RECALL_CACHE.set(self)
+        try:
+            yield self
+        finally:
+            _ACTIVE_RECALL_CACHE.reset(token)
+
+
+_ACTIVE_RECALL_CACHE: contextvars.ContextVar[RecallCache | None] = contextvars.ContextVar(
+    "jarvis_active_recall_cache", default=None
+)
+
+
+def _recall_text_key(namespace: str, text: str, flag: bool) -> tuple[Any, ...]:
+    """Digest-keyed cache key; the raw text never becomes part of the key."""
+    digest = hashlib.blake2b(text.encode("utf-8"), digest_size=16).digest()
+    return (namespace, bool(flag), digest)
+
+
+def _memory_tokens(
+    value: str,
+    *,
+    meaningful_only: bool,
+    cache_allowed: bool = True,
+) -> list[str]:
+    """Tokenize durable-memory text, memoizing inside an active recall call.
+
+    Recall re-tokenizes every candidate row on every turn.  Tokenization is a
+    pure function of the text, so the per-store ``RecallCache`` turns repeated
+    ranking over a stable corpus into dictionary lookups without changing any
+    result.  Long documents bypass the cache, and callers always receive a
+    fresh list they may mutate.
+    """
+    text = str(value)
+    flag = bool(meaningful_only)
+    cache = _ACTIVE_RECALL_CACHE.get()
+    if (
+        cache is None
+        or not cache_allowed
+        or len(text) > _MEMORY_TOKEN_CACHE_MAX_CHARS
+    ):
+        return list(_memory_tokenize(text, meaningful_only=flag))
+    key = _recall_text_key("tokens", text, flag)
+    tokens = cache.get(key)
+    if tokens is None:
+        tokens = _memory_tokenize(text, meaningful_only=flag)
+        cache.put(key, tokens, sum(len(token) for token in tokens))
+    return list(tokens)
+
+
+def _memory_tokenize(value: str, *, meaningful_only: bool) -> tuple[str, ...]:
     normalized = unicodedata.normalize("NFKC", str(value)).casefold()
     normalized = "".join(
         character
@@ -306,16 +617,42 @@ def _memory_tokens(value: str, *, meaningful_only: bool) -> list[str]:
     for token in [*compound_identifiers, *surface_tokens]:
         if token not in ordered:
             ordered.append(token)
-    return ordered
+    return tuple(ordered)
 
 
 def _memory_candidate_terms(query: str) -> list[str]:
-    """Return the bounded full lexical pool used to discover candidates."""
+    """Return the bounded full lexical pool used to discover candidates.
+
+    Normal conversational queries fit below the bound and are unchanged.  For
+    a maximum-length adversarial query, retain boundary/evenly-spaced coverage
+    and then prefer identifiers and longer terms.  This prevents one SQL probe
+    per arbitrary input word without letting a long preamble crowd every later
+    anchor out of discovery.
+    """
     all_terms = _memory_tokens(query, meaningful_only=True)
-    terms = all_terms[:_MAX_MEMORY_QUERY_TERM_CANDIDATES]
-    if len(all_terms) > _MAX_MEMORY_QUERY_TERM_CANDIDATES:
-        terms[-1] = all_terms[-1]
-    return terms
+    limit = _MAX_MEMORY_QUERY_TERM_CANDIDATES
+    if len(all_terms) <= limit:
+        return all_terms
+
+    sample_count = min(16, limit)
+    selected_indices = {
+        round(slot * (len(all_terms) - 1) / max(1, sample_count - 1))
+        for slot in range(sample_count)
+    }
+    remaining = limit - len(selected_indices)
+    selected_indices.update(sorted(
+        (
+            index for index in range(len(all_terms))
+            if index not in selected_indices
+        ),
+        key=lambda index: (
+            any(character.isdigit() for character in all_terms[index]),
+            min(len(all_terms[index]), 32),
+            -index,
+        ),
+        reverse=True,
+    )[:remaining])
+    return [all_terms[index] for index in sorted(selected_indices)]
 
 
 def _memory_query_terms(query: str) -> list[str]:
@@ -341,7 +678,7 @@ def _memory_query_terms(query: str) -> list[str]:
             key=lambda index: (
                 any(character.isdigit() for character in terms[index]),
                 min(len(terms[index]), 16),
-                -index,
+                index,
             ),
             reverse=True,
         )[:remaining_slots])
@@ -355,6 +692,7 @@ def _memory_evidence_terms(
     *,
     content_key: str = "content",
     max_terms: int = MAX_MEMORY_QUERY_TERMS,
+    row_cache_allowed: _RowCachePolicy = True,
 ) -> list[str]:
     """Select rank terms that have evidence in the bounded candidate set.
 
@@ -367,7 +705,11 @@ def _memory_evidence_terms(
     if not candidates:
         return []
     documents = [
-        set(_memory_tokens(str(row[content_key]), meaningful_only=False))
+        set(_memory_tokens(
+            str(row[content_key]),
+            meaningful_only=False,
+            cache_allowed=_row_cache_admitted(row, row_cache_allowed),
+        ))
         for row in rows
     ]
     frequencies = {
@@ -408,8 +750,35 @@ def _memory_semantic_signature(
     value: str,
     *,
     query: bool,
+    cache_allowed: bool = True,
 ) -> tuple[str, str | None]:
-    """Return bounded proposition polarity and explicit quantifier class."""
+    """Return bounded proposition polarity and explicit quantifier class.
+
+    The query-side signature is recomputed for every candidate row, so both
+    sides are memoized for bounded inputs; the function is pure.
+    """
+    text = str(value)
+    flag = bool(query)
+    cache = _ACTIVE_RECALL_CACHE.get()
+    if (
+        cache is None
+        or not cache_allowed
+        or len(text) > _MEMORY_TOKEN_CACHE_MAX_CHARS
+    ):
+        return _memory_semantic_signature_uncached(text, query=flag)
+    key = _recall_text_key("signature", text, flag)
+    signature = cache.get(key)
+    if signature is None:
+        signature = _memory_semantic_signature_uncached(text, query=flag)
+        cache.put(key, signature, 16)
+    return signature
+
+
+def _memory_semantic_signature_uncached(
+    value: str,
+    *,
+    query: bool,
+) -> tuple[str, str | None]:
     normalized = normalize_private_identifier_text(value).casefold()
     tokens = [
         _normalize_memory_token(token)
@@ -442,11 +811,18 @@ def _memory_semantic_signature(
     return polarity, quantifier
 
 
-def _memory_semantic_constraints_compatible(query: str, document: str) -> bool:
+def _memory_semantic_constraints_compatible(
+    query: str,
+    document: str,
+    *,
+    document_cache_allowed: bool = True,
+) -> bool:
     """Reject candidates that contradict an explicit query proposition."""
     query_polarity, query_quantifier = _memory_semantic_signature(query, query=True)
     document_polarity, document_quantifier = _memory_semantic_signature(
-        document, query=False
+        document,
+        query=False,
+        cache_allowed=document_cache_allowed,
     )
     if query_polarity != "neutral" and query_polarity != document_polarity:
         return False
@@ -464,6 +840,7 @@ def _memory_resolve_sibling_identities(
     unknown_identity_minimum_matches: int = 2,
     explicit_subject_identity: bool = False,
     capitalized_subject_identity: bool = False,
+    row_cache_allowed: _RowCachePolicy = True,
 ) -> list[sqlite3.Row | dict[str, Any]]:
     """Resolve or abstain from a cluster of near-identical subject records."""
     if not results:
@@ -483,7 +860,11 @@ def _memory_resolve_sibling_identities(
                 )
             )
             if not declared and capitalized_subject_identity:
-                meaningful = _memory_tokens(content, meaningful_only=True)
+                meaningful = _memory_tokens(
+                    content,
+                    meaningful_only=True,
+                    cache_allowed=_row_cache_admitted(item, row_cache_allowed),
+                )
                 for surface in re.findall(r"[^\W_]+", content, re.UNICODE):
                     if (
                         meaningful
@@ -501,6 +882,7 @@ def _memory_resolve_sibling_identities(
             content_key=content_key,
             identity_ignored_terms=identity_ignored_terms,
             unknown_identity_minimum_matches=unknown_identity_minimum_matches,
+            row_cache_allowed=row_cache_allowed,
         )
         if not checked:
             return []
@@ -516,7 +898,9 @@ def _memory_resolve_sibling_identities(
     token_lists = [
         [
             token for token in _memory_tokens(
-                str(item[content_key] or ""), meaningful_only=True
+                str(item[content_key] or ""),
+                meaningful_only=True,
+                cache_allowed=_row_cache_admitted(item, row_cache_allowed),
             )
             if token not in semantic_modifiers
         ]
@@ -754,15 +1138,81 @@ def _memory_like_terms(
     return unique
 
 
+def _memory_fts_literal(term: str) -> str:
+    """Quote one literal FTS5 token so operators and punctuation stay literal."""
+    return f'"{str(term).replace(chr(34), chr(34) * 2)}"'
+
+
+def _memory_fts_term_groups(
+    query: str,
+    query_terms: list[str],
+    *,
+    max_index_terms: int = MAX_MEMORY_QUERY_TERMS * 3,
+) -> list[tuple[str, list[str]]]:
+    """Return ``(canonical term, index spellings)`` groups in query order.
+
+    The flattened spellings are exactly the literal terms the OR discovery
+    query has always indexed.  Grouping them by canonical query term lets
+    recall count or require each query term on its own (for example to drop an
+    everyday word that matches most of the store) without changing what any
+    single spelling matches.
+    """
+    if not query_terms or "%" in query or "_" in query:
+        return []
+    limit = max(1, int(max_index_terms))
+    surface_terms = _memory_surface_terms(query, query_terms) or query_terms
+    groups: list[tuple[str, list[str]]] = []
+    positions: dict[str, int] = {}
+    seen: set[str] = set()
+    total = 0
+    for surface in surface_terms:
+        if total >= limit:
+            break
+        canonical = _normalize_memory_token(surface)
+        for term in (surface, *_memory_inflection_terms(surface)):
+            if term not in seen:
+                index = positions.get(canonical)
+                if index is None:
+                    index = len(groups)
+                    positions[canonical] = index
+                    groups.append((canonical, []))
+                groups[index][1].append(term)
+                seen.add(term)
+                total += 1
+            if total >= limit:
+                break
+    return groups
+
+
+def _memory_fts_group_query(spellings: Iterable[str]) -> str:
+    """OR every index spelling of one query term."""
+    return " OR ".join(_memory_fts_literal(term) for term in spellings)
+
+
 def _memory_fts_query(
     query: str,
     query_terms: list[str],
     *,
     max_index_terms: int = MAX_MEMORY_QUERY_TERMS * 3,
+    require_all: bool = False,
 ) -> str | None:
-    """Build a literal OR query; wildcard-bearing input keeps the LIKE fallback."""
+    """Build a literal OR query; wildcard-bearing input keeps the LIKE fallback.
+
+    With ``require_all`` every query term must match (any of its spellings),
+    which is the intersection recall falls back to when no single term can
+    discriminate on a large store.
+    """
     if not query_terms or "%" in query or "_" in query:
         return None
+    if require_all:
+        groups = _memory_fts_term_groups(
+            query, query_terms, max_index_terms=max_index_terms
+        )
+        if not groups:
+            return None
+        return " AND ".join(
+            f"({_memory_fts_group_query(spellings)})" for _term, spellings in groups
+        )
     index_terms: list[str] = []
     surface_terms = _memory_surface_terms(query, query_terms) or query_terms
     for surface in surface_terms:
@@ -773,11 +1223,7 @@ def _memory_fts_query(
                 index_terms.append(term)
             if len(index_terms) >= max(1, int(max_index_terms)):
                 break
-    quoted = [
-        f'"{term.replace(chr(34), chr(34) * 2)}"'
-        for term in index_terms
-    ]
-    return " OR ".join(quoted)
+    return _memory_fts_group_query(index_terms)
 
 
 def evaluate_response_conditioned_retrieval(
@@ -836,6 +1282,7 @@ def _rank_memory_rows(
     relative_information_floor: float = 0.0,
     specificity_gap_prunes_weaker: int = 0,
     query_text: str | None = None,
+    row_cache_allowed: _RowCachePolicy = True,
 ) -> list[dict[str, Any]]:
     """Rank candidates by query coverage, phrase fidelity, then BM25 relevance."""
     if not rows or not query_terms:
@@ -851,7 +1298,14 @@ def _rank_memory_rows(
     if specificity_gap_prunes_weaker < 0:
         raise ValueError("specificity_gap_prunes_weaker must not be negative")
 
-    documents = [_memory_tokens(row[content_key], meaningful_only=False) for row in rows]
+    documents = [
+        _memory_tokens(
+            row[content_key],
+            meaningful_only=False,
+            cache_allowed=_row_cache_admitted(row, row_cache_allowed),
+        )
+        for row in rows
+    ]
     query_variants = {
         term: set(_memory_term_variants(term)) for term in query_terms
     }
@@ -867,6 +1321,10 @@ def _rank_memory_rows(
         if query_text is not None and not _memory_semantic_constraints_compatible(
             query_text,
             str(row[content_key]),
+            document_cache_allowed=_row_cache_admitted(
+                row,
+                row_cache_allowed,
+            ),
         ):
             continue
         row_keys = set(row.keys())

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import copy
+import functools
 import hashlib
 import json
 import math
@@ -26,26 +28,40 @@ from .claim_clock import (
     protected_predicate,
     source_key as claim_source_key,
 )
-from .learning_memory_quality import learning_memory_record_allowed
+from .governed_memory import parse_explicit_project_fact, project_claim_scope
+from .learning_memory_quality import (
+    TRAINING_QUALITY_CONTRACT_VERSION,
+    learning_memory_record_allowed,
+)
 from .memory_retrieval import (
+    _ACTIVE_RECALL_CACHE,
     MAX_MEMORY_QUERY_TERMS,  # noqa: F401 - compatibility facade
     MAX_MEMORY_SEARCH_CANDIDATES,
     _MAX_MEMORY_QUERY_TERM_CANDIDATES,
     _memory_candidate_terms,
     _memory_evidence_terms,
+    _memory_fts_group_query,
+    _memory_fts_literal,
     _memory_fts_query,
+    _memory_fts_term_groups,
+    _memory_identity_capable_term,
     _memory_identity_conflict,
+    _memory_identity_scope,
     _memory_like_terms,
     _memory_query_targets_authority_evasion,
     _memory_query_terms,
     _memory_resolve_sibling_identities,
     _memory_term_variants,
     _memory_tokens,
-    _normalize_memory_token,  # noqa: F401 - compatibility facade
+    _normalize_memory_token,
     _rank_memory_rows,
+    _structured_memory_identifier,
+    RecallCache,
 )
 from .redaction import (
+    contains_explicit_sensitive_key_phrase,
     contains_private_identifier,
+    contains_sensitive_key_phrase,
     contains_secret,
     is_redacted_descriptor,
     is_sensitive_key,
@@ -92,6 +108,45 @@ def now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def _ordinary_memory_provenance_material_from_fields(
+    memory_id: int,
+    created_at: str,
+    kind: str,
+    content: str,
+    source: str | None,
+    *,
+    origin: str,
+    eligible: bool,
+) -> dict[str, Any]:
+    """Build the canonical ordinary-memory receipt without database access."""
+    return {
+        "schema": "jarvis.ordinary-memory-provenance.v1",
+        "memory": {
+            "id": int(memory_id),
+            "created_at": str(created_at),
+            "kind": str(kind),
+            "content": str(content),
+            "source": None if source is None else str(source),
+        },
+        "authorization": {
+            "origin": str(origin),
+            "eligible": bool(eligible),
+        },
+    }
+
+
+def _ordinary_memory_provenance_digest_from_material(
+    material: dict[str, Any],
+) -> str:
+    canonical = json.dumps(
+        material,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
 def training_prompt_split(prompt: str, task_kind: str) -> str:
     """Keep every response for one normalized task prompt in the same data split."""
     split_key = json.dumps(
@@ -107,7 +162,91 @@ def training_prompt_split(prompt: str, task_kind: str) -> str:
     return "train" if bucket < 80 else "validation" if bucket < 90 else "test"
 
 
-SCHEMA_VERSION = 41
+SCHEMA_VERSION = 43
+
+_ORDINARY_MEMORY_PROVENANCE_ORIGINS = frozenset({
+    "explicit_operator_memory",
+    "explicit_user_feedback",
+    "verified_learning",
+    "verified_vault_note",
+    "verified_import",
+})
+
+
+def _learning_quality_quarantined_record(
+    memory_id: Any,
+    created_at: Any,
+    kind: Any,
+    content: Any,
+    source: Any,
+    origin: Any,
+    eligible: Any,
+    content_sha256: Any,
+    provenance_sha256: Any,
+) -> int:
+    """Identify provenance-valid, privacy-clean learning rows barred from recall."""
+    try:
+        if str(kind).casefold() != "learning":
+            return 0
+        normalized_eligible = bool(int(eligible))
+        normalized_origin = str(origin)
+        if (
+            normalized_eligible
+            and normalized_origin not in _ORDINARY_MEMORY_PROVENANCE_ORIGINS
+        ) or (not normalized_eligible and normalized_origin != "unverified"):
+            return 0
+        normalized_content = str(content)
+        if str(content_sha256) != hashlib.sha256(
+            normalized_content.encode("utf-8")
+        ).hexdigest():
+            return 0
+        normalized_source = None if source is None else str(source)
+        material = _ordinary_memory_provenance_material_from_fields(
+            int(memory_id),
+            str(created_at),
+            str(kind),
+            normalized_content,
+            normalized_source,
+            origin=normalized_origin,
+            eligible=normalized_eligible,
+        )
+        if str(provenance_sha256) != (
+            _ordinary_memory_provenance_digest_from_material(material)
+        ):
+            return 0
+        recall_material = "\n".join((
+            normalized_content,
+            "" if normalized_source is None else normalized_source,
+        ))
+        if (
+            contains_secret(recall_material)
+            or contains_private_identifier(recall_material)
+        ):
+            return 0
+        # Learning rows are audit/research artifacts governed by the explicit
+        # quality contract: valid-but-unverified or low-authority examples must
+        # not influence model-facing ranking. Ordinary unverified facts retain
+        # the separate hard-shadow policy in _rank_generic_recall_rows.
+        return int(
+            not normalized_eligible
+            or not learning_memory_record_allowed(
+                content=normalized_content,
+                source="" if normalized_source is None else normalized_source,
+            )
+        )
+    except (TypeError, ValueError, OverflowError):
+        return 0
+
+
+_LEARNING_QUALITY_VISIBLE_SQL = f"""
+AND NOT EXISTS (
+    SELECT 1 FROM ordinary_memory_quality_quarantine AS omq
+    WHERE omq.memory_id=m.id
+      AND omq.contract_version={TRAINING_QUALITY_CONTRACT_VERSION}
+      AND omq.content_sha256=omp.content_sha256
+      AND omq.provenance_sha256=omp.provenance_sha256
+)
+"""
 
 LESSON_DEFAULT_TTL_DAYS = 180
 LESSON_REUSABLE_PREDICTION_ORIGINS = frozenset({
@@ -167,7 +306,8 @@ _CLAIM_QUERY_METADATA_TERMS = frozenset({
 })
 _CLAIM_DERIVATIONAL_SUFFIXES = (
     "ations", "ation", "ators", "ator", "ating", "ated", "ates", "ate",
-    "ments", "ment", "ors", "or", "ers", "er", "ing", "ed", "age", "e",
+    "ments", "ment", "ions", "ion", "ors", "or", "ers", "er", "ing", "ed",
+    "age", "e",
 )
 _CLAIM_COMPOUND_PREFIXES = frozenset({
     "anti", "counter", "inter", "intra", "macro", "micro", "multi",
@@ -178,6 +318,7 @@ _CLAIM_IDENTITY_DESCRIPTOR_TERMS = frozenset({
     "profile", "user",
 })
 _MAX_SUPERSEDED_CLAIM_VERSIONS = 64
+_CLAIM_RECALL_BATCH_SIZE = 400
 _MAX_CLAIM_QUERY_TERMS = 32
 _LESSON_QUERY_METADATA_TERMS = frozenset({
     "apply", "complete", "completed", "completion", "family", "lesson",
@@ -193,43 +334,205 @@ _LESSON_IDENTITY_METADATA_TERMS = frozenset({
 })
 
 
-def _claim_term_root(term: str) -> str:
-    """Return a conservative derivational root for claim-field matching."""
+def _claim_cache_key(namespace: str, terms: Sequence[str]) -> tuple[str, bytes]:
+    """Return a boundary-safe digest key without retaining structured fields."""
+    digest = hashlib.blake2b(digest_size=16, person=b"jarvis-claim-v1")
+    for term in sorted(str(item) for item in terms):
+        encoded = term.encode("utf-8")
+        digest.update(len(encoded).to_bytes(4, "big"))
+        digest.update(encoded)
+    return str(namespace), digest.digest()
+
+
+def _ordinary_cache_field_digest(value: Any) -> bytes:
+    """Digest one untrusted eligibility field before it enters a cache key."""
+    return hashlib.blake2b(
+        str(value).encode("utf-8"),
+        digest_size=16,
+        person=b"jarvis-ord-v1",
+    ).digest()
+
+
+def _claim_ordered_cache_key(
+    namespace: str,
+    parts: Sequence[Any],
+) -> tuple[str, bytes]:
+    """Digest an ordered structured record without retaining any raw field."""
+    digest = hashlib.blake2b(digest_size=16, person=b"jarvis-claim-v1")
+    for part in parts:
+        encoded = repr(part).encode("utf-8")
+        digest.update(len(encoded).to_bytes(4, "big"))
+        digest.update(encoded)
+    return str(namespace), digest.digest()
+
+
+def _claim_term_root(term: str, *, cache_allowed: bool = True) -> str:
+    """Return a conservative derivational root for claim-field matching.
+
+    Memoized in the active store's ``RecallCache`` (cleared on close or
+    deletion); a plain pure function outside a recall call.
+    """
+    cache = _ACTIVE_RECALL_CACHE.get() if cache_allowed else None
+    if cache is None:
+        return _claim_term_root_uncached(term)
+    key = _claim_cache_key("claim-root", (str(term),))
+    root = cache.get(key)
+    if root is None:
+        root = _claim_term_root_uncached(term)
+        cache.put(key, root, len(str(term)) + len(root))
+    return root
+
+
+def _claim_term_root_uncached(term: str) -> str:
+    """Return a conservative derivational root for claim-field matching.
+
+    Both sides of a comparison receive the same one-suffix normalization.  A
+    doubled trailing consonant is collapsed and a trailing ``e`` is removed so
+    common verb/noun families meet at one exact root without enabling substring
+    matching (for example, inspect/inspection and plan/planning).
+    """
     normalized = str(term).casefold()
     if len(normalized) < 6:
         return normalized
     for suffix in _CLAIM_DERIVATIONAL_SUFFIXES:
         if normalized.endswith(suffix):
             root = normalized[:-len(suffix)]
-            if len(root) >= 4:
+            # Bare ``-ion`` is highly collision-prone for four-letter stems
+            # (miss/mission, pass/passion, vers/version, port/portion).  Keep
+            # that family conservative while retaining longer, useful pairs
+            # such as inspect/inspection.
+            minimum_root_length = 5 if suffix in {"ion", "ions"} else 4
+            if len(root) >= minimum_root_length:
+                if root[-1] == root[-2] and root[-1] not in "aeiou":
+                    root = root[:-1]
+                if len(root) > 4 and root.endswith("e"):
+                    root = root[:-1]
                 return root
+    if len(normalized) > 4 and normalized.endswith("e"):
+        return normalized[:-1]
     return normalized
 
 
 def _claim_matched_query_terms(
-    query_terms: set[str], record_terms: set[str]
+    query_terms: set[str],
+    record_terms: set[str],
+    *,
+    cache_allowed: bool = True,
 ) -> set[str]:
-    """Match bounded inflections/compounds without treating substrings as facts."""
+    """Match bounded inflections/compounds without treating substrings as facts.
+
+    Each query term is decided independently by three rules: an exact record
+    term; a record term sharing its derivational root where at least one side
+    is not already the bare root; or a bounded compound-prefix relation whose
+    shorter side has at least five characters.  The rules are evaluated with
+    set lookups, so the cost no longer grows with the number of record terms.
+    ``tests/test_memory_scale_recall.py`` pins equality with the original
+    pairwise loop on random vocabularies.
+    """
     matches: set[str] = set()
-    rooted_record_terms = {
-        term: _claim_term_root(term) for term in record_terms
-    }
-    for query_term in query_terms:
-        query_root = _claim_term_root(query_term)
-        for record_term, record_root in rooted_record_terms.items():
-            if query_term == record_term:
-                matches.add(query_term)
-                break
-            if query_root == record_root and query_root != query_term:
-                matches.add(query_term)
-                break
-            shorter, longer = sorted((query_term, record_term), key=len)
-            if len(shorter) >= 5 and any(
-                longer == prefix + shorter for prefix in _CLAIM_COMPOUND_PREFIXES
-            ):
-                matches.add(query_term)
-                break
+    record_set = frozenset(record_terms)
+    if not record_set:
+        return matches
+    # One claim's field tokens are matched many times per query and again on
+    # later turns, so the root summary of a record-term set is memoized in
+    # the active store's RecallCache alongside the per-term roots.
+    cache = _ACTIVE_RECALL_CACHE.get() if cache_allowed else None
+    record_key = _claim_cache_key("claim-record-roots", tuple(record_set))
+    summary = cache.get(record_key) if cache is not None else None
+    if summary is None:
+        roots_present: set[str] = set()
+        roots_with_inflected_term: set[str] = set()
+        for record_term in record_set:
+            record_root = _claim_term_root(
+                record_term, cache_allowed=cache_allowed
+            )
+            roots_present.add(record_root)
+            if record_root != record_term:
+                roots_with_inflected_term.add(record_root)
+        summary = (frozenset(roots_present), frozenset(roots_with_inflected_term))
+        if cache is not None:
+            cache.put(
+                record_key,
+                summary,
+                sum(len(term) for term in record_set)
+                + sum(len(root) for root in roots_present),
+            )
+    roots_present, roots_with_inflected_term = summary
+    query_key = _claim_cache_key("claim-query-shapes", tuple(query_terms))
+    shapes = cache.get(query_key) if cache is not None else None
+    if shapes is None:
+        shapes = tuple(
+            (
+                query_term,
+                *_claim_query_term_shape(
+                    query_term, cache_allowed=cache_allowed
+                ),
+            )
+            for query_term in query_terms
+        )
+        if cache is not None:
+            cache.put(query_key, shapes, sum(len(term) * 4 for term in query_terms))
+    for query_term, query_root, prefixed_forms, bare_forms in shapes:
+        if query_term in record_set:
+            matches.add(query_term)
+            continue
+        if query_root in roots_present and (
+            query_root != query_term or query_root in roots_with_inflected_term
+        ):
+            matches.add(query_term)
+            continue
+        if any(form in record_set for form in prefixed_forms) or any(
+            form in record_set for form in bare_forms
+        ):
+            matches.add(query_term)
     return matches
+
+
+def _claim_query_term_shape(
+    query_term: str,
+    *,
+    cache_allowed: bool = True,
+) -> tuple[str, tuple[str, ...], tuple[str, ...]]:
+    """Return the root and the bounded compound forms one query term can match.
+
+    ``prefixed_forms`` are the longer record spellings that would contain this
+    term behind a compound prefix; ``bare_forms`` are the shorter record
+    spellings this term would contain behind one.  Both honour the five
+    character minimum on the shorter side.  Memoized in the active store's
+    ``RecallCache``; pure outside a recall call.
+    """
+    cache = _ACTIVE_RECALL_CACHE.get() if cache_allowed else None
+    key = _claim_cache_key("claim-shape", (str(query_term),))
+    if cache is not None:
+        shape = cache.get(key)
+        if shape is not None:
+            return shape
+    shape = _claim_query_term_shape_uncached(query_term)
+    if cache is not None:
+        cache.put(
+            key,
+            shape,
+            len(str(query_term))
+            + sum(len(form) for group in shape[1:] for form in group),
+        )
+    return shape
+
+
+def _claim_query_term_shape_uncached(
+    query_term: str,
+) -> tuple[str, tuple[str, ...], tuple[str, ...]]:
+    root = _claim_term_root(query_term)
+    prefixed_forms = (
+        tuple(prefix + query_term for prefix in sorted(_CLAIM_COMPOUND_PREFIXES))
+        if len(query_term) >= 5
+        else ()
+    )
+    bare_forms = tuple(
+        query_term[len(prefix):]
+        for prefix in sorted(_CLAIM_COMPOUND_PREFIXES)
+        if query_term.startswith(prefix) and len(query_term) - len(prefix) >= 5
+    )
+    return root, prefixed_forms, bare_forms
 
 
 def _claim_query_terms(query: str) -> list[str]:
@@ -255,6 +558,52 @@ def _claim_query_terms(query: str) -> list[str]:
         )[:_MAX_CLAIM_QUERY_TERMS - 2])
     )
     return [all_terms[index] for index in selected_indices]
+
+
+def _validated_claim_scope(scope: str) -> str:
+    """Validate the private storage-layer global/project scope contract."""
+    normalized = str(scope).strip().casefold()
+    if normalized == "global":
+        return normalized
+    match = re.fullmatch(r"project:([1-9][0-9]{0,18})", normalized)
+    if match is None:
+        raise ValueError("Claim scope must be global or project:<positive id>")
+    project_id = int(match.group(1))
+    if project_id > 9_223_372_036_854_775_807:
+        raise ValueError("Claim project scope is out of range")
+    return project_claim_scope(project_id)
+
+
+_PROJECT_CLAIM_RECORD_PREFIX = "[jarvis project claim v1]"
+
+
+def _claim_memory_content(
+    subject: str,
+    predicate: str,
+    value: str,
+    scope: str,
+    record_stamp: str | None = None,
+) -> str:
+    """Keep legacy globals stable and frame project fields without ambiguity."""
+    canonical = f"{subject} {predicate}: {value}"
+    if scope == "global":
+        return canonical
+    if not record_stamp:
+        raise ValueError("Project claim backing content requires a record timestamp")
+    payload = {
+        "created_at": str(record_stamp),
+        "predicate": predicate,
+        "schema": "jarvis.project-claim-memory.v1",
+        "scope": scope,
+        "subject": subject,
+        "value": value,
+    }
+    return _PROJECT_CLAIM_RECORD_PREFIX + json.dumps(
+        payload,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
 
 
 def _claim_subject_identity_conflict(
@@ -370,6 +719,20 @@ def _validated_nonsecret_metadata(value: Any, label: str) -> str:
     return text
 
 
+def _claim_has_sensitive_key(subject: str, predicate: str) -> bool:
+    """Detect credential field names split across structured claim keys."""
+    subject_text = str(subject).strip()
+    predicate_text = str(predicate).strip()
+    combined = f"{subject_text} {predicate_text}".strip()
+    return any(
+        is_sensitive_key(candidate) or contains_sensitive_key_phrase(candidate)
+        for candidate in (subject_text, predicate_text)
+    ) or (
+        is_sensitive_key(combined)
+        or contains_explicit_sensitive_key_phrase(combined)
+    )
+
+
 def _validated_worker_id(value: str) -> str:
     if not isinstance(value, str):
         raise TypeError("Worker id must be a string")
@@ -398,18 +761,51 @@ def _escape_like(value: str) -> str:
     return value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
 
 
+_RECALL_REPORT_ABSTAINING_MODES = frozenset({
+    "screened", "empty", "overflow", "error", "unknown-identity",
+    "identity-unbound", "identity-overflow",
+})
+
+
+def _blank_recall_report(
+    mode: str,
+    *,
+    candidate_limit: int = MAX_MEMORY_SEARCH_CANDIDATES,
+    discovery_terms: int = 0,
+) -> dict[str, Any]:
+    """Fresh diagnostic record for one lexical recall attempt."""
+    return {
+        "channel": "lexical",
+        "mode": str(mode),
+        "candidate_limit": int(candidate_limit),
+        "discovery_terms": int(discovery_terms),
+        "dropped_terms": [],
+        "unknown_terms": [],
+        "candidates": 0,
+        "abstained": str(mode) in _RECALL_REPORT_ABSTAINING_MODES,
+    }
+
+
+def _with_recall_cache(method: Any) -> Any:
+    """Activate the store's ``RecallCache`` for the duration of one recall call."""
+
+    @functools.wraps(method)
+    def wrapper(self: Any, *args: Any, **kwargs: Any) -> Any:
+        cache = getattr(self, "_recall_cache", None)
+        if cache is None:
+            return method(self, *args, **kwargs)
+        with cache.activate():
+            return method(self, *args, **kwargs)
+
+    return wrapper
+
+
 def _bounded_limit(value: int, maximum: int) -> int:
     return max(0, min(int(value), maximum))
 
 
 class Memory:
-    ORDINARY_MEMORY_PROVENANCE_ORIGINS = frozenset({
-        "explicit_operator_memory",
-        "explicit_user_feedback",
-        "verified_learning",
-        "verified_vault_note",
-        "verified_import",
-    })
+    ORDINARY_MEMORY_PROVENANCE_ORIGINS = _ORDINARY_MEMORY_PROVENANCE_ORIGINS
     SCREEN_COMPANION_LEARNING_CATEGORIES = frozenset({
         "coding", "general", "navigation", "organization", "research", "writing",
     })
@@ -487,6 +883,13 @@ class Memory:
             "eligible_manifests": 0,
         }
         self._claim_clock_ready = False
+        # Per-store memo for pure recall helpers; digest-keyed, byte-bounded,
+        # cleared on deletion and close (see RecallCache).
+        self._recall_cache = RecallCache()
+        # Diagnostic record of the most recent lexical recall attempt so an
+        # abstention at scale is observable instead of silent.  Read it
+        # through ``recall_report()``, which returns a copy.
+        self._last_recall_report: dict[str, Any] = _blank_recall_report("idle")
         self.vault: Vault | None = None
         busy_timeout_ms = max(100, min(int(busy_timeout_ms), 120_000))
         self.db = sqlite3.connect(
@@ -616,6 +1019,11 @@ class Memory:
                         origin="verified_vault_note",
                         eligible=True,
                     )
+        if inserted or updated or removed:
+            # Clear only after the transaction commits.  Updated/deleted note
+            # text may otherwise remain in derived token/signature values even
+            # though SQLite already exposes the replacement corpus.
+            self._recall_cache.clear()
         return {
             "notes": len(desired),
             "inserted": inserted,
@@ -682,6 +1090,7 @@ class Memory:
             self.db.rollback()
         self.db.close()
         self._closed = True
+        self._recall_cache.clear()
 
     def _ensure_open(self) -> None:
         if self._closed:
@@ -832,6 +1241,12 @@ class Memory:
             if version < 41:
                 self._migrate_v41()
                 version = 41
+            if version < 42:
+                self._migrate_v42()
+                version = 42
+            if version < 43:
+                self._migrate_v43()
+                version = 43
             self.db.execute(f"PRAGMA user_version={version}")
 
     def _migrate_v1(self) -> None:
@@ -3004,6 +3419,151 @@ class Memory:
                END"""
         )
 
+    def _migrate_v42(self) -> None:
+        """Scope temporal claims so project facts cannot collide or leak."""
+        columns = {
+            str(row["name"])
+            for row in self.db.execute("PRAGMA table_info(memory_claims)").fetchall()
+        }
+        if "scope" not in columns:
+            self.db.execute(
+                "ALTER TABLE memory_claims "
+                "ADD COLUMN scope TEXT NOT NULL DEFAULT 'global'"
+            )
+        self.db.execute(
+            """CREATE INDEX IF NOT EXISTS idx_memory_claims_scope_key
+               ON memory_claims(scope, claim_key, status, id)"""
+        )
+        self.db.execute("DROP TRIGGER IF EXISTS memory_claim_scope_valid_insert")
+        self.db.execute("DROP TRIGGER IF EXISTS memory_claim_scope_immutable")
+        self.db.execute(
+            """CREATE TRIGGER memory_claim_scope_valid_insert
+               BEFORE INSERT ON memory_claims
+               WHEN NEW.scope <> 'global' AND (
+                   length(NEW.scope) > 27
+                   OR substr(NEW.scope, 1, 8) <> 'project:'
+                   OR length(substr(NEW.scope, 9)) = 0
+                   OR substr(NEW.scope, 9) GLOB '*[^0-9]*'
+                   OR CAST(substr(NEW.scope, 9) AS INTEGER) <= 0
+                   OR NEW.scope <> 'project:' || CAST(
+                       CAST(substr(NEW.scope, 9) AS INTEGER) AS TEXT
+                   )
+               )
+               BEGIN
+                   SELECT RAISE(ABORT, 'invalid memory claim scope');
+               END"""
+        )
+        self.db.execute(
+            """CREATE TRIGGER memory_claim_scope_immutable
+               BEFORE UPDATE OF scope ON memory_claims
+               WHEN NEW.scope <> OLD.scope
+               BEGIN
+                   SELECT RAISE(ABORT, 'memory claim scope is immutable');
+               END"""
+        )
+
+    def _migrate_v43(self) -> None:
+        """Persist authenticated learning-quality quarantine membership."""
+        # user_version<43 proves no row in a partial development copy is an
+        # authoritative marker. Rebuild this derived membership atomically;
+        # canonical memories and provenance remain untouched.
+        for trigger in (
+            "ordinary_memory_quality_memory_changed",
+            "ordinary_memory_quality_provenance_changed",
+            "ordinary_memory_quality_provenance_deleted",
+        ):
+            self.db.execute(f"DROP TRIGGER IF EXISTS {trigger}")
+        self.db.execute("DROP TABLE IF EXISTS ordinary_memory_quality_quarantine")
+        self.db.execute(
+            f"""CREATE TABLE ordinary_memory_quality_quarantine (
+                    memory_id INTEGER PRIMARY KEY,
+                    recorded_at TEXT NOT NULL,
+                    contract_version INTEGER NOT NULL CHECK(
+                        contract_version={TRAINING_QUALITY_CONTRACT_VERSION}
+                    ),
+                    content_sha256 TEXT NOT NULL CHECK(length(content_sha256)=64),
+                    source_sha256 TEXT NOT NULL CHECK(length(source_sha256)=64),
+                    provenance_sha256 TEXT NOT NULL CHECK(length(provenance_sha256)=64),
+                    FOREIGN KEY(memory_id) REFERENCES memories(id) ON DELETE CASCADE
+                )"""
+        )
+        rows = self.db.execute(
+            """SELECT m.id AS memory_id, m.created_at, m.kind, m.content, m.source,
+                      omp.origin, omp.eligible, omp.content_sha256,
+                      omp.provenance_sha256
+               FROM memories AS m
+               JOIN ordinary_memory_provenance AS omp ON omp.memory_id=m.id
+               WHERE m.kind='learning'"""
+        ).fetchall()
+        stamp = now_iso()
+        quarantined = [
+            (
+                int(row["memory_id"]),
+                stamp,
+                TRAINING_QUALITY_CONTRACT_VERSION,
+                str(row["content_sha256"]),
+                hashlib.sha256(
+                    str(row["source"] or "").encode("utf-8")
+                ).hexdigest(),
+                str(row["provenance_sha256"]),
+            )
+            for row in rows
+            if _learning_quality_quarantined_record(
+                row["memory_id"],
+                row["created_at"],
+                row["kind"],
+                row["content"],
+                row["source"],
+                row["origin"],
+                row["eligible"],
+                row["content_sha256"],
+                row["provenance_sha256"],
+            )
+        ]
+        self.db.executemany(
+            """INSERT INTO ordinary_memory_quality_quarantine(
+                   memory_id, recorded_at, contract_version, content_sha256,
+                   source_sha256, provenance_sha256
+               ) VALUES (?, ?, ?, ?, ?, ?)""",
+            quarantined,
+        )
+        self.db.execute(
+            """DELETE FROM memory_embeddings
+               WHERE memory_id IN (
+                   SELECT memory_id FROM ordinary_memory_quality_quarantine
+               )"""
+        )
+        self.db.execute(
+            """DELETE FROM memory_embedding_leases
+               WHERE memory_id IN (
+                   SELECT memory_id FROM ordinary_memory_quality_quarantine
+               )"""
+        )
+        self.db.execute(
+            """CREATE TRIGGER ordinary_memory_quality_memory_changed
+               AFTER UPDATE OF created_at, kind, content, source ON memories
+               BEGIN
+                   DELETE FROM ordinary_memory_quality_quarantine
+                   WHERE memory_id=NEW.id;
+               END"""
+        )
+        self.db.execute(
+            """CREATE TRIGGER ordinary_memory_quality_provenance_changed
+               AFTER UPDATE ON ordinary_memory_provenance
+               BEGIN
+                   DELETE FROM ordinary_memory_quality_quarantine
+                   WHERE memory_id=NEW.memory_id;
+               END"""
+        )
+        self.db.execute(
+            """CREATE TRIGGER ordinary_memory_quality_provenance_deleted
+               AFTER DELETE ON ordinary_memory_provenance
+               BEGIN
+                   DELETE FROM ordinary_memory_quality_quarantine
+                   WHERE memory_id=OLD.memory_id;
+               END"""
+        )
+
     @staticmethod
     def _project_id(value: int | None) -> int:
         if value is None:
@@ -3013,6 +3573,40 @@ class Memory:
         if value > 9_223_372_036_854_775_807:
             raise ValueError("project_id is out of range")
         return value
+
+    def _enabled_project_claim_scope(self, project_id: int | None) -> str | None:
+        """Resolve an optional enabled project for generic claim shadowing."""
+        if project_id is None:
+            return None
+        normalized_project = self._project_id(project_id)
+        project = self.db.execute(
+            "SELECT enabled FROM agent_projects WHERE id=?",
+            (normalized_project,),
+        ).fetchone()
+        if project is None or not bool(project["enabled"]):
+            raise ValueError("Recall project does not exist or is disabled")
+        return project_claim_scope(normalized_project)
+
+    @staticmethod
+    def _global_claim_shadow_clause(
+        project_scope: str | None,
+        *,
+        claim_alias: str = "c",
+    ) -> tuple[str, tuple[str, ...]]:
+        """Exclude globals overridden by a live claim in the active project."""
+        if project_scope is None:
+            return "", ()
+        if claim_alias not in {"c"}:
+            raise ValueError("Unsupported claim alias")
+        return (
+            f""" AND NOT EXISTS (
+                     SELECT 1 FROM memory_claims AS project_claim
+                     WHERE project_claim.scope=?
+                       AND project_claim.claim_key={claim_alias}.claim_key
+                       AND project_claim.status IN ('active', 'disputed')
+                 )""",
+            (project_scope,),
+        )
 
     @staticmethod
     def _project_relative_path(value: str) -> str:
@@ -4025,6 +4619,7 @@ class Memory:
         ):
             raise ValueError("conversation_id must be a positive integer")
         self._ensure_open()
+        self._recall_cache.clear()
         with self._immediate_transaction():
             row = self.db.execute(
                 """SELECT id, created_at, title, project_id
@@ -5246,13 +5841,7 @@ class Memory:
 
     @staticmethod
     def _ordinary_memory_provenance_digest(material: dict[str, Any]) -> str:
-        canonical = json.dumps(
-            material,
-            ensure_ascii=False,
-            sort_keys=True,
-            separators=(",", ":"),
-        )
-        return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+        return _ordinary_memory_provenance_digest_from_material(material)
 
     def _ordinary_memory_provenance_material(
         self,
@@ -5268,20 +5857,15 @@ class Memory:
         ).fetchone()
         if row is None or str(row["kind"]) in {"lesson", "claim"}:
             return None
-        return {
-            "schema": "jarvis.ordinary-memory-provenance.v1",
-            "memory": {
-                "id": int(row["id"]),
-                "created_at": str(row["created_at"]),
-                "kind": str(row["kind"]),
-                "content": str(row["content"]),
-                "source": None if row["source"] is None else str(row["source"]),
-            },
-            "authorization": {
-                "origin": str(origin),
-                "eligible": bool(eligible),
-            },
-        }
+        return _ordinary_memory_provenance_material_from_fields(
+            int(row["id"]),
+            str(row["created_at"]),
+            str(row["kind"]),
+            str(row["content"]),
+            None if row["source"] is None else str(row["source"]),
+            origin=str(origin),
+            eligible=bool(eligible),
+        )
 
     def _set_ordinary_memory_provenance_locked(
         self,
@@ -5322,6 +5906,64 @@ class Memory:
                 hashlib.sha256(content.encode("utf-8")).hexdigest(),
                 self._ordinary_memory_provenance_digest(material),
             ),
+        )
+
+    def _sync_learning_quality_quarantine_locked(self, memory_id: int) -> None:
+        """Refresh one derived quality marker after canonical provenance writes."""
+        row = self.db.execute(
+            """SELECT m.id AS memory_id, m.created_at, m.kind, m.content, m.source,
+                      omp.origin, omp.eligible, omp.content_sha256,
+                      omp.provenance_sha256
+               FROM memories AS m
+               LEFT JOIN ordinary_memory_provenance AS omp ON omp.memory_id=m.id
+               WHERE m.id=?""",
+            (int(memory_id),),
+        ).fetchone()
+        if row is None or not _learning_quality_quarantined_record(
+            row["memory_id"],
+            row["created_at"],
+            row["kind"],
+            row["content"],
+            row["source"],
+            row["origin"],
+            row["eligible"],
+            row["content_sha256"],
+            row["provenance_sha256"],
+        ):
+            self.db.execute(
+                "DELETE FROM ordinary_memory_quality_quarantine WHERE memory_id=?",
+                (int(memory_id),),
+            )
+            return
+        self.db.execute(
+            """INSERT INTO ordinary_memory_quality_quarantine(
+                   memory_id, recorded_at, contract_version, content_sha256,
+                   source_sha256, provenance_sha256
+               ) VALUES (?, ?, ?, ?, ?, ?)
+               ON CONFLICT(memory_id) DO UPDATE SET
+                   recorded_at=excluded.recorded_at,
+                   contract_version=excluded.contract_version,
+                   content_sha256=excluded.content_sha256,
+                   source_sha256=excluded.source_sha256,
+                   provenance_sha256=excluded.provenance_sha256""",
+            (
+                int(memory_id),
+                now_iso(),
+                TRAINING_QUALITY_CONTRACT_VERSION,
+                str(row["content_sha256"]),
+                hashlib.sha256(
+                    str(row["source"] or "").encode("utf-8")
+                ).hexdigest(),
+                str(row["provenance_sha256"]),
+            ),
+        )
+        self.db.execute(
+            "DELETE FROM memory_embeddings WHERE memory_id=?",
+            (int(memory_id),),
+        )
+        self.db.execute(
+            "DELETE FROM memory_embedding_leases WHERE memory_id=?",
+            (int(memory_id),),
         )
 
     def _ordinary_memory_provenance_validation(
@@ -5370,73 +6012,188 @@ class Memory:
             provenance_mismatch,
         )
 
-    def _ordinary_memory_recall_eligible(self, memory_id: int) -> bool:
-        valid, eligible, _content_mismatch, _provenance_mismatch = (
-            self._ordinary_memory_provenance_validation(int(memory_id))
-        )
-        if not valid or not eligible:
+    def _ordinary_memory_row_recall_eligible(
+        self,
+        row: Mapping[str, Any],
+    ) -> bool:
+        """Validate one joined ordinary-memory snapshot without another SQL read.
+
+        The cache key contains only hashes plus non-sensitive provenance
+        metadata; its value is one boolean. Any out-of-band field mutation
+        changes the key without retaining invalid/private raw material.
+        """
+        try:
+            memory_id = int(row["id"])
+            created_at = str(row["created_at"])
+            kind = str(row["kind"])
+            content = str(row["content"])
+            source = None if row["source"] is None else str(row["source"])
+            origin = str(row["ordinary_origin"])
+            eligible = bool(int(row["ordinary_eligible"]))
+            stored_content_sha256 = str(
+                row["ordinary_content_sha256"] or ""
+            )
+            stored_provenance_sha256 = str(
+                row["ordinary_provenance_sha256"] or ""
+            )
+            actual_content_sha256 = hashlib.sha256(
+                content.encode("utf-8")
+            ).hexdigest()
+            actual_source_sha256 = hashlib.sha256(
+                (source or "").encode("utf-8")
+            ).hexdigest()
+        except (KeyError, TypeError, ValueError, OverflowError):
             return False
+        cache = _ACTIVE_RECALL_CACHE.get()
+        cache_key: tuple[Any, ...] | None = None
+        cached: Any | None = None
+        if cache is not None:
+            cache_key = (
+                "ordinary-eligibility",
+                memory_id,
+                _ordinary_cache_field_digest(created_at),
+                _ordinary_cache_field_digest(kind),
+                _ordinary_cache_field_digest(origin),
+                eligible,
+                source is None,
+                bytes.fromhex(actual_content_sha256),
+                bytes.fromhex(actual_source_sha256),
+                _ordinary_cache_field_digest(stored_content_sha256),
+                _ordinary_cache_field_digest(stored_provenance_sha256),
+            )
+            cached = cache.get(cache_key)
+        if cached is not None:
+            return bool(cached)
+        try:
+            valid = (
+                kind not in {"lesson", "claim"}
+                and eligible
+                and origin in self.ORDINARY_MEMORY_PROVENANCE_ORIGINS
+                and stored_content_sha256 == actual_content_sha256
+            )
+            if valid:
+                material = _ordinary_memory_provenance_material_from_fields(
+                    memory_id,
+                    created_at,
+                    kind,
+                    content,
+                    source,
+                    origin=origin,
+                    eligible=True,
+                )
+                valid = stored_provenance_sha256 == (
+                    _ordinary_memory_provenance_digest_from_material(material)
+                )
+            if valid:
+                recall_material = "\n".join((content, source or "", kind))
+                valid = not (
+                    contains_secret(recall_material)
+                    or contains_private_identifier(recall_material)
+                )
+            if valid and kind.casefold() == "learning":
+                valid = learning_memory_record_allowed(
+                    content=content,
+                    source=source or "",
+                )
+        except (TypeError, ValueError, OverflowError):
+            valid = False
+        if cache is not None and cache_key is not None:
+            cache.put(cache_key, bool(valid), 1)
+        return bool(valid)
+
+    def _ordinary_recall_cache_safe_ids(
+        self,
+        rows: Sequence[Mapping[str, Any]],
+    ) -> frozenset[int]:
+        """Return IDs whose joined snapshot may populate derived text caches."""
+        safe: set[int] = set()
+        for row in rows:
+            if self._ordinary_memory_row_recall_eligible(row):
+                try:
+                    safe.add(int(row["id"]))
+                except (KeyError, TypeError, ValueError):
+                    continue
+        return frozenset(safe)
+
+    def _ordinary_memory_recall_eligible(self, memory_id: int) -> bool:
         row = self.db.execute(
-            "SELECT content, source, kind FROM memories "
-            "WHERE id=? AND kind NOT IN ('lesson', 'claim')",
+            """SELECT m.id, m.created_at, m.kind, m.content, m.source,
+                      omp.origin AS ordinary_origin,
+                      omp.eligible AS ordinary_eligible,
+                      omp.content_sha256 AS ordinary_content_sha256,
+                      omp.provenance_sha256 AS ordinary_provenance_sha256
+               FROM memories AS m
+               LEFT JOIN ordinary_memory_provenance AS omp ON omp.memory_id=m.id
+               WHERE m.id=?""",
             (int(memory_id),),
         ).fetchone()
-        if row is None:
-            return False
-        material = "\n".join(str(row[key] or "") for key in row.keys())
-        if contains_secret(material) or contains_private_identifier(material):
-            return False
-        if str(row["kind"]).casefold() == "learning":
-            return learning_memory_record_allowed(
-                content=str(row["content"] or ""),
-                source=str(row["source"] or ""),
-            )
-        return True
+        return bool(
+            row is not None and self._ordinary_memory_row_recall_eligible(row)
+        )
 
-    def _claim_memory_recall_eligible(self, memory_id: int) -> bool:
+    def _claim_memory_recall_eligible(
+        self,
+        memory_id: int,
+        *,
+        project_id: int | None = None,
+    ) -> bool:
         """Keep private claim material local and outside model-facing recall."""
         row = self.db.execute(
-            """SELECT c.id AS claim_id, m.content, m.source AS memory_source,
+            """SELECT c.id AS claim_id, c.memory_id, c.created_at,
                       c.subject, c.predicate, c.value, c.value_sha256,
-                      c.source, c.authority
-               FROM memories AS m
-               JOIN memory_claims AS c ON c.memory_id=m.id
-               WHERE m.id=? AND m.kind='claim'
+                      c.source, c.authority, c.scope, c.status
+               FROM memory_claims AS c
+               WHERE c.memory_id=?
                  AND c.status IN ('active', 'disputed')""",
             (int(memory_id),),
         ).fetchone()
         if row is None:
+            return False
+        return int(row["claim_id"]) in self._claim_rows_recall_eligible(
+            [row], project_id=project_id
+        )
+
+    @staticmethod
+    def _claim_recall_material_eligible(
+        row: Mapping[str, Any],
+        memory_row: Mapping[str, Any] | None,
+        evidence_rows: Sequence[Mapping[str, Any]],
+        *,
+        visible_scopes: set[str],
+    ) -> bool:
+        """Validate one already-fetched claim without issuing database reads."""
+        if memory_row is None or str(memory_row["memory_kind"] or "") != "claim":
+            return False
+        if str(row["status"] or "") not in {"active", "disputed"}:
+            return False
+        scope = str(row["scope"] or "")
+        if scope not in visible_scopes:
             return False
         subject = str(row["subject"] or "")
         predicate = str(row["predicate"] or "")
         value = str(row["value"] or "")
         source = str(row["source"] or "")
         authority = str(row["authority"] or "")
-        canonical_content = f"{subject} {predicate}: {value}"
-        if str(row["content"] or "") != canonical_content:
+        canonical_content = _claim_memory_content(
+            subject, predicate, value, scope, str(row["created_at"])
+        )
+        if str(memory_row["memory_content"] or "") != canonical_content:
             # Claims are returned from their structured fields.  If either the
             # structured row or its paired memory was modified independently,
             # fail closed instead of trusting a non-canonical reconstruction.
             return False
-        if is_sensitive_key(predicate):
-            # A structured claim whose predicate is itself a credential field
-            # must never become model-facing memory, even when its arbitrary
-            # value does not resemble a provider-specific token format.
+        if _claim_has_sensitive_key(subject, predicate):
+            # A structured claim whose subject/predicate pair names a
+            # credential field must never become model-facing memory, even
+            # when its arbitrary value does not resemble a provider-specific
+            # token format. This also catches split keys such as API + key.
             return False
         canonical_value_sha256 = hashlib.sha256(
             " ".join(value.casefold().split()).encode("utf-8")
         ).hexdigest()
         if str(row["value_sha256"] or "") != canonical_value_sha256:
             return False
-        if str(row["memory_source"] or "") != f"{authority}:{source}"[:2_000]:
-            return False
-        try:
-            evidence_rows = self.db.execute(
-                """SELECT source, authority, confidence, evidence_sha256
-                   FROM memory_claim_evidence WHERE claim_id=?""",
-                (int(row["claim_id"]),),
-            ).fetchall()
-        except sqlite3.DatabaseError:
+        if str(memory_row["memory_source"] or "") != f"{authority}:{source}"[:2_000]:
             return False
         supported = False
         for evidence in evidence_rows:
@@ -5480,6 +6237,107 @@ class Memory:
             for field in (subject, predicate, value, source)
         )
 
+    def _claim_rows_recall_eligible(
+        self,
+        rows: Sequence[Mapping[str, Any]],
+        *,
+        project_id: int | None = None,
+    ) -> set[int]:
+        """Validate a bounded claim set with constant-size batched SQL reads."""
+        if not rows:
+            return set()
+        visible_scopes = {"global"}
+        if project_id is not None:
+            visible_scopes.add(project_claim_scope(self._project_id(project_id)))
+        try:
+            claim_rows = {
+                int(row["claim_id"]): row
+                for row in rows
+            }
+            memory_ids = list(dict.fromkeys(
+                int(row["memory_id"]) for row in claim_rows.values()
+            ))
+        except (KeyError, TypeError, ValueError):
+            return set()
+
+        memories_by_id: dict[int, sqlite3.Row] = {}
+        evidence_by_claim: dict[int, list[sqlite3.Row]] = {}
+        try:
+            for offset in range(0, len(memory_ids), _CLAIM_RECALL_BATCH_SIZE):
+                chunk = memory_ids[offset:offset + _CLAIM_RECALL_BATCH_SIZE]
+                placeholders = ",".join("?" for _memory_id in chunk)
+                memory_rows = self.db.execute(
+                    f"""SELECT id AS memory_id, kind AS memory_kind,
+                               content AS memory_content, source AS memory_source
+                        FROM memories WHERE id IN ({placeholders})""",
+                    chunk,
+                ).fetchall()
+                for memory_row in memory_rows:
+                    memories_by_id[int(memory_row["memory_id"])] = memory_row
+
+            claim_ids = list(claim_rows)
+            for offset in range(0, len(claim_ids), _CLAIM_RECALL_BATCH_SIZE):
+                chunk = claim_ids[offset:offset + _CLAIM_RECALL_BATCH_SIZE]
+                placeholders = ",".join("?" for _claim_id in chunk)
+                evidence_rows = self.db.execute(
+                    f"""SELECT claim_id, source, authority, confidence,
+                               evidence_sha256
+                        FROM memory_claim_evidence
+                        WHERE claim_id IN ({placeholders})""",
+                    chunk,
+                ).fetchall()
+                for evidence in evidence_rows:
+                    evidence_by_claim.setdefault(
+                        int(evidence["claim_id"]), []
+                    ).append(evidence)
+        except sqlite3.DatabaseError:
+            return set()
+
+        eligible: set[int] = set()
+        cache = _ACTIVE_RECALL_CACHE.get()
+        for claim_id, row in claim_rows.items():
+            memory_row = memories_by_id.get(int(row["memory_id"]))
+            claim_evidence = evidence_by_claim.get(claim_id, ())
+            cache_key: tuple[str, bytes] | None = None
+            cached_eligible: Any | None = None
+            if cache is not None:
+                cache_key = _claim_ordered_cache_key(
+                    "claim-eligibility",
+                    (
+                        tuple(sorted(visible_scopes)),
+                        tuple(
+                            (key, row[key]) for key in sorted(row.keys())
+                        ),
+                        None if memory_row is None else tuple(
+                            (key, memory_row[key])
+                            for key in sorted(memory_row.keys())
+                        ),
+                        tuple(sorted(
+                            tuple(
+                                (key, evidence[key])
+                                for key in sorted(evidence.keys())
+                            )
+                            for evidence in claim_evidence
+                        )),
+                    ),
+                )
+                cached_eligible = cache.get(cache_key)
+            is_eligible = (
+                bool(cached_eligible)
+                if cached_eligible is not None
+                else self._claim_recall_material_eligible(
+                    row,
+                    memory_row,
+                    claim_evidence,
+                    visible_scopes=visible_scopes,
+                )
+            )
+            if cache is not None and cache_key is not None and cached_eligible is None:
+                cache.put(cache_key, is_eligible, 1)
+            if is_eligible:
+                eligible.add(claim_id)
+        return eligible
+
     def _filter_generic_recall_rows(
         self,
         rows: list[sqlite3.Row],
@@ -5506,6 +6364,7 @@ class Memory:
         relative_match_floor: float = 0.0,
         relative_information_floor: float = 0.0,
         query_text: str | None = None,
+        cache_safe_ids: frozenset[int] | None = None,
     ) -> tuple[list[dict[str, Any]], bool]:
         """Rank all candidates before filtering provenance, and abstain on shadowing.
 
@@ -5515,12 +6374,18 @@ class Memory:
         its strongest lexical match is not recall-eligible, fail closed instead
         of silently substituting different content.
         """
+        if cache_safe_ids is None:
+            cache_safe_ids = self._ordinary_recall_cache_safe_ids(rows)
         rank_arguments = {
             "keep_id": True,
             "minimum_information_coverage": minimum_information_coverage,
             "relative_match_floor": relative_match_floor,
             "relative_information_floor": relative_information_floor,
             "query_text": query_text,
+            # Raw candidates intentionally retain ineligible and tampered hard
+            # shadows. Only digest-validated, privacy-clean ordinary snapshots
+            # may populate text/signature caches before final eligibility.
+            "row_cache_allowed": cache_safe_ids,
         }
         ranked = _rank_memory_rows(
             rows,
@@ -5559,6 +6424,13 @@ class Memory:
                 # weaker answer. A stronger verified prefix remains usable.
                 shadowed = True
                 break
+            for field in (
+                "ordinary_origin",
+                "ordinary_eligible",
+                "ordinary_content_sha256",
+                "ordinary_provenance_sha256",
+            ):
+                item.pop(field, None)
             eligible.append(item)
         if not keep_id:
             for item in eligible:
@@ -5575,6 +6447,400 @@ class Memory:
             return list(self.db.execute(sql, parameters).fetchall())
         except sqlite3.DatabaseError:
             return None
+
+    def _lexical_recall_candidates(
+        self,
+        query: str,
+        discovery_terms: list[str],
+        *,
+        claim_shadow_sql: str,
+        claim_shadow_parameters: tuple[Any, ...] | list[Any],
+        candidate_limit: int,
+        term_chunk_size: int,
+    ) -> tuple[list[sqlite3.Row], frozenset[int]] | None:
+        """Discover a bounded lexical candidate pool without silent scale failure.
+
+        Discovery starts with a bounded OR pool. When the query contains a
+        structural/proper subject identity, that pool is replaced at every
+        corpus size by rows proving the identity and supported fact anchors;
+        an absent or overflowing association abstains instead of returning a
+        generic fact. Natural word length is never treated as identity.
+
+        Generic overflow narrows in fixed stages: one batched frequency query,
+        OR of terms that can discriminate inside the visible scope, then an
+        all-term intersection. Frequency and quality membership use the same
+        project, claim-shadow, and learning-quarantine filters as discovery, so
+        hidden/quarantined rows neither consume the cap nor change observable
+        selection. Wildcard input retains the bounded LIKE path.
+
+        Returns rows plus IDs whose joined provenance/privacy snapshot permits
+        derived text caching. ``None`` denotes a database failure, final
+        overflow, or unproved identity association.
+        """
+        report = _blank_recall_report(
+            "empty",
+            candidate_limit=candidate_limit,
+            discovery_terms=len(discovery_terms),
+        )
+        self._last_recall_report = report
+        visible_sql = f"""FROM memory_fts
+               JOIN memories AS m ON m.id=memory_fts.rowid
+               LEFT JOIN memory_claims AS c ON c.memory_id=m.id
+               LEFT JOIN ordinary_memory_provenance AS omp ON omp.memory_id=m.id
+               WHERE memory_fts MATCH ?
+                 AND m.kind<>'lesson'
+                 {_LEARNING_QUALITY_VISIBLE_SQL}
+                 AND (m.kind<>'claim' OR (
+                     c.scope='global' AND c.status IN ('active', 'disputed')
+                     {claim_shadow_sql}
+                 ))"""
+        select_sql = f"""SELECT m.id, m.created_at, m.kind, m.content, m.source,
+                      c.status AS claim_status, c.authority AS claim_authority,
+                      omp.origin AS ordinary_origin,
+                      omp.eligible AS ordinary_eligible,
+                      omp.content_sha256 AS ordinary_content_sha256,
+                      omp.provenance_sha256 AS ordinary_provenance_sha256
+               {visible_sql}
+               ORDER BY memory_fts.rank, m.id DESC LIMIT ?"""
+        def fts_rows(match: str) -> list[sqlite3.Row] | None:
+            return self._generic_recall_query_rows(
+                select_sql,
+                (match, *claim_shadow_parameters, candidate_limit + 1),
+            )
+
+        def visible_frequencies(matches: Sequence[str]) -> list[int] | None:
+            """Count a bounded group of FTS expressions in one SQL statement."""
+            if not matches:
+                return []
+            ctes: list[str] = []
+            selects: list[str] = []
+            parameters: list[Any] = []
+            for index, match in enumerate(matches):
+                ctes.append(
+                    f"q{index} AS (SELECT m.id {visible_sql} LIMIT ?)"
+                )
+                selects.append(
+                    f"SELECT {index} AS term_index, COUNT(*) AS frequency "
+                    f"FROM q{index}"
+                )
+                parameters.extend((
+                    match,
+                    *claim_shadow_parameters,
+                    candidate_limit + 1,
+                ))
+            try:
+                rows = self.db.execute(
+                    f"WITH {', '.join(ctes)} {' UNION ALL '.join(selects)} "
+                    "ORDER BY term_index",
+                    parameters,
+                ).fetchall()
+            except sqlite3.DatabaseError:
+                return None
+            frequencies = [0] * len(matches)
+            for row in rows:
+                frequencies[int(row["term_index"])] = int(row["frequency"])
+            return frequencies
+
+        def abstain(mode: str) -> None:
+            report["mode"] = mode
+            report["abstained"] = True
+
+        chunk_size = max(1, int(term_chunk_size))
+        collected_rows: dict[int, sqlite3.Row] = {}
+        collected_cache_safe_ids: set[int] = set()
+        modes: list[str] = []
+        for offset in range(0, len(discovery_terms), chunk_size):
+            candidate_terms = discovery_terms[offset:offset + chunk_size]
+            like_terms = _memory_like_terms(
+                query, candidate_terms, max_terms=chunk_size * 2
+            )
+            if not like_terms:
+                continue
+            fts_query = _memory_fts_query(
+                query, candidate_terms, max_index_terms=chunk_size * 3
+            )
+            if fts_query is None:
+                patterns = [f"%{_escape_like(term)}%" for term in like_terms]
+                where = " OR ".join(
+                    "lower(m.content) LIKE ? ESCAPE '\\'" for _ in patterns
+                )
+                match_count = " + ".join(
+                    "CASE WHEN lower(m.content) LIKE ? ESCAPE '\\' THEN 1 ELSE 0 END"
+                    for _ in patterns
+                )
+                chunk_rows = self._generic_recall_query_rows(
+                    f"""SELECT m.id, m.created_at, m.kind, m.content, m.source,
+                               c.status AS claim_status,
+                               c.authority AS claim_authority,
+                               omp.origin AS ordinary_origin,
+                               omp.eligible AS ordinary_eligible,
+                               omp.content_sha256 AS ordinary_content_sha256,
+                               omp.provenance_sha256 AS ordinary_provenance_sha256
+                        FROM memories AS m
+                        LEFT JOIN memory_claims AS c ON c.memory_id=m.id
+                        LEFT JOIN ordinary_memory_provenance AS omp
+                          ON omp.memory_id=m.id
+                        WHERE ({where})
+                          AND m.kind<>'lesson'
+                          {_LEARNING_QUALITY_VISIBLE_SQL}
+                          AND (m.kind<>'claim' OR (
+                              c.scope='global' AND c.status IN ('active', 'disputed')
+                              {claim_shadow_sql}
+                          ))
+                        ORDER BY ({match_count}) DESC, m.id DESC LIMIT ?""",
+                    [
+                        *patterns,
+                        *claim_shadow_parameters,
+                        *patterns,
+                        candidate_limit + 1,
+                    ],
+                )
+                if chunk_rows is None:
+                    abstain("error")
+                    return None
+                if len(chunk_rows) > candidate_limit:
+                    abstain("overflow")
+                    return None
+                chunk_cache_safe_ids = self._ordinary_recall_cache_safe_ids(
+                    chunk_rows
+                )
+                modes.append("like")
+            else:
+                chunk_rows = fts_rows(fts_query)
+                if chunk_rows is None:
+                    abstain("error")
+                    return None
+                chunk_cache_safe_ids = self._ordinary_recall_cache_safe_ids(
+                    chunk_rows
+                )
+                identity_terms, identity_anchors = _memory_identity_scope(
+                    query,
+                    candidate_terms,
+                    chunk_rows,
+                    row_cache_allowed=chunk_cache_safe_ids,
+                )
+                if identity_terms:
+                    # An identity is a relational constraint, not permission to
+                    # return any row merely because that name exists elsewhere
+                    # in the store.  Replace the generic OR pool with exact
+                    # identity+fact witnesses at every corpus size.  Raw rows
+                    # remain in the pool so a tampered/ineligible exact witness
+                    # still shadows weaker verified content during ranking.
+                    evidence = set(_memory_evidence_terms(
+                        query,
+                        chunk_rows,
+                        max_terms=MAX_MEMORY_QUERY_TERMS,
+                        row_cache_allowed=chunk_cache_safe_ids,
+                    ))
+                    required_anchors = [
+                        term for term in identity_anchors if term in evidence
+                    ]
+                    if identity_anchors and not required_anchors:
+                        report["unknown_terms"].extend(identity_terms)
+                        abstain("identity-unbound")
+                        return None
+                    # Compound identifiers such as ``CASE-9931`` are retained
+                    # by the semantic tokenizer as one term, while FTS5 splits
+                    # them into surface tokens.  Feeding that compound back to
+                    # ``_memory_fts_query`` silently drops it because neither
+                    # surface token has the compound as its canonical form.
+                    # Build the identity clause explicitly, then intersect it
+                    # with the ordinary anchor groups.
+                    structured_identities = {
+                        term for term in identity_terms
+                        if _structured_memory_identifier(term)
+                    }
+                    proof_parts = [
+                        f"({_memory_fts_literal(term)})"
+                        for term in identity_terms
+                        if term in structured_identities
+                    ]
+                    natural_identities = [
+                        term for term in identity_terms
+                        if term not in structured_identities
+                    ]
+                    natural_identity_query = _memory_fts_query(
+                        query,
+                        natural_identities,
+                        max_index_terms=chunk_size * 3,
+                        require_all=True,
+                    )
+                    if natural_identity_query:
+                        proof_parts.append(natural_identity_query)
+                    anchor_query = _memory_fts_query(
+                        query,
+                        required_anchors,
+                        max_index_terms=chunk_size * 3,
+                        require_all=True,
+                    )
+                    if anchor_query:
+                        proof_parts.append(anchor_query)
+                    proof_query = " AND ".join(proof_parts) or None
+                    proof_rows = (
+                        None if proof_query is None else fts_rows(proof_query)
+                    )
+                    if proof_rows is None:
+                        abstain("error")
+                        return None
+                    if structured_identities:
+                        proof_cache_safe_ids = (
+                            self._ordinary_recall_cache_safe_ids(proof_rows)
+                        )
+                        proof_rows = [
+                            row for row in proof_rows
+                            if structured_identities.issubset(set(_memory_tokens(
+                                str(row["content"] or ""),
+                                meaningful_only=False,
+                                cache_allowed=(
+                                    int(row["id"]) in proof_cache_safe_ids
+                                ),
+                            )))
+                        ]
+                    if not proof_rows:
+                        report["unknown_terms"].extend(identity_terms)
+                        abstain("identity-unbound")
+                        return None
+                    if len(proof_rows) > candidate_limit:
+                        report["unknown_terms"].extend(identity_terms)
+                        abstain("identity-overflow")
+                        return None
+                    was_narrowed = (
+                        len(chunk_rows) > candidate_limit
+                        or len(proof_rows) < len(chunk_rows)
+                    )
+                    chunk_rows = proof_rows
+                    modes.append("narrowed" if was_narrowed else "or")
+                elif len(chunk_rows) > candidate_limit:
+                    # Stage 2: keep only terms that can discriminate on their
+                    # own, counted over the caller's visible rows.
+                    groups = _memory_fts_term_groups(
+                        query, candidate_terms, max_index_terms=chunk_size * 3
+                    )
+                    grouped = {canonical for canonical, _spellings in groups}
+                    structured_terms = [
+                        _normalize_memory_token(term)
+                        for term in candidate_terms
+                        if (
+                            _normalize_memory_token(term) not in grouped
+                            and _structured_memory_identifier(term)
+                        )
+                    ]
+                    frequency_queries = [
+                        _memory_fts_group_query(spellings)
+                        for _term, spellings in groups
+                    ] + [
+                        _memory_fts_literal(term) for term in structured_terms
+                    ]
+                    frequencies = visible_frequencies(frequency_queries)
+                    if frequencies is None:
+                        abstain("error")
+                        return None
+                    discriminating: list[str] = []
+                    unknown_identities: list[str] = []
+                    for (term, _spellings), frequency in zip(
+                        groups, frequencies[:len(groups)], strict=True
+                    ):
+                        if frequency > candidate_limit:
+                            report["dropped_terms"].append(term)
+                        elif frequency == 0 and _memory_identity_capable_term(term):
+                            unknown_identities.append(term)
+                        else:
+                            discriminating.append(term)
+                    # Compound identifiers (CASE-9931) are not index surfaces,
+                    # so the groups above never count them; check each one as
+                    # a phrase over the same visible rows.
+                    for canonical, frequency in zip(
+                        structured_terms,
+                        frequencies[len(groups):],
+                        strict=True,
+                    ):
+                        if frequency == 0:
+                            unknown_identities.append(canonical)
+                    if unknown_identities:
+                        # The query names something the visible store has
+                        # never seen.  A look-alike record (NorthX for SouthX)
+                        # may sit among the dropped rows where the ranker
+                        # cannot see it, so returning anything here could be a
+                        # substitution.  Fail closed and say why.
+                        report["unknown_terms"].extend(unknown_identities)
+                        abstain("unknown-identity")
+                        return None
+                    chunk_rows = None
+                    if discriminating and len(discriminating) < len(groups):
+                        narrowed_query = _memory_fts_query(
+                            query, discriminating, max_index_terms=chunk_size * 3
+                        )
+                        if narrowed_query is not None:
+                            chunk_rows = fts_rows(narrowed_query)
+                            if chunk_rows is None:
+                                abstain("error")
+                                return None
+                            if len(chunk_rows) > candidate_limit:
+                                chunk_rows = None
+                            else:
+                                modes.append("narrowed")
+                    if chunk_rows is None:
+                        # Stage 3: no term discriminates alone; require every
+                        # term.  This is the smallest set that can still hold
+                        # the best answer to the whole query.
+                        all_terms_query = _memory_fts_query(
+                            query,
+                            candidate_terms,
+                            max_index_terms=chunk_size * 3,
+                            require_all=True,
+                        )
+                        chunk_rows = (
+                            None if all_terms_query is None
+                            else fts_rows(all_terms_query)
+                        )
+                        if chunk_rows is None:
+                            abstain("error")
+                            return None
+                        if len(chunk_rows) > candidate_limit:
+                            abstain("overflow")
+                            return None
+                        modes.append("all-terms")
+                else:
+                    modes.append("or")
+            # ``chunk_rows`` may come from a later proof/narrowing SELECT than
+            # the initial OR pool. Revalidate the exact immutable row snapshots
+            # that will leave this method; never reuse an earlier ID-only
+            # admission across an intervening external update.
+            final_cache_safe_ids = self._ordinary_recall_cache_safe_ids(
+                chunk_rows
+            )
+            for row in chunk_rows:
+                memory_id = int(row["id"])
+                collected_rows.setdefault(memory_id, row)
+                if memory_id in final_cache_safe_ids:
+                    collected_cache_safe_ids.add(memory_id)
+            if len(collected_rows) > candidate_limit:
+                abstain("overflow")
+                return None
+        rows = list(collected_rows.values())
+        report["candidates"] = len(rows)
+        if modes:
+            # Report the most defensive stage any chunk needed.
+            for mode in ("all-terms", "narrowed", "like", "or"):
+                if mode in modes:
+                    report["mode"] = mode
+                    break
+            report["abstained"] = False
+        return rows, frozenset(collected_cache_safe_ids)
+
+    def recall_report(self) -> dict[str, Any]:
+        """Return a copy of the diagnostic record for the most recent lexical
+        recall attempt on this store (``search`` or ``hybrid_memory_search``).
+
+        ``mode`` is one of ``idle`` (no recall yet), ``screened`` (the query
+        was refused before discovery), ``empty`` (nothing to search),
+        ``or`` / ``narrowed`` / ``all-terms`` / ``like`` (the discovery stage
+        that produced the pool), ``identity-unbound`` / ``identity-overflow`` /
+        ``unknown-identity`` / ``overflow`` / ``error`` (fail-closed
+        abstentions). The record is reset at the start of every attempt, so it
+        never describes an earlier query.
+        """
+        return copy.deepcopy(self._last_recall_report)
 
     def _remember_ordinary(
         self,
@@ -5621,6 +6887,7 @@ class Memory:
                 self._set_ordinary_memory_provenance_locked(
                     int(row["id"]), origin=origin, eligible=eligible
                 )
+            self._sync_learning_quality_quarantine_locked(int(row["id"]))
         return "Stored in long-term memory."
 
     def remember(self, content: str, kind: str = "fact", source: str | None = None) -> str:
@@ -6602,14 +7869,20 @@ class Memory:
         confidence: float,
         stamp: str,
         source_identity: str | None = None,
+        scope: str = "global",
     ) -> int:
+        scope = _validated_claim_scope(scope)
+        if scope == "global" and _PROJECT_CLAIM_RECORD_PREFIX in (
+            f"{subject} {predicate}: {value}".casefold()
+        ):
+            raise ValueError("Claim content contains a reserved project-record prefix")
         claim_key = self._claim_identity(subject, predicate)
         latest_event = self.db.execute(
             """SELECT MAX(e.created_at)
                FROM memory_claim_events AS e
                JOIN memory_claims AS c ON c.id=e.claim_id
-               WHERE c.claim_key=?""",
-            (claim_key,),
+               WHERE c.scope=? AND c.claim_key=?""",
+            (scope, claim_key),
         ).fetchone()[0]
         if latest_event:
             requested_at = _as_utc(
@@ -6638,9 +7911,9 @@ class Memory:
             """SELECT id, memory_id, value_sha256, source, authority,
                       confidence, status
                FROM memory_claims
-               WHERE claim_key=?
+               WHERE scope=? AND claim_key=?
                ORDER BY id""",
-            (claim_key,),
+            (scope, claim_key),
         ).fetchall()
         live = [
             row for row in all_claims
@@ -6652,10 +7925,11 @@ class Memory:
             same_source_claim_ids = {
                 int(row["claim_id"])
                 for row in self.db.execute(
-                    """SELECT DISTINCT claim_id
-                       FROM memory_claim_observations
-                       WHERE claim_key=? AND source_key=?""",
-                    (claim_key, incoming_source_key),
+                    """SELECT DISTINCT o.claim_id
+                       FROM memory_claim_observations AS o
+                       JOIN memory_claims AS c ON c.id=o.claim_id
+                       WHERE c.scope=? AND o.claim_key=? AND o.source_key=?""",
+                    (scope, claim_key, incoming_source_key),
                 ).fetchall()
             }
         same_source_live = [
@@ -6778,7 +8052,11 @@ class Memory:
                         )
         else:
             content = _bounded_persisted_text(
-                f"{subject} {predicate}: {value}", 8_000, "temporal claim"
+                _claim_memory_content(
+                    subject, predicate, value, scope, stamp
+                ),
+                8_000,
+                "temporal claim",
             )
             self.db.execute(
                 """INSERT OR IGNORE INTO memories(created_at, kind, content, source)
@@ -6817,12 +8095,12 @@ class Memory:
                 supersedes_id = int(strongest["id"])
             cursor = self.db.execute(
                 """INSERT INTO memory_claims(
-                       memory_id, created_at, updated_at, claim_key, subject,
+                       memory_id, created_at, updated_at, scope, claim_key, subject,
                        predicate, value, value_sha256, source, authority,
                        confidence, status, valid_from, valid_until, supersedes_id
-                   ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?)""",
+                   ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?)""",
                 (
-                    int(memory_row["id"]), stamp, stamp, claim_key, subject,
+                    int(memory_row["id"]), stamp, stamp, scope, claim_key, subject,
                     predicate, value, value_sha256, source, authority,
                     confidence, status, stamp, supersedes_id,
                 ),
@@ -6866,16 +8144,21 @@ class Memory:
                ) VALUES (?, ?, ?, ?, ?, ?)""",
             (claim_id, stamp, source, authority, confidence, evidence_sha256),
         )
-        self._record_claim_observation_locked(
-            claim_id,
-            claim_key=claim_key,
-            predicate=predicate,
-            value_sha256=value_sha256,
-            source_identity=source_identity,
-            authority=authority,
-            confidence=confidence,
-            stamp=stamp,
-        )
+        if scope == "global":
+            # The existing learned claim clock is global. Project facts must not
+            # alter another project's volatility estimate through a shared
+            # predicate, so this bounded M1 lane keeps explicit project claims
+            # out of the clock until the clock itself has first-class scopes.
+            self._record_claim_observation_locked(
+                claim_id,
+                claim_key=claim_key,
+                predicate=predicate,
+                value_sha256=value_sha256,
+                source_identity=source_identity,
+                authority=authority,
+                confidence=confidence,
+                stamp=stamp,
+            )
         return claim_id
 
     def remember_claim(
@@ -6889,9 +8172,19 @@ class Memory:
         confidence: float = 1.0,
         source_identity: str | None = None,
     ) -> int:
-        """Record a versioned fact; authority is a runtime-controlled enum."""
+        """Record a global versioned fact; authority is a closed runtime enum.
+
+        Project-scoped facts intentionally have no generic public write option.
+        They must cross ``remember_explicit_project_claim`` so the operator
+        command, project binding, fixed provenance, and claim write are checked
+        and committed atomically.
+        """
         subject = _validated_nonsecret_metadata(subject, "Claim subject")
         predicate = _validated_nonsecret_metadata(predicate, "Claim predicate")
+        if _claim_has_sensitive_key(subject, predicate):
+            raise ValueError(
+                "Claim subject or predicate must not name a credential or secret"
+            )
         value = redact_secrets(str(value).strip())
         source = _validated_nonsecret_metadata(source, "Claim source")
         authority = str(authority).strip().casefold()
@@ -6920,8 +8213,147 @@ class Memory:
                 subject, predicate, value, source=source, authority=authority,
                 confidence=confidence, stamp=now_iso(),
                 source_identity=source_identity,
+                scope="global",
             )
 
+    def remember_explicit_project_claim(
+        self,
+        conversation_id: int,
+        project_id: int,
+        operator_prompt: str,
+    ) -> dict[str, Any]:
+        """Atomically persist one exact operator-authored project fact.
+
+        Parsing is repeated at the storage boundary so a caller cannot provide
+        model-inferred fields, authority, source, confidence, or scope.  The
+        operator message, versioned claim, and fixed assistant receipt commit
+        or roll back together.
+        """
+        parsed = parse_explicit_project_fact(operator_prompt)
+        if parsed is None:
+            raise ValueError("Prompt is not an explicit project fact command")
+        normalized_project = self._project_id(project_id)
+        scope = project_claim_scope(normalized_project)
+        if (
+            isinstance(conversation_id, bool)
+            or not isinstance(conversation_id, int)
+            or conversation_id <= 0
+        ):
+            raise ValueError("conversation_id must be a positive integer")
+        subject = parsed["subject"]
+        predicate = parsed["predicate"]
+        value = parsed["value"]
+        claim_key = self._claim_identity(subject, predicate)
+        stamp = now_iso()
+        with self._immediate_transaction():
+            project = self.db.execute(
+                """SELECT p.id, p.enabled
+                   FROM conversations AS c
+                   JOIN agent_projects AS p ON p.id=c.project_id
+                   WHERE c.id=?
+                     AND NOT EXISTS (
+                         SELECT 1 FROM screen_companion_conversations AS companion
+                         WHERE companion.conversation_id=c.id
+                     )""",
+                (conversation_id,),
+            ).fetchone()
+            if (
+                project is None
+                or int(project["id"]) != normalized_project
+                or not bool(project["enabled"])
+            ):
+                raise ValueError(
+                    "Conversation project does not exist, is disabled, or mismatched"
+                )
+            before = self.db.execute(
+                """SELECT id, status
+                   FROM memory_claims
+                   WHERE scope=? AND claim_key=?
+                   ORDER BY id""",
+                (scope, claim_key),
+            ).fetchall()
+            before_ids = {int(row["id"]) for row in before}
+            before_live_ids = {
+                int(row["id"])
+                for row in before
+                if str(row["status"]) in {"active", "disputed"}
+            }
+            self.db.execute(
+                """INSERT INTO messages(conversation_id, created_at, role, content)
+                   VALUES (?, ?, 'user', ?)""",
+                (conversation_id, stamp, str(operator_prompt).strip()),
+            )
+            claim_id = self._remember_claim_locked(
+                subject,
+                predicate,
+                value,
+                source="explicit operator project fact",
+                authority="operator",
+                confidence=1.0,
+                stamp=stamp,
+                source_identity=f"operator:{scope}",
+                scope=scope,
+            )
+            stored = self.db.execute(
+                """SELECT status FROM memory_claims
+                   WHERE id=? AND scope=? AND claim_key=?""",
+                (claim_id, scope, claim_key),
+            ).fetchone()
+            if stored is None or str(stored["status"]) != "active":
+                raise RuntimeError("Project claim did not become the active version")
+            remaining_live = {
+                int(row["id"])
+                for row in self.db.execute(
+                    """SELECT id FROM memory_claims
+                       WHERE scope=? AND claim_key=?
+                         AND status IN ('active', 'disputed')""",
+                    (scope, claim_key),
+                ).fetchall()
+            }
+            if remaining_live != {claim_id}:
+                raise RuntimeError("Project claim supersession did not resolve uniquely")
+            if claim_id in before_live_ids:
+                action = "reasserted"
+            elif before_live_ids:
+                action = "superseded"
+            elif claim_id in before_ids:
+                action = "reasserted"
+            else:
+                action = "created"
+            action_text = {
+                "created": "Stored",
+                "reasserted": "Reasserted",
+                "superseded": "Updated",
+            }[action]
+            history_note = (
+                " The prior value remains in this project's version history."
+                if action == "superseded"
+                else ""
+            )
+            assistant_message = (
+                f"{action_text} project fact (claim record #{claim_id})."
+                f"{history_note}"
+            )
+            assistant_cursor = self.db.execute(
+                """INSERT INTO messages(conversation_id, created_at, role, content)
+                   VALUES (?, ?, 'assistant', ?)""",
+                (conversation_id, stamp, assistant_message),
+            )
+            return {
+                "project_id": normalized_project,
+                "scope": scope,
+                "claim_id": claim_id,
+                "action": action,
+                "assistant_message_id": int(assistant_cursor.lastrowid),
+                "assistant_message": assistant_message,
+                "subject": subject,
+                "predicate": predicate,
+                "value": value,
+                "authority": "operator",
+                "confidence": 1.0,
+            }
+
+    @_with_recall_cache
     def current_claims(
         self,
         query: str = "",
@@ -6930,6 +8362,7 @@ class Memory:
         clock_mode: str = "disabled",
         stale_threshold: float = 0.70,
         as_of: str | None = None,
+        project_id: int | None = None,
     ) -> list[dict[str, Any]]:
         """Return current claims with optional shadow/enforced confidence aging."""
         self._ensure_open()
@@ -6954,6 +8387,40 @@ class Memory:
         limit = _bounded_limit(limit, 50)
         if not limit:
             return []
+        project_scope = None
+        if project_id is not None:
+            normalized_project = self._project_id(project_id)
+            project = self.db.execute(
+                "SELECT enabled FROM agent_projects WHERE id=?",
+                (normalized_project,),
+            ).fetchone()
+            if project is None or not bool(project["enabled"]):
+                return []
+            project_scope = project_claim_scope(normalized_project)
+        visible_scopes = (
+            ("global",)
+            if project_scope is None
+            else ("global", project_scope)
+        )
+        scope_placeholders = ",".join("?" for _scope in visible_scopes)
+        scope_filter_sql = f"c.scope IN ({scope_placeholders})"
+        scope_filter_parameters: list[Any] = [*visible_scopes]
+        if project_scope is not None:
+            # Project facts override a global claim identity before lexical
+            # relevance, ranking, or candidate caps are applied. Otherwise a
+            # query that matches only the old global value could omit the
+            # project row and leak a contradicted global fact into its prompt.
+            scope_filter_sql += """
+              AND (
+                  c.scope=?
+                  OR NOT EXISTS (
+                      SELECT 1 FROM memory_claims AS project_claim
+                      WHERE project_claim.scope=?
+                        AND project_claim.claim_key=c.claim_key
+                        AND project_claim.status IN ('active', 'disputed')
+                  )
+              )"""
+            scope_filter_parameters.extend((project_scope, project_scope))
         query_terms = _claim_query_terms(raw_query)
         raw_query_terms = _memory_tokens(raw_query, meaningful_only=True)
         raw_query_term_set = set(raw_query_terms)
@@ -6976,7 +8443,7 @@ class Memory:
         )
         relevance_sql = ""
         relevance_order_sql = ""
-        parameters: list[Any] = []
+        parameters: list[Any] = [*scope_filter_parameters]
         if terms:
             relevance_sql = " AND (" + " OR ".join(
                 "instr(lower(subject || ' ' || predicate || ' ' || value), ?) > 0"
@@ -6991,10 +8458,14 @@ class Memory:
             parameters.extend(terms)
         parameters.append(MAX_MEMORY_SEARCH_CANDIDATES + 1)
         rows = self.db.execute(
-            f"""SELECT id AS claim_id, memory_id, claim_key, created_at, updated_at,
-                       subject, predicate, value, source, authority, confidence, status
-                FROM memory_claims
-                WHERE status IN ('active', 'disputed'){relevance_sql}
+            f"""SELECT c.id AS claim_id, c.memory_id, c.scope, c.claim_key,
+                       c.created_at, c.updated_at,
+                       c.subject, c.predicate, c.value, c.value_sha256,
+                       c.source, c.authority,
+                       c.confidence, c.status
+                FROM memory_claims AS c
+                WHERE {scope_filter_sql}
+                  AND c.status IN ('active', 'disputed'){relevance_sql}
                 ORDER BY {relevance_order_sql}CASE authority
                              WHEN 'operator' THEN 4 WHEN 'verified' THEN 3
                              WHEN 'learned' THEN 2 ELSE 1 END DESC,
@@ -7007,7 +8478,57 @@ class Memory:
             # conflicting identity and expose a newer weak substitute.
             return []
         items = [dict(row) for row in rows]
+        if project_scope is not None:
+            project_claim_keys = {
+                str(item["claim_key"])
+                for item in items
+                if str(item["scope"]) == project_scope
+            }
+            items = [
+                item
+                for item in items
+                if (
+                    str(item["scope"]) == project_scope
+                    or str(item["claim_key"]) not in project_claim_keys
+                )
+            ]
         if query_terms:
+            # Validate every bounded candidate before any persisted claim field
+            # is admitted to the per-store cache.  Invalid rows still take part
+            # in structural ranking and can shadow a weaker answer; they simply
+            # use the pure, uncached token path so out-of-band corruption cannot
+            # extend a credential/private value's lifetime in process memory.
+            eligible_candidate_ids = self._claim_rows_recall_eligible(
+                items, project_id=project_id
+            )
+
+            def claim_field_tokens(
+                item: Mapping[str, Any],
+                text: str,
+                *,
+                meaningful_only: bool,
+            ) -> list[str]:
+                return _memory_tokens(
+                    text,
+                    meaningful_only=meaningful_only,
+                    cache_allowed=(
+                        int(item["claim_id"]) in eligible_candidate_ids
+                    ),
+                )
+
+            def claim_terms_match(
+                item: Mapping[str, Any],
+                query_set: set[str],
+                record_set: set[str],
+            ) -> set[str]:
+                return _claim_matched_query_terms(
+                    query_set,
+                    record_set,
+                    cache_allowed=(
+                        int(item["claim_id"]) in eligible_candidate_ids
+                    ),
+                )
+
             # Identity is a safety boundary, not a scoring hint.  Inspect every
             # current claim subject against the full bounded query so an
             # identity inserted beyond the scoring-term cap cannot disappear.
@@ -7026,13 +8547,19 @@ class Memory:
                     for _ in identity_patterns
                 )
                 identity_chunk = self.db.execute(
-                    f"""SELECT id AS claim_id, subject, predicate, value
-                        FROM memory_claims
-                        WHERE status IN ('active', 'disputed')
+                    f"""SELECT c.id AS claim_id, c.scope, c.claim_key,
+                               c.subject, c.predicate, c.value
+                        FROM memory_claims AS c
+                        WHERE {scope_filter_sql}
+                          AND c.status IN ('active', 'disputed')
                           AND ({identity_where})
                         ORDER BY updated_at DESC, id DESC
                         LIMIT ?""",
-                    [*identity_patterns, MAX_MEMORY_SEARCH_CANDIDATES + 1],
+                    [
+                        *scope_filter_parameters,
+                        *identity_patterns,
+                        MAX_MEMORY_SEARCH_CANDIDATES + 1,
+                    ],
                 ).fetchall()
                 if len(identity_chunk) > MAX_MEMORY_SEARCH_CANDIDATES:
                     return []
@@ -7042,16 +8569,37 @@ class Memory:
                     )
                 if len(identity_rows_by_id) > MAX_MEMORY_SEARCH_CANDIDATES:
                     return []
+            if project_scope is not None:
+                project_identity_keys = {
+                    str(row["claim_key"])
+                    for row in identity_rows_by_id.values()
+                    if str(row["scope"]) == project_scope
+                }
+                identity_rows_by_id = {
+                    claim_id: row
+                    for claim_id, row in identity_rows_by_id.items()
+                    if (
+                        str(row["scope"]) == project_scope
+                        or str(row["claim_key"]) not in project_identity_keys
+                    )
+                }
             raw_named_subject_heads: set[str] = set()
             for identity_row in identity_rows_by_id.values():
+                identity_cache_allowed = (
+                    int(identity_row["claim_id"]) in eligible_candidate_ids
+                )
                 identity_subject_terms = _memory_tokens(
-                    str(identity_row["subject"]), meaningful_only=True
+                    str(identity_row["subject"]),
+                    meaningful_only=True,
+                    cache_allowed=identity_cache_allowed,
                 )
                 if not identity_subject_terms:
                     continue
                 identity_head = identity_subject_terms[0]
                 if not _claim_matched_query_terms(
-                    raw_query_term_set, {identity_head}
+                    raw_query_term_set,
+                    {identity_head},
+                    cache_allowed=identity_cache_allowed,
                 ):
                     continue
                 proper_or_structured_head = bool(
@@ -7070,11 +8618,14 @@ class Memory:
                 identity_support_terms.update(_memory_tokens(
                     f"{identity_row['predicate']} {identity_row['value']}",
                     meaningful_only=True,
+                    cache_allowed=identity_cache_allowed,
                 ))
                 if (
                     proper_or_structured_head
                     or _claim_matched_query_terms(
-                        raw_query_term_set, identity_support_terms
+                        raw_query_term_set,
+                        identity_support_terms,
+                        cache_allowed=identity_cache_allowed,
                     )
                 ):
                     raw_named_subject_heads.add(identity_head)
@@ -7087,13 +8638,18 @@ class Memory:
             # example, "tone and port"), so one exact anchor per claim is still
             # useful. Longer requests must match at least two non-metadata terms.
             minimum_matches = 1 if len(query_terms) <= 2 else 2
-            scored_items: list[
-                tuple[tuple[int, int, int, int, str, int], dict[str, Any], int]
+            structural_items: list[
+                tuple[
+                    tuple[int, int, int, int, str, int],
+                    dict[str, Any],
+                    int,
+                    bool,
+                ]
             ] = []
-            blocked_identity_scores: list[tuple[int, int, int, int, str, int]] = []
             query_term_set = set(query_terms)
             candidate_tokens = {
-                int(candidate["claim_id"]): set(_memory_tokens(
+                int(candidate["claim_id"]): set(claim_field_tokens(
+                    candidate,
                     " ".join((
                         str(candidate["subject"]),
                         str(candidate["predicate"]),
@@ -7104,8 +8660,10 @@ class Memory:
                 for candidate in items
             }
             candidate_value_tokens = {
-                int(candidate["claim_id"]): set(_memory_tokens(
-                    str(candidate["value"]), meaningful_only=True
+                int(candidate["claim_id"]): set(claim_field_tokens(
+                    candidate,
+                    str(candidate["value"]),
+                    meaningful_only=True,
                 ))
                 for candidate in items
             }
@@ -7135,22 +8693,31 @@ class Memory:
                 len(query_terms) == 2
                 and not explicit_multi_fact_query
             )
+            items_by_claim_id = {
+                int(candidate["claim_id"]): candidate for candidate in items
+            }
             subject_head_by_claim = {
                 int(candidate["claim_id"]): tokens[0]
                 for candidate in items
-                if (tokens := _memory_tokens(
-                    str(candidate["subject"]), meaningful_only=True
+                if (tokens := claim_field_tokens(
+                    candidate,
+                    str(candidate["subject"]),
+                    meaningful_only=True,
                 ))
             }
             named_subject_heads = raw_named_subject_heads or {
-                head for head in subject_head_by_claim.values()
-                if _claim_matched_query_terms(query_term_set, {head})
+                head for claim_id, head in subject_head_by_claim.items()
+                if claim_terms_match(
+                    items_by_claim_id[claim_id], query_term_set, {head}
+                )
             }
             if len(named_subject_heads) > 1 and not explicit_multi_fact_query:
                 return []
             candidate_query_matches = {
-                claim_id: _claim_matched_query_terms(
-                    query_term_set, record_tokens
+                claim_id: claim_terms_match(
+                    items_by_claim_id[claim_id],
+                    query_term_set,
+                    record_tokens,
                 )
                 for claim_id, record_tokens in candidate_tokens.items()
             }
@@ -7159,47 +8726,71 @@ class Memory:
                 for claim_id, matches in candidate_query_matches.items()
                 if len(matches) >= minimum_matches
             }
+            # ``_claim_matched_query_terms`` evaluates each query term
+            # independently, so one whole-set match per claim yields exactly
+            # the per-term anchors that one call per (term, claim) pair did,
+            # at a cost that no longer multiplies by the number of query terms.
             query_anchor_claims = {
                 term: {
                     claim_id
-                    for claim_id, record_tokens in candidate_tokens.items()
-                    if (
-                        claim_id in independently_relevant_claim_ids
-                        and _claim_matched_query_terms({term}, record_tokens)
-                    )
+                    for claim_id in independently_relevant_claim_ids
+                    if term in candidate_query_matches[claim_id]
                 }
                 for term in query_term_set
+            }
+            candidate_value_matches = {
+                claim_id: claim_terms_match(
+                    items_by_claim_id[claim_id],
+                    query_term_set,
+                    value_tokens,
+                )
+                for claim_id, value_tokens in candidate_value_tokens.items()
             }
             value_anchor_claims = {
                 term: {
                     claim_id
-                    for claim_id, value_tokens in candidate_value_tokens.items()
-                    if _claim_matched_query_terms({term}, value_tokens)
+                    for claim_id, value_matches in candidate_value_matches.items()
+                    if term in value_matches
                 }
                 for term in query_term_set
             }
             for item in items:
-                subject_token_list = _memory_tokens(
-                    str(item["subject"]), meaningful_only=True
+                cache_allowed = int(item["claim_id"]) in eligible_candidate_ids
+                subject_token_list = claim_field_tokens(
+                    item,
+                    str(item["subject"]),
+                    meaningful_only=True,
                 )
-                raw_subject_token_list = _memory_tokens(
-                    str(item["subject"]), meaningful_only=False
+                raw_subject_token_list = claim_field_tokens(
+                    item,
+                    str(item["subject"]),
+                    meaningful_only=False,
                 )
                 subject_tokens = set(subject_token_list)
-                predicate_tokens = set(_memory_tokens(
-                    str(item["predicate"]), meaningful_only=True
+                predicate_tokens = set(claim_field_tokens(
+                    item,
+                    str(item["predicate"]),
+                    meaningful_only=True,
                 ))
-                value_tokens = set(_memory_tokens(
-                    str(item["value"]), meaningful_only=True
+                value_tokens = set(claim_field_tokens(
+                    item,
+                    str(item["value"]),
+                    meaningful_only=True,
                 ))
                 subject_matched = _claim_matched_query_terms(
-                    query_term_set, subject_tokens
+                    query_term_set,
+                    subject_tokens,
+                    cache_allowed=cache_allowed,
                 )
                 predicate_matched = _claim_matched_query_terms(
-                    query_term_set, predicate_tokens
+                    query_term_set,
+                    predicate_tokens,
+                    cache_allowed=cache_allowed,
                 )
                 value_matched = _claim_matched_query_terms(
-                    query_term_set, value_tokens
+                    query_term_set,
+                    value_tokens,
+                    cache_allowed=cache_allowed,
                 )
                 matched = subject_matched | predicate_matched | value_matched
                 if len(matched) < minimum_matches:
@@ -7208,7 +8799,11 @@ class Memory:
                     subject_token_list[0] if subject_token_list else ""
                 )
                 head_matched = bool(subject_head) and bool(
-                    _claim_matched_query_terms(query_term_set, {subject_head})
+                    _claim_matched_query_terms(
+                        query_term_set,
+                        {subject_head},
+                        cache_allowed=cache_allowed,
+                    )
                 )
                 raw_endpoint_identity_match = (
                     len(raw_subject_token_list) >= 4
@@ -7226,12 +8821,15 @@ class Memory:
                     if value_anchor_claims.get(term, set())
                     - {int(item["claim_id"])}
                 }
-                source_authority_tokens = set(_memory_tokens(
+                source_authority_tokens = set(claim_field_tokens(
+                    item,
                     f"{item['source']} {item['authority']}",
                     meaningful_only=True,
                 ))
                 source_authority_matched = _claim_matched_query_terms(
-                    raw_query_term_set, source_authority_tokens
+                    raw_query_term_set,
+                    source_authority_tokens,
+                    cache_allowed=cache_allowed,
                 )
                 if source_qualified_query and (
                     not source_authority_matched
@@ -7287,6 +8885,17 @@ class Memory:
                         not head_matched
                         and bool(tail_subject_matched)
                         and bool(unmatched_query_terms)
+                        and (
+                            len(value_matched) < 2
+                            or bool(
+                                unmatched_query_terms
+                                & raw_query_proper_terms
+                            )
+                            or bool(
+                                tail_subject_matched
+                                & _CLAIM_IDENTITY_DESCRIPTOR_TERMS
+                            )
+                        )
                     )
                     or (
                         not explicit_multi_fact_query
@@ -7317,7 +8926,11 @@ class Memory:
                         value_matches >= 2
                         and (
                             (
-                                len(subject_tokens) <= 3
+                                len(subject_tokens) <= 2
+                                and subject_matches >= 1
+                            )
+                            or (
+                                len(subject_tokens) == 3
                                 and subject_matches == len(subject_tokens)
                             )
                             or (
@@ -7353,27 +8966,57 @@ class Memory:
                     str(item["updated_at"]),
                     int(item["claim_id"]),
                 )
-                recall_eligible = self._claim_memory_recall_eligible(
-                    int(item["memory_id"])
-                )
-                if identity_conflict or not recall_eligible:
-                    # Keep the rejected candidate as a shadow.  If it is the
-                    # strongest structural match, retrieval must abstain instead
-                    # of silently falling through to weaker unrelated subjects.
-                    blocked_identity_scores.append(claim_score)
-                    continue
-                scored_items.append((
+                structural_items.append((
                     claim_score,
                     item,
                     len(matched),
+                    identity_conflict,
                 ))
-            scored_items.sort(key=lambda pair: pair[0], reverse=True)
-            blocked_identity_scores.sort(reverse=True)
-            if blocked_identity_scores and (
-                not scored_items
-                or blocked_identity_scores[0][:3] >= scored_items[0][0][:3]
-            ):
-                return []
+            structural_items.sort(key=lambda pair: pair[0], reverse=True)
+            scored_items: list[
+                tuple[tuple[int, int, int, int, str, int], dict[str, Any], int]
+            ] = []
+            if structural_items:
+                # Eligibility remains a blocking safety boundary, but it no
+                # longer needs one SQL round trip for every lexical candidate.
+                # The strongest score[:3] tier determines whether recall may
+                # proceed: one corrupt or identity-conflicting peer in that tier
+                # still forces abstention instead of a weaker substitution.
+                strongest_blocking_tier = structural_items[0][0][:3]
+                blocking_tier = [
+                    pair for pair in structural_items
+                    if pair[0][:3] == strongest_blocking_tier
+                ]
+                if any(
+                    identity_conflict
+                    for _score, _item, _count, identity_conflict in blocking_tier
+                ):
+                    return []
+                selection_relevance = (
+                    structural_items[0][0][:1]
+                    if len(query_term_set) <= 2
+                    else strongest_blocking_tier
+                )
+                selected_structural = [
+                    pair for pair in structural_items
+                    if pair[0][:len(selection_relevance)] == selection_relevance
+                ]
+                eligible_ids = eligible_candidate_ids
+                strongest_claim_ids = {
+                    int(item["claim_id"])
+                    for _score, item, _count, _identity_conflict in blocking_tier
+                }
+                if not strongest_claim_ids.issubset(eligible_ids):
+                    return []
+                scored_items = [
+                    (score, item, matched_count)
+                    for score, item, matched_count, identity_conflict
+                    in selected_structural
+                    if (
+                        not identity_conflict
+                        and int(item["claim_id"]) in eligible_ids
+                    )
+                ]
             if scored_items:
                 # Return only the strongest lexical specificity tier.  This
                 # preserves equal-strength dispute pairs and compact multi-fact
@@ -7403,6 +9046,14 @@ class Memory:
                         for _score, item, _matched_count in ambiguity_items
                     }
                     if len(ambiguous_keys) > 1:
+                        distinct_subjects = {
+                            " ".join(claim_field_tokens(
+                                item,
+                                str(item["subject"]),
+                                meaningful_only=True,
+                            ))
+                            for _score, item, _matched_count in ambiguity_items
+                        }
                         fully_qualified_constellation = (
                             len(query_term_set) > 2
                             and len(ambiguity_items) <= limit
@@ -7412,44 +9063,55 @@ class Memory:
                                 in ambiguity_items
                             )
                         )
-                        if not fully_qualified_constellation:
+                        if (
+                            len(distinct_subjects) > 1
+                            and not fully_qualified_constellation
+                        ):
                             return []
 
             # Compare current candidates only with their own canonical history.
             # Cap work per claim identity, and fail closed for an identity whose
             # history exceeds that cap, so an old conflicting value can never be
             # hidden beyond one global recency limit.
-            candidate_keys = list(dict.fromkeys(
-                str(item["claim_key"])
+            candidate_identities = list(dict.fromkeys(
+                (str(item["scope"]), str(item["claim_key"]))
                 for _score, item, _matched_count in scored_items
             ))
-            superseded_by_key: dict[str, list[set[str]]] = {}
-            truncated_history_keys: set[str] = set()
+            superseded_by_key: dict[tuple[str, str], list[set[str]]] = {}
+            truncated_history_keys: set[tuple[str, str]] = set()
             try:
-                for offset in range(0, len(candidate_keys), 400):
-                    key_chunk = candidate_keys[offset:offset + 400]
-                    placeholders = ",".join("?" for _key in key_chunk)
+                for offset in range(0, len(candidate_identities), 400):
+                    identity_chunk = candidate_identities[offset:offset + 400]
+                    placeholders = ",".join("(?, ?)" for _pair in identity_chunk)
+                    identity_parameters = [
+                        value
+                        for pair in identity_chunk
+                        for value in pair
+                    ]
                     historical_rows = self.db.execute(
-                        f"""SELECT claim_key, subject, predicate, value,
+                        f"""SELECT scope, claim_key, subject, predicate, value,
                                    version_count
                             FROM (
-                                SELECT claim_key, subject, predicate, value,
+                                SELECT scope, claim_key, subject, predicate, value,
                                        COUNT(*) OVER (
-                                           PARTITION BY claim_key
+                                           PARTITION BY scope, claim_key
                                        ) AS version_count,
                                        ROW_NUMBER() OVER (
-                                           PARTITION BY claim_key
+                                           PARTITION BY scope, claim_key
                                            ORDER BY updated_at DESC, id DESC
                                        ) AS version_rank
                                 FROM memory_claims
                                 WHERE status='superseded'
-                                  AND claim_key IN ({placeholders})
+                                  AND (scope, claim_key) IN ({placeholders})
                             )
                             WHERE version_rank<=?""",
-                        [*key_chunk, _MAX_SUPERSEDED_CLAIM_VERSIONS],
+                        [*identity_parameters, _MAX_SUPERSEDED_CLAIM_VERSIONS],
                     ).fetchall()
                     for historical in historical_rows:
-                        key = str(historical["claim_key"])
+                        key = (
+                            str(historical["scope"]),
+                            str(historical["claim_key"]),
+                        )
                         if int(historical["version_count"]) > (
                             _MAX_SUPERSEDED_CLAIM_VERSIONS
                         ):
@@ -7461,6 +9123,7 @@ class Memory:
                                 str(historical["value"]),
                             )),
                             meaningful_only=True,
+                            cache_allowed=False,
                         ))
                         superseded_by_key.setdefault(key, []).append(
                             historical_tokens
@@ -7472,13 +9135,15 @@ class Memory:
                 tuple[tuple[int, int, int, int, str, int], dict[str, Any]]
             ] = []
             for score, item, matched_count in scored_items:
-                key = str(item["claim_key"])
+                key = (str(item["scope"]), str(item["claim_key"]))
                 if key in truncated_history_keys:
                     continue
                 historical_versions = superseded_by_key.get(key, ())
                 if any(
                     len(_claim_matched_query_terms(
-                        query_term_set, historical_tokens
+                        query_term_set,
+                        historical_tokens,
+                        cache_allowed=False,
                     ))
                     > matched_count
                     for historical_tokens in historical_versions
@@ -7490,16 +9155,43 @@ class Memory:
                 relevant_items.append((score, item))
             items = [item for _score, item in relevant_items]
         else:
-            items = [
-                item for item in items
-                if self._claim_memory_recall_eligible(int(item["memory_id"]))
-            ]
+            eligible_items: list[dict[str, Any]] = []
+            batch_size = max(32, min(_CLAIM_RECALL_BATCH_SIZE, limit * 2))
+            for offset in range(0, len(items), batch_size):
+                chunk = items[offset:offset + batch_size]
+                eligible_ids = self._claim_rows_recall_eligible(
+                    chunk, project_id=project_id
+                )
+                eligible_items.extend(
+                    item for item in chunk
+                    if int(item["claim_id"]) in eligible_ids
+                )
+                if len(eligible_items) >= limit:
+                    break
+            items = eligible_items
         for item in items:
             item.pop("claim_key", None)
         items = items[:limit]
         if clock_mode == "disabled":
             return items
         for item in items:
+            if str(item.get("scope") or "") != "global":
+                # An exact operator-authored project fact remains current until
+                # it is explicitly superseded. Do not age it with a volatility
+                # model learned from global or other-project observations.
+                stored_confidence = float(item["confidence"])
+                item.update(
+                    {
+                        "stored_confidence": stored_confidence,
+                        "effective_confidence": stored_confidence,
+                        "hazard_per_day": 0.0,
+                        "clock_pair_count": 0,
+                        "clock_status": "explicit_project",
+                        "supported_at": str(item["updated_at"]),
+                        "age_days": 0.0,
+                    }
+                )
+                continue
             normalized = self._claim_clock_predicate(str(item["predicate"]))
             fit = self.db.execute(
                 """SELECT hazard_per_day, pair_count, vocabulary_size, fitted_at
@@ -7581,18 +9273,32 @@ class Memory:
         predicate: str,
         *,
         as_of: str | None = None,
+        project_id: int | None = None,
     ) -> list[dict[str, Any]]:
-        """Return every version, or the effective active/disputed set at a past time."""
+        """Return versions from exactly one global or project claim scope."""
         subject = _validated_nonsecret_metadata(subject, "Claim subject")
         predicate = _validated_nonsecret_metadata(predicate, "Claim predicate")
         claim_key = self._claim_identity(subject, predicate)
+        scope = (
+            "global"
+            if project_id is None
+            else project_claim_scope(self._project_id(project_id))
+        )
+        if project_id is not None:
+            project = self.db.execute(
+                "SELECT enabled FROM agent_projects WHERE id=?",
+                (self._project_id(project_id),),
+            ).fetchone()
+            if project is None or not bool(project["enabled"]):
+                return []
         if as_of is None:
             rows = self.db.execute(
-                """SELECT id AS claim_id, memory_id, created_at, updated_at,
+                """SELECT id AS claim_id, memory_id, scope, created_at, updated_at,
                           subject, predicate, value, source, authority, confidence,
                           status, valid_from, valid_until, supersedes_id
-                   FROM memory_claims WHERE claim_key=? ORDER BY id""",
-                (claim_key,),
+                   FROM memory_claims
+                   WHERE scope=? AND claim_key=? ORDER BY id""",
+                (scope, claim_key),
             ).fetchall()
             return [dict(row) for row in rows]
         try:
@@ -7601,7 +9307,8 @@ class Memory:
             raise ValueError("as_of must be an ISO-8601 timestamp") from None
         stamp = _as_utc(parsed).isoformat()
         rows = self.db.execute(
-            """SELECT c.id AS claim_id, c.memory_id, c.created_at, c.updated_at,
+            """SELECT c.id AS claim_id, c.memory_id, c.scope,
+                      c.created_at, c.updated_at,
                       c.subject, c.predicate, c.value, c.source, c.authority,
                       c.confidence,
                       (SELECT e.status FROM memory_claim_events AS e
@@ -7609,13 +9316,13 @@ class Memory:
                        ORDER BY e.created_at DESC, e.id DESC LIMIT 1) AS status,
                       c.valid_from, c.valid_until, c.supersedes_id
                FROM memory_claims AS c
-               WHERE c.claim_key=? AND c.created_at<=?
+               WHERE c.scope=? AND c.claim_key=? AND c.created_at<=?
                  AND EXISTS (
                      SELECT 1 FROM memory_claim_events AS e
                      WHERE e.claim_id=c.id AND e.created_at<=?
                  )
                ORDER BY c.id""",
-            (stamp, claim_key, stamp, stamp),
+            (stamp, scope, claim_key, stamp, stamp),
         ).fetchall()
         return [
             dict(row) for row in rows
@@ -7797,17 +9504,18 @@ class Memory:
         if not limit:
             return []
         rows = self.db.execute(
-            """SELECT m.id, m.kind, m.content, e.content_sha256, e.embedding_blob
+            f"""SELECT m.id, m.kind, m.content, e.content_sha256, e.embedding_blob
                FROM memories AS m
                LEFT JOIN memory_embeddings AS e
                  ON e.memory_id=m.id AND e.model=?
                LEFT JOIN memory_claims AS c ON c.memory_id=m.id
+               LEFT JOIN ordinary_memory_provenance AS omp ON omp.memory_id=m.id
                WHERE m.kind<>'lesson'
-                 AND (m.kind<>'claim' OR c.status IN ('active', 'disputed'))
-                 AND (m.kind='claim' OR EXISTS (
-                     SELECT 1 FROM ordinary_memory_provenance AS omp
-                     WHERE omp.memory_id=m.id AND omp.eligible=1
+                 {_LEARNING_QUALITY_VISIBLE_SQL}
+                 AND (m.kind<>'claim' OR (
+                     c.scope='global' AND c.status IN ('active', 'disputed')
                  ))
+                 AND (m.kind='claim' OR omp.eligible=1)
                ORDER BY CASE
                             WHEN e.memory_id IS NULL OR e.embedding_blob IS NULL THEN 0
                             ELSE 1
@@ -7856,7 +9564,7 @@ class Memory:
         selected: list[dict[str, Any]] = []
         with self._immediate_transaction():
             rows = self.db.execute(
-                """SELECT m.id, m.kind, m.content, e.content_sha256 AS embedded_sha256,
+                f"""SELECT m.id, m.kind, m.content, e.content_sha256 AS embedded_sha256,
                           e.embedding_blob,
                           l.content_sha256 AS leased_sha256,
                           l.lease_owner, l.lease_expires_at
@@ -7866,12 +9574,14 @@ class Memory:
                    LEFT JOIN memory_embedding_leases AS l
                      ON l.memory_id=m.id AND l.model=?
                    LEFT JOIN memory_claims AS c ON c.memory_id=m.id
+                   LEFT JOIN ordinary_memory_provenance AS omp
+                     ON omp.memory_id=m.id
                    WHERE m.kind<>'lesson'
-                     AND (m.kind<>'claim' OR c.status IN ('active', 'disputed'))
-                     AND (m.kind='claim' OR EXISTS (
-                         SELECT 1 FROM ordinary_memory_provenance AS omp
-                         WHERE omp.memory_id=m.id AND omp.eligible=1
+                     {_LEARNING_QUALITY_VISIBLE_SQL}
+                     AND (m.kind<>'claim' OR (
+                         c.scope='global' AND c.status IN ('active', 'disputed')
                      ))
+                     AND (m.kind='claim' OR omp.eligible=1)
                    ORDER BY CASE
                                 WHEN e.memory_id IS NULL OR e.embedding_blob IS NULL THEN 0
                                 ELSE 1
@@ -8044,21 +9754,27 @@ class Memory:
         confidence = min(1.0, resolved / 10.0)
         return 0.5 + (observed - 0.5) * confidence
 
+    @_with_recall_cache
     def semantic_memory_search(
         self,
         query_vector: list[float],
         model: str,
         *,
         limit: int = 12,
+        project_id: int | None = None,
     ) -> list[dict[str, Any]]:
         safe_model = _validated_nonsecret_metadata(model, "Embedding model")[:200]
         query = self._embedding_vector(query_vector)
         limit = _bounded_limit(limit, 100)
         if not limit:
             return []
+        project_scope = self._enabled_project_claim_scope(project_id)
+        claim_shadow_sql, claim_shadow_parameters = self._global_claim_shadow_clause(
+            project_scope
+        )
         query_norm = math.sqrt(sum(value * value for value in query))
         rows = self.db.execute(
-            """SELECT m.id, m.created_at, m.kind, m.content, m.source,
+            f"""SELECT m.id, m.created_at, m.kind, m.content, m.source,
                       c.status AS claim_status, c.authority AS claim_authority,
                       e.dimensions, e.embedding_json, e.embedding_blob, e.vector_norm,
                       COALESCE(s.resolved, 0) AS utility_resolved,
@@ -8067,15 +9783,22 @@ class Memory:
                JOIN memories AS m ON m.id=e.memory_id
                LEFT JOIN memory_claims AS c ON c.memory_id=m.id
                LEFT JOIN memory_statistics AS s ON s.memory_id=m.id
+               LEFT JOIN ordinary_memory_provenance AS omp ON omp.memory_id=m.id
                WHERE e.model=? AND e.dimensions=?
                  AND m.kind<>'lesson'
-                 AND (m.kind<>'claim' OR c.status IN ('active', 'disputed'))
-                 AND (m.kind='claim' OR EXISTS (
-                     SELECT 1 FROM ordinary_memory_provenance AS omp
-                     WHERE omp.memory_id=m.id AND omp.eligible=1
+                 {_LEARNING_QUALITY_VISIBLE_SQL}
+                 AND (m.kind<>'claim' OR (
+                     c.scope='global' AND c.status IN ('active', 'disputed')
+                     {claim_shadow_sql}
                  ))
+                 AND (m.kind='claim' OR omp.eligible=1)
                ORDER BY m.id DESC LIMIT ?""",
-            (safe_model, len(query), MAX_MEMORY_SEARCH_CANDIDATES + 1),
+            (
+                safe_model,
+                len(query),
+                *claim_shadow_parameters,
+                MAX_MEMORY_SEARCH_CANDIDATES + 1,
+            ),
         ).fetchall()
         if len(rows) > MAX_MEMORY_SEARCH_CANDIDATES:
             # Never rank a truncated recency window: an omitted older vector
@@ -8084,12 +9807,6 @@ class Memory:
         scored: list[tuple[float, int, dict[str, Any]]] = []
         for raw in rows:
             row = dict(raw)
-            if not (
-                self._claim_memory_recall_eligible(int(row["id"]))
-                if str(row["kind"]) == "claim"
-                else self._ordinary_memory_recall_eligible(int(row["id"]))
-            ):
-                continue
             try:
                 vector, stored_norm = self._embedding_from_storage(
                     row.pop("embedding_blob", None),
@@ -8121,8 +9838,24 @@ class Memory:
             row["semantic_score"] = similarity
             scored.append((adjusted, memory_id, row))
         scored.sort(key=lambda item: (item[0], item[1]), reverse=True)
-        return [row for _, _, row in scored[:limit]]
+        # Eligibility is a per-row database check.  Rank first and validate
+        # in rank order until the requested count is filled, so a large vector
+        # store no longer pays that check for every row it will never return.
+        # Ineligible rows are skipped, never returned, exactly as before.
+        results: list[dict[str, Any]] = []
+        for _adjusted, memory_id, row in scored:
+            if len(results) >= limit:
+                break
+            if not (
+                self._claim_memory_recall_eligible(memory_id)
+                if str(row["kind"]) == "claim"
+                else self._ordinary_memory_recall_eligible(memory_id)
+            ):
+                continue
+            results.append(row)
+        return results
 
+    @_with_recall_cache
     def hybrid_memory_search(
         self,
         query: str,
@@ -8130,8 +9863,10 @@ class Memory:
         model: str,
         *,
         limit: int = 12,
+        project_id: int | None = None,
     ) -> list[dict[str, Any]]:
         """Fuse sparse and neural recall; learned utility only adjusts close matches."""
+        self._last_recall_report = _blank_recall_report("screened")
         query = str(query)
         if len(query) > MAX_SEARCH_QUERY_CHARS:
             raise ValueError(f"Memory search query exceeds {MAX_SEARCH_QUERY_CHARS} characters")
@@ -8143,52 +9878,52 @@ class Memory:
             or _memory_query_targets_authority_evasion(query)
         ):
             return []
+        project_scope = self._enabled_project_claim_scope(project_id)
+        claim_shadow_sql, claim_shadow_parameters = self._global_claim_shadow_clause(
+            project_scope
+        )
         query_terms = _memory_query_terms(query)
-        like_terms = _memory_like_terms(query, query_terms)
         lexical: list[dict[str, Any]] = []
-        if query_terms and like_terms:
-            candidate_limit = MAX_MEMORY_SEARCH_CANDIDATES
-            fts_query = _memory_fts_query(query, query_terms)
-            if fts_query is not None:
-                rows = self._generic_recall_query_rows(
-                    """SELECT m.id, m.created_at, m.kind, m.content, m.source,
-                              c.status AS claim_status, c.authority AS claim_authority
-                       FROM memory_fts
-                       JOIN memories AS m ON m.id=memory_fts.rowid
-                       LEFT JOIN memory_claims AS c ON c.memory_id=m.id
-                       WHERE memory_fts MATCH ?
-                         AND m.kind<>'lesson'
-                         AND (m.kind<>'claim' OR c.status IN ('active', 'disputed'))
-                       ORDER BY memory_fts.rank, m.id DESC LIMIT ?""",
-                    (fts_query, candidate_limit + 1),
-                )
-            else:
-                patterns = [f"%{_escape_like(term)}%" for term in like_terms]
-                where = " OR ".join(
-                    "lower(m.content) LIKE ? ESCAPE '\\'" for _ in patterns
-                )
-                match_count = " + ".join(
-                    "CASE WHEN lower(m.content) LIKE ? ESCAPE '\\' THEN 1 ELSE 0 END"
-                    for _ in patterns
-                )
-                rows = self._generic_recall_query_rows(
-                    f"""SELECT m.id, m.created_at, m.kind, m.content, m.source,
-                               c.status AS claim_status, c.authority AS claim_authority
-                        FROM memories AS m
-                        LEFT JOIN memory_claims AS c ON c.memory_id=m.id
-                        WHERE ({where})
-                          AND m.kind<>'lesson'
-                          AND (m.kind<>'claim' OR c.status IN ('active', 'disputed'))
-                        ORDER BY ({match_count}) DESC, m.id DESC LIMIT ?""",
-                    [*patterns, *patterns, candidate_limit + 1],
-                )
-            if rows is None:
+        identity_terms: list[str] = []
+        identity_anchors: list[str] = []
+        if not query_terms:
+            self._last_recall_report = _blank_recall_report("empty")
+        else:
+            candidate_batch = self._lexical_recall_candidates(
+                query,
+                query_terms,
+                claim_shadow_sql=claim_shadow_sql,
+                claim_shadow_parameters=claim_shadow_parameters,
+                candidate_limit=MAX_MEMORY_SEARCH_CANDIDATES,
+                term_chunk_size=MAX_MEMORY_QUERY_TERMS,
+            )
+            if candidate_batch is None:
                 return []
-            if len(rows) > candidate_limit:
-                return []
+            rows, lexical_cache_safe_ids = candidate_batch
+            identity_terms, identity_anchors = _memory_identity_scope(
+                query,
+                query_terms,
+                rows,
+                row_cache_allowed=lexical_cache_safe_ids,
+            )
+            if identity_terms and identity_anchors:
+                lexical_evidence = set(_memory_evidence_terms(
+                    query,
+                    rows,
+                    max_terms=MAX_MEMORY_QUERY_TERMS,
+                    row_cache_allowed=lexical_cache_safe_ids,
+                ))
+                identity_anchors = [
+                    term for term in identity_anchors
+                    if term in lexical_evidence
+                ]
             lexical_limit = max(limit * 4, 24)
             lexical, shadowed = self._rank_generic_recall_rows(
-                list(rows), query_terms, keep_id=True, max_results=lexical_limit
+                list(rows),
+                query_terms,
+                keep_id=True,
+                max_results=lexical_limit,
+                cache_safe_ids=lexical_cache_safe_ids,
             )
             if shadowed:
                 return [
@@ -8197,7 +9932,10 @@ class Memory:
                 ]
             lexical = lexical[:lexical_limit]
         semantic = self.semantic_memory_search(
-            query_vector, model, limit=max(limit * 4, 24)
+            query_vector,
+            model,
+            limit=max(limit * 4, 24),
+            project_id=project_id,
         )
         if query_terms:
             identity_safe_semantic: list[dict[str, Any]] = []
@@ -8209,7 +9947,14 @@ class Memory:
                     term for term in query_terms
                     if set(_memory_term_variants(term)).intersection(tokens)
                 ]
-                if not _memory_identity_conflict(query_terms, tokens, matched):
+                identity_bound = all(
+                    set(_memory_term_variants(term)).intersection(tokens)
+                    for term in (*identity_terms, *identity_anchors)
+                )
+                if (
+                    identity_bound
+                    and not _memory_identity_conflict(query_terms, tokens, matched)
+                ):
                     identity_safe_semantic.append(item)
             semantic = identity_safe_semantic
         fused: dict[int, dict[str, Any]] = {}
@@ -8346,7 +10091,10 @@ class Memory:
                       (SELECT COUNT(*) FROM memories AS em
                        LEFT JOIN memory_claims AS ec ON ec.memory_id=em.id
                        WHERE em.kind<>'lesson'
-                         AND (em.kind<>'claim' OR ec.status IN ('active','disputed')))
+                         AND (em.kind<>'claim' OR (
+                             ec.scope='global'
+                             AND ec.status IN ('active','disputed')
+                         )))
                           AS embedding_eligible,
                       (SELECT COUNT(*) FROM memory_embeddings) AS embeddings,
                       (SELECT COUNT(*) FROM memory_embeddings
@@ -8443,8 +10191,16 @@ class Memory:
                 ordinary_hash_mismatch_ids.add(memory_id)
             if provenance_mismatch:
                 ordinary_digest_mismatch_ids.add(memory_id)
-        active_claim_count = int(totals["active_claims"] or 0) + int(
-            totals["disputed_claims"] or 0
+        # Project-scoped claims are selected through the typed claim lane and
+        # deliberately never enter the generic embedding/indexing pipeline.
+        # Keep this metric aligned with the records that can actually be
+        # embedded rather than counting every active claim in every project.
+        active_claim_count = int(
+            self.db.execute(
+                """SELECT COUNT(*) FROM memory_claims
+                   WHERE scope='global' AND status IN ('active','disputed')"""
+            ).fetchone()[0]
+            or 0
         )
         measured_totals = dict(totals)
         measured_totals.update({
@@ -14142,14 +15898,17 @@ class Memory:
             if updated.rowcount != 1:
                 raise ValueError("Lesson lifecycle changed concurrently")
 
+    @_with_recall_cache
     def search(
         self,
         query: str,
         limit: int = 8,
         *,
         include_id: bool = False,
+        project_id: int | None = None,
     ) -> list[dict[str, Any]]:
         self._ensure_open()
+        self._last_recall_report = _blank_recall_report("screened")
         query = str(query)
         if len(query) > MAX_SEARCH_QUERY_CHARS:
             raise ValueError(f"Memory search query exceeds {MAX_SEARCH_QUERY_CHARS} characters")
@@ -14160,76 +15919,39 @@ class Memory:
             or _memory_query_targets_authority_evasion(query)
         ):
             return []
-        discovery_terms = _memory_tokens(query, meaningful_only=True)
+        discovery_terms = _memory_candidate_terms(query)
         if not discovery_terms or not limit:
+            self._last_recall_report = _blank_recall_report("empty")
             return []
-        candidate_limit = MAX_MEMORY_SEARCH_CANDIDATES
-        collected_rows: dict[int, sqlite3.Row] = {}
-        for offset in range(0, len(discovery_terms), _MAX_MEMORY_QUERY_TERM_CANDIDATES):
-            candidate_terms = discovery_terms[
-                offset:offset + _MAX_MEMORY_QUERY_TERM_CANDIDATES
-            ]
-            like_terms = _memory_like_terms(
-                query,
-                candidate_terms,
-                max_terms=_MAX_MEMORY_QUERY_TERM_CANDIDATES * 2,
-            )
-            if not like_terms:
-                continue
-            fts_query = _memory_fts_query(
-                query,
-                candidate_terms,
-                max_index_terms=_MAX_MEMORY_QUERY_TERM_CANDIDATES * 3,
-            )
-            if fts_query is not None:
-                chunk_rows = self._generic_recall_query_rows(
-                    """SELECT m.id, m.created_at, m.kind, m.content, m.source,
-                              c.status AS claim_status, c.authority AS claim_authority
-                       FROM memory_fts
-                       JOIN memories AS m ON m.id=memory_fts.rowid
-                       LEFT JOIN memory_claims AS c ON c.memory_id=m.id
-                       WHERE memory_fts MATCH ?
-                         AND m.kind<>'lesson'
-                         AND (m.kind<>'claim' OR c.status IN ('active', 'disputed'))
-                       ORDER BY memory_fts.rank, m.id DESC LIMIT ?""",
-                    (fts_query, candidate_limit + 1),
-                )
-            else:
-                patterns = [f"%{_escape_like(term)}%" for term in like_terms]
-                where = " OR ".join(
-                    "lower(m.content) LIKE ? ESCAPE '\\'" for _ in patterns
-                )
-                match_count = " + ".join(
-                    "CASE WHEN lower(m.content) LIKE ? ESCAPE '\\' THEN 1 ELSE 0 END"
-                    for _ in patterns
-                )
-                chunk_rows = self._generic_recall_query_rows(
-                    f"""SELECT m.id, m.created_at, m.kind, m.content, m.source,
-                               c.status AS claim_status, c.authority AS claim_authority
-                        FROM memories AS m
-                        LEFT JOIN memory_claims AS c ON c.memory_id=m.id
-                        WHERE ({where})
-                          AND m.kind<>'lesson'
-                          AND (m.kind<>'claim' OR c.status IN ('active', 'disputed'))
-                        ORDER BY ({match_count}) DESC, m.id DESC LIMIT ?""",
-                    [*patterns, *patterns, candidate_limit + 1],
-                )
-            if chunk_rows is None or len(chunk_rows) > candidate_limit:
-                return []
-            for row in chunk_rows:
-                collected_rows.setdefault(int(row["id"]), row)
-            if len(collected_rows) > candidate_limit:
-                return []
-        rows = list(collected_rows.values())
+        project_scope = self._enabled_project_claim_scope(project_id)
+        claim_shadow_sql, claim_shadow_parameters = self._global_claim_shadow_clause(
+            project_scope
+        )
+        candidate_batch = self._lexical_recall_candidates(
+            query,
+            discovery_terms,
+            claim_shadow_sql=claim_shadow_sql,
+            claim_shadow_parameters=claim_shadow_parameters,
+            candidate_limit=MAX_MEMORY_SEARCH_CANDIDATES,
+            term_chunk_size=_MAX_MEMORY_QUERY_TERM_CANDIDATES,
+        )
+        if candidate_batch is None:
+            return []
+        rows, cache_safe_ids = candidate_batch
         rows = _memory_resolve_sibling_identities(
             list(rows),
             query,
             identity_ignored_terms=_ORDINARY_MEMORY_IDENTITY_METADATA_TERMS,
             capitalized_subject_identity=True,
+            row_cache_allowed=cache_safe_ids,
         )
         if not rows:
             return []
-        evidence_terms = _memory_evidence_terms(query, rows)
+        evidence_terms = _memory_evidence_terms(
+            query,
+            rows,
+            row_cache_allowed=cache_safe_ids,
+        )
         structured_terms = [
             term for term in discovery_terms
             if any(character.isalpha() for character in term)
@@ -14278,7 +16000,9 @@ class Memory:
                 row for row in rows
                 if all(
                     variants.intersection(set(_memory_tokens(
-                        str(row["content"]), meaningful_only=False
+                        str(row["content"]),
+                        meaningful_only=False,
+                        cache_allowed=(int(row["id"]) in cache_safe_ids),
                     )))
                     for variants in variant_sets
                 )
@@ -14294,6 +16018,7 @@ class Memory:
             relative_match_floor=0.85,
             relative_information_floor=0.85,
             query_text=query,
+            cache_safe_ids=cache_safe_ids,
         )
         if ambiguous_compact_query and len(ranked) > 1:
             query_variants = set().union(*(
@@ -14385,7 +16110,11 @@ class Memory:
         if not limit:
             return []
         rows = self.db.execute(
-            "SELECT created_at, kind, content, source FROM memories ORDER BY id DESC LIMIT ?", (limit,)
+            """SELECT created_at, kind, content, source
+               FROM memories
+               WHERE kind <> 'claim'
+               ORDER BY id DESC LIMIT ?""",
+            (limit,),
         ).fetchall()
         return [dict(row) for row in rows]
 

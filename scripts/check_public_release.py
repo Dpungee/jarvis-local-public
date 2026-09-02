@@ -125,6 +125,11 @@ _ALLOWED_EMAIL_ADDRESSES = {
     # Keep the exception address-specific so ordinary github.com mailboxes are
     # still rejected by the public-release privacy boundary.
     "support@github.com",
+    # Anthropic's published no-reply address, used by the Co-Authored-By
+    # trailer on assistant-authored commits. It is a vendor-managed black hole,
+    # not a personal mailbox. Address-specific for the same reason as above:
+    # ordinary anthropic.com mailboxes stay rejected.
+    "noreply@anthropic.com",
 }
 _HISTORY_REF_RE = re.compile(r"(?:HEAD|[0-9a-fA-F]{40})\Z")
 

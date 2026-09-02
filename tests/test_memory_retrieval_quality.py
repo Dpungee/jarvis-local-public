@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sqlite3
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -169,7 +170,31 @@ class MemoryRetrievalQualityTests(unittest.TestCase):
                 [item["content"] for item in memory.search("Atlas kiln coolant inspection")],
                 [atlas],
             )
+            for verb in (
+                "Describe",
+                "Discuss",
+                "Give",
+                "Outline",
+                "Provide",
+                "Recap",
+                "Review",
+                "Summarize",
+            ):
+                with self.subTest(verb=verb):
+                    self.assertEqual(
+                        [
+                            item["content"]
+                            for item in memory.search(
+                                f"{verb} Atlas kiln coolant inspection"
+                            )
+                        ],
+                        [atlas],
+                    )
             self.assertEqual(memory.search("Cobalt kiln coolant inspection"), [])
+            self.assertEqual(
+                memory.search("Summarize Cobalt kiln coolant inspection"),
+                [],
+            )
             self.assertEqual(
                 [item["content"] for item in memory.search("kiln coolant inspection")],
                 [beacon, atlas],
@@ -722,25 +747,178 @@ class MemoryRetrievalQualityTests(unittest.TestCase):
     def test_low_authority_learning_cannot_shadow_verified_official_recall(self) -> None:
         """Quality filtering happens before ranking and ambiguity decisions."""
         quality_tag = "jarvis-quality-contract:1"
+        blog = (
+            "BLOG_SHADOW_SENTINEL Ollama claim",
+            f"{quality_tag}\nhttps://independent-notes.example/posts/claim/",
+        )
+        official = (
+            "OFFICIAL_RECALL_SENTINEL Ollama fact",
+            f"{quality_tag}\nhttps://docs.ollama.com/context-length",
+        )
+        for order in ((blog, official), (official, blog)):
+            with self.subTest(newest=order[-1][0]), Memory(Path(":memory:")) as memory:
+                for content, source in order:
+                    memory.remember_verified(
+                        content,
+                        "learning",
+                        source,
+                        origin="verified_import",
+                    )
+
+                results = memory.search("Explain Ollama context", include_id=True)
+
+                self.assertEqual(len(results), 1)
+                self.assertIn("OFFICIAL_RECALL_SENTINEL", results[0]["content"])
+                self.assertNotIn("BLOG_SHADOW_SENTINEL", results[0]["content"])
+
+    def test_tampered_learning_provenance_remains_a_hard_shadow(self) -> None:
+        """Quality exclusion cannot launder an unauthenticated learning row."""
+        quality_tag = "jarvis-quality-contract:1"
         with Memory(Path(":memory:")) as memory:
-            memory.remember_verified(
-                "BLOG_SHADOW_SENTINEL Ollama claim",
-                "learning",
-                f"{quality_tag}\nhttps://independent-notes.example/posts/claim/",
-                origin="verified_import",
-            )
             memory.remember_verified(
                 "OFFICIAL_RECALL_SENTINEL Ollama fact",
                 "learning",
                 f"{quality_tag}\nhttps://docs.ollama.com/context-length",
                 origin="verified_import",
             )
+            memory.remember_verified(
+                "BLOG_SHADOW_SENTINEL Ollama claim",
+                "learning",
+                f"{quality_tag}\nhttps://independent-notes.example/posts/claim/",
+                origin="verified_import",
+            )
+            memory.db.execute(
+                "UPDATE ordinary_memory_provenance SET provenance_sha256=? "
+                "WHERE memory_id=(SELECT id FROM memories WHERE content LIKE 'BLOG_SHADOW%')",
+                ("0" * 64,),
+            )
+            self.assertEqual(memory.search("Explain Ollama context"), [])
 
-            results = memory.search("Explain Ollama context", include_id=True)
+    def test_valid_unverified_learning_cannot_shadow_official_recall(self) -> None:
+        quality_tag = "jarvis-quality-contract:1"
+        with Memory(Path(":memory:")) as memory:
+            memory.remember_verified(
+                "OFFICIAL_RECALL_SENTINEL Ollama fact",
+                "learning",
+                f"{quality_tag}\nhttps://docs.ollama.com/context-length",
+                origin="verified_import",
+            )
+            memory.remember(
+                "LEGACY_UNPROVEN_SENTINEL Ollama claim",
+                "learning",
+                "legacy import",
+            )
+            results = memory.search("Explain Ollama context")
+        self.assertEqual(len(results), 1)
+        self.assertIn("OFFICIAL_RECALL_SENTINEL", results[0]["content"])
 
-            self.assertEqual(len(results), 1)
-            self.assertIn("OFFICIAL_RECALL_SENTINEL", results[0]["content"])
-            self.assertNotIn("BLOG_SHADOW_SENTINEL", results[0]["content"])
+    def test_private_low_quality_learning_remains_a_hard_shadow(self) -> None:
+        quality_tag = "jarvis-quality-contract:1"
+        private_identifier = "rowan.private" + "@" + "personal.invalid"
+        with Memory(Path(":memory:")) as memory:
+            memory.remember_verified(
+                "OFFICIAL_RECALL_SENTINEL Ollama fact",
+                "learning",
+                f"{quality_tag}\nhttps://docs.ollama.com/context-length",
+                origin="verified_import",
+            )
+            memory.remember_verified(
+                "PRIVATE_BLOG_SENTINEL Ollama claim",
+                "learning",
+                f"{quality_tag}\nhttps://independent-notes.example/post/\n{private_identifier}",
+                origin="verified_import",
+            )
+            self.assertEqual(memory.search("Explain Ollama context"), [])
+
+    def test_v43_backfills_quality_membership_without_pruning_fts(self) -> None:
+        quality_tag = "jarvis-quality-contract:1"
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "quality-migration.db"
+            with Memory(path) as memory:
+                memory.remember_verified(
+                    "BLOG_MIGRATION_SENTINEL Ollama claim",
+                    "learning",
+                    f"{quality_tag}\nhttps://independent-notes.example/post/",
+                    origin="verified_import",
+                )
+                blog_id = int(memory.db.execute(
+                    "SELECT id FROM memories WHERE content LIKE 'BLOG_MIGRATION%'"
+                ).fetchone()[0])
+                content_sha256 = str(memory.db.execute(
+                    "SELECT content_sha256 FROM ordinary_memory_provenance "
+                    "WHERE memory_id=?",
+                    (blog_id,),
+                ).fetchone()[0])
+                memory.remember_verified(
+                    "OFFICIAL_MIGRATION_SENTINEL Ollama fact",
+                    "learning",
+                    f"{quality_tag}\nhttps://docs.ollama.com/context-length",
+                    origin="verified_import",
+                )
+            raw = sqlite3.connect(path)
+            try:
+                for trigger in (
+                    "ordinary_memory_quality_memory_changed",
+                    "ordinary_memory_quality_provenance_changed",
+                    "ordinary_memory_quality_provenance_deleted",
+                ):
+                    raw.execute(f"DROP TRIGGER IF EXISTS {trigger}")
+                raw.execute("DROP TABLE ordinary_memory_quality_quarantine")
+                raw.execute(
+                    """INSERT INTO memory_embeddings(
+                           memory_id, model, dimensions, content_sha256,
+                           embedding_json, created_at, updated_at,
+                           embedding_blob, vector_norm
+                       ) VALUES (?, 'stale-model', 2, ?, '[1.0,0.0]',
+                                 '2026-09-01T00:00:00+00:00',
+                                 '2026-09-01T00:00:00+00:00', NULL, 1.0)""",
+                    (blog_id, content_sha256),
+                )
+                raw.execute(
+                    """INSERT INTO memory_embedding_leases(
+                           memory_id, model, content_sha256, lease_owner,
+                           lease_expires_at, attempt_count, last_error, updated_at
+                       ) VALUES (?, 'stale-model', ?, 'migration-test',
+                                 '2099-01-01T00:00:00+00:00', 1, NULL,
+                                 '2026-09-01T00:00:00+00:00')""",
+                    (blog_id, content_sha256),
+                )
+                raw.execute("PRAGMA user_version=42")
+                raw.commit()
+            finally:
+                raw.close()
+
+            with Memory(path) as migrated:
+                quarantined = migrated.db.execute(
+                    "SELECT memory_id FROM ordinary_memory_quality_quarantine"
+                ).fetchall()
+                self.assertEqual([int(row[0]) for row in quarantined], [blog_id])
+                self.assertEqual(
+                    migrated.db.execute(
+                        "SELECT COUNT(*) FROM memory_embeddings WHERE memory_id=?",
+                        (blog_id,),
+                    ).fetchone()[0],
+                    0,
+                )
+                self.assertEqual(
+                    migrated.db.execute(
+                        "SELECT COUNT(*) FROM memory_embedding_leases WHERE memory_id=?",
+                        (blog_id,),
+                    ).fetchone()[0],
+                    0,
+                )
+                self.assertEqual(
+                    migrated.db.execute(
+                        "SELECT COUNT(*) FROM memory_fts WHERE memory_fts MATCH 'blog'"
+                    ).fetchone()[0],
+                    1,
+                )
+                migrated.db.execute(
+                    "INSERT INTO memory_fts(memory_fts) VALUES ('rebuild')"
+                )
+                results = migrated.search("Explain Ollama context")
+                self.assertEqual(len(results), 1)
+                self.assertIn("OFFICIAL_MIGRATION_SENTINEL", results[0]["content"])
 
     def test_split_anchor_pair_query_still_abstains(self) -> None:
         """Anchors that only select different records remain ambiguous."""
@@ -871,6 +1049,110 @@ class MemoryRetrievalQualityTests(unittest.TestCase):
             for query in queries:
                 with self.subTest(search_query=query):
                     self.assertEqual(memory.search(query), [])
+
+    def test_claim_recall_bridges_common_derivational_paraphrases(self) -> None:
+        from jarvis.memory import _claim_matched_query_terms
+
+        for query_term, record_term in (
+            ("calibrated", "calibration"),
+            ("renovate", "renovation"),
+            ("enrolling", "enrol"),
+            ("attach", "attachment"),
+            ("inspected", "inspection"),
+        ):
+            with self.subTest(pair=(query_term, record_term)):
+                self.assertTrue(_claim_matched_query_terms(
+                    {query_term}, {record_term}
+                ))
+        for query_term, record_term in (
+            ("station", "nation"),
+            ("meant", "mention"),
+            ("range", "ring"),
+            ("stride", "string"),
+            ("missed", "mission"),
+            ("passed", "passion"),
+            ("versed", "version"),
+            ("ported", "portion"),
+        ):
+            with self.subTest(guard=(query_term, record_term)):
+                self.assertFalse(_claim_matched_query_terms(
+                    {query_term}, {record_term}
+                ))
+
+        with Memory(Path(":memory:")) as memory:
+            memory.remember_claim(
+                "millrace gate", "lubrication schedule", "every fortnight",
+                source="operator note", authority="operator",
+            )
+            self.assertTrue(memory.current_claims(
+                "how often is the millrace gate lubricated"
+            ))
+
+    def test_same_subject_claim_constellation_is_not_ambiguous(self) -> None:
+        with Memory(Path(":memory:")) as memory:
+            memory.remember_claim(
+                "observatory dome", "rotation speed", "two degrees per minute",
+                source="operator note", authority="operator",
+            )
+            memory.remember_claim(
+                "observatory dome", "panel count", "sixty panels",
+                source="operator note", authority="operator",
+            )
+            self.assertEqual(len(memory.current_claims("observatory dome")), 2)
+
+            memory.remember_claim(
+                "grainloft hoist", "panel count", "eight panels",
+                source="operator note", authority="operator",
+            )
+            self.assertEqual(memory.current_claims("panel count"), [])
+
+    def test_value_match_cannot_substitute_an_unknown_named_subject(self) -> None:
+        with Memory(Path(":memory:")) as memory:
+            memory.remember_claim(
+                "Nadia profile", "favorite instrument", "amber cello",
+                source="operator note", authority="operator",
+            )
+            self.assertEqual(
+                memory.current_claims("Oren profile amber cello"),
+                [],
+            )
+
+    def test_short_subject_plus_multiword_value_aligns_without_predicate(self) -> None:
+        with Memory(Path(":memory:")) as memory:
+            memory.remember_claim(
+                "vestry heater", "fuel variety", "rapeseed oil",
+                source="operator note", authority="operator",
+            )
+            self.assertTrue(memory.current_claims(
+                "which heater burns rapeseed oil"
+            ))
+
+    def test_term_budget_prefers_late_topic_nouns_over_early_filler(self) -> None:
+        terms = memory_retrieval._memory_query_terms(
+            "maybe someone could kindly remind everyone whether anything "
+            "changed about the ropewalk spindle brake"
+        )
+        self.assertIn("ropewalk", terms)
+        self.assertIn("spindle", terms)
+        self.assertIn("brake", terms)
+
+        with Memory(Path(":memory:")) as memory:
+            memory.remember_verified(
+                "Ropewalk spindle brake pads swap every quarter.",
+                "fact",
+                "budget check",
+                origin="verified_import",
+            )
+            memory.remember_verified(
+                "Unrelated: the gatehouse brazier burns applewood.",
+                "fact",
+                "budget check",
+                origin="verified_import",
+            )
+            self.assertTrue(memory.search(
+                "maybe someone could kindly remind everyone whether anything "
+                "changed about the ropewalk spindle brake"
+            ))
 
 
 if __name__ == "__main__":

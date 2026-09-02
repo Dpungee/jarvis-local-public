@@ -1871,20 +1871,14 @@ class MemoryTests(unittest.TestCase):
             )
             self.assertFalse(memory._claim_memory_recall_eligible(memory_id))
 
-            credential_claim = memory.remember_claim(
-                "Fictional account fixture",
-                "password",
-                "ordinary-looking-secret-fixture",
-                source="operator test fixture",
-                authority="operator",
-            )
-            credential_memory_id = int(memory.db.execute(
-                "SELECT memory_id FROM memory_claims WHERE id=?",
-                (credential_claim,),
-            ).fetchone()[0])
-            self.assertFalse(
-                memory._claim_memory_recall_eligible(credential_memory_id)
-            )
+            with self.assertRaisesRegex(ValueError, "credential or secret"):
+                memory.remember_claim(
+                    "Fictional account fixture",
+                    "password",
+                    "ordinary-looking-secret-fixture",
+                    source="operator test fixture",
+                    authority="operator",
+                )
 
     def test_unicode_obfuscated_secrets_never_cross_memory_recall(self):
         with Memory(Path(":memory:")) as memory:
@@ -1920,20 +1914,14 @@ class MemoryTests(unittest.TestCase):
             self.assertNotIn(opaque_value, "\n".join(stored))
             self.assertEqual(memory.search(opaque_value), [])
 
-            claim_id = memory.remember_claim(
-                "Fictional Unicode account",
-                fullwidth("PASSWORD"),
-                "ordinary-looking-secret-fixture",
-                source="operator test fixture",
-                authority="operator",
-            )
-            claim_memory_id = int(memory.db.execute(
-                "SELECT memory_id FROM memory_claims WHERE id=?",
-                (claim_id,),
-            ).fetchone()[0])
-            self.assertFalse(
-                memory._claim_memory_recall_eligible(claim_memory_id)
-            )
+            with self.assertRaisesRegex(ValueError, "credential or secret"):
+                memory.remember_claim(
+                    "Fictional Unicode account",
+                    fullwidth("PASSWORD"),
+                    "ordinary-looking-secret-fixture",
+                    source="operator test fixture",
+                    authority="operator",
+                )
             self.assertEqual(
                 memory.current_claims("Fictional Unicode account password"),
                 [],
@@ -2936,24 +2924,24 @@ class MemoryTests(unittest.TestCase):
         self.assertEqual(len(claims), 1)
         self.assertEqual(claims[0]["value"], "192.0.2.44")
 
-    def test_temporal_claims_redact_secrets_and_reject_invented_authority(self):
+    def test_temporal_claims_reject_secrets_and_invented_authority(self):
         secret = "sk-proj-" + "T" * 32
         with Memory(Path(":memory:")) as memory:
-            memory.remember_claim(
-                "service", "credential note", f"token is {secret}",
-                source="operator statement", authority="operator",
-            )
+            with self.assertRaisesRegex(ValueError, "credential or secret"):
+                memory.remember_claim(
+                    "service", "credential note", f"token is {secret}",
+                    source="operator statement", authority="operator",
+                )
             dump = "\n".join(memory.db.iterdump())
             self.assertNotIn(secret, dump)
-            self.assertIn("[REDACTED]", dump)
             with self.assertRaisesRegex(ValueError, "authority"):
                 memory.remember_claim(
                     "service", "state", "ready",
                     source="model", authority="superuser",
                 )
             quality = memory.memory_quality()["totals"]
-            self.assertEqual(quality["active_claims"], 1)
-            self.assertEqual(quality["claim_events"], 1)
+            self.assertEqual(quality["active_claims"], 0)
+            self.assertEqual(quality["claim_events"], 0)
 
     def test_v14_migration_backfills_existing_preferences(self):
         with tempfile.TemporaryDirectory() as directory:

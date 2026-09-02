@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import http.client
 import json
 import os
 import sqlite3
@@ -22,6 +23,7 @@ from jarvis.ollama_client import OllamaError
 from jarvis.network_inventory import NetworkInventoryRateLimited
 from jarvis.public_presence_store import PublicPresenceStopped, PublicPresenceStore
 from jarvis.presence import (
+    MAX_DISCARDED_REQUEST_BYTES,
     NetworkInventoryScanBusy,
     PresenceHTTPServer,
     PresenceRuntime,
@@ -2993,6 +2995,52 @@ class PresenceHTTPTests(unittest.TestCase):
         with self.assertRaises(urllib.error.HTTPError) as raised:
             urllib.request.urlopen(request, timeout=2)
         self.assertEqual(raised.exception.code, 400)
+
+    def test_rejected_request_body_is_drained_and_connection_stays_usable(self):
+        # The handler speaks HTTP/1.1, so the connection is reused. A refused
+        # request whose body was never read leaves that body in the stream,
+        # where it is parsed as the next request line, and closing a socket
+        # holding unread request data makes Windows reset it instead of
+        # shutting down cleanly - which loses the error response the client is
+        # about to read. Both symptoms disappear once the body is drained.
+        host = self.base.split("//", 1)[1]
+        connection = http.client.HTTPConnection(host, timeout=5)
+        self.addCleanup(connection.close)
+
+        connection.request(
+            "POST",
+            "/api/conversations",
+            body=b"title=blocked",
+            headers={"Content-Type": "application/x-www-form-urlencoded"},
+        )
+        rejected = connection.getresponse()
+        payload = json.loads(rejected.read().decode("utf-8"))
+        self.assertEqual(rejected.status, 400)
+        self.assertEqual(payload["error"], "Content-Type must be application/json")
+
+        # Reusing the same connection only succeeds if the body was consumed.
+        connection.request("GET", "/api/conversations")
+        following = connection.getresponse()
+        following.read()
+        self.assertEqual(following.status, 200)
+
+    def test_oversized_rejected_body_closes_instead_of_draining(self):
+        # A refused request is not worth reading megabytes for, so anything
+        # past the discard bound closes the connection rather than draining it.
+        host = self.base.split("//", 1)[1]
+        connection = http.client.HTTPConnection(host, timeout=5)
+        self.addCleanup(connection.close)
+        oversized = b"x" * (MAX_DISCARDED_REQUEST_BYTES + 1)
+        connection.request(
+            "POST",
+            "/api/conversations",
+            body=oversized,
+            headers={"Content-Type": "application/x-www-form-urlencoded"},
+        )
+        rejected = connection.getresponse()
+        rejected.read()
+        self.assertEqual(rejected.status, 400)
+        self.assertTrue(rejected.will_close)
 
     def test_remote_host_requires_pairing_and_accepts_one_live_session(self):
         self.server.shutdown()

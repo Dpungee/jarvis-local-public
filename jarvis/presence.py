@@ -80,6 +80,10 @@ from .screen_companion import (
 
 
 MAX_REQUEST_BYTES = 32 * 1024 * 1024
+# A rejected request still has to leave the connection in a usable state, but
+# a refused request is not worth reading megabytes for. Bodies at or under this
+# bound are drained; larger ones close the connection instead.
+MAX_DISCARDED_REQUEST_BYTES = 64 * 1024
 MAX_PROMPT_CHARS = 50_000
 MAX_EVENT_HISTORY = 1_000
 MAX_PENDING_JOBS = 8
@@ -3638,6 +3642,11 @@ class PresenceRequestHandler(BaseHTTPRequestHandler):
         self.send_response(status)
         self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(length))
+        if self.close_connection:
+            # Set when a refused request body was too large to drain. The
+            # connection cannot carry another request, so announce that
+            # rather than closing on the client without warning.
+            self.send_header("Connection", "close")
         self.send_header("Cache-Control", "no-store")
         self.send_header("X-Content-Type-Options", "nosniff")
         self.send_header("X-Frame-Options", "DENY")
@@ -3719,18 +3728,56 @@ class PresenceRequestHandler(BaseHTTPRequestHandler):
             and parsed.netloc.casefold() == request_authority
         )
 
+    def _discard_request_body(self, declared: int | None) -> None:
+        """Drain the body of a request that is being refused.
+
+        This handler speaks HTTP/1.1, so the connection is reused by default.
+        A body left unread would then be parsed as the next request on that
+        connection, and closing a socket that still holds unread request data
+        makes Windows reset it instead of shutting down cleanly, which loses
+        the error response the client is about to read. Draining is bounded:
+        anything larger is not worth reading for a refused request, so the
+        connection is closed rather than recovered.
+        """
+        if declared is None or declared <= 0:
+            return
+        if declared > MAX_DISCARDED_REQUEST_BYTES:
+            self.close_connection = True
+            return
+        remaining = declared
+        try:
+            while remaining > 0:
+                chunk = self.rfile.read(min(remaining, 8192))
+                if not chunk:
+                    break
+                remaining -= len(chunk)
+        except OSError:
+            self.close_connection = True
+
     def _read_json(self) -> dict[str, Any]:
-        if not self._same_origin():
-            raise PermissionError("Cross-origin requests are not allowed")
-        content_type = str(self.headers.get("Content-Type") or "").split(";", 1)[0].strip()
-        if content_type != "application/json":
-            raise ValueError("Content-Type must be application/json")
         raw_length = self.headers.get("Content-Length")
-        if raw_length is None or not raw_length.isdigit():
-            raise ValueError("A valid Content-Length is required")
-        length = int(raw_length)
-        if length <= 0 or length > MAX_REQUEST_BYTES:
-            raise ValueError("Request body is empty or too large")
+        declared = (
+            int(raw_length)
+            if raw_length is not None and raw_length.isdigit()
+            else None
+        )
+        try:
+            if not self._same_origin():
+                raise PermissionError("Cross-origin requests are not allowed")
+            content_type = str(
+                self.headers.get("Content-Type") or ""
+            ).split(";", 1)[0].strip()
+            if content_type != "application/json":
+                raise ValueError("Content-Type must be application/json")
+            if declared is None:
+                raise ValueError("A valid Content-Length is required")
+            if declared <= 0 or declared > MAX_REQUEST_BYTES:
+                raise ValueError("Request body is empty or too large")
+        except (PermissionError, ValueError):
+            # Rejected before the body was touched, so it is still queued.
+            self._discard_request_body(declared)
+            raise
+        length = declared
         raw = self.rfile.read(length)
         try:
             payload = json.loads(raw.decode("utf-8"))

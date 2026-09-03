@@ -43,7 +43,7 @@ Issues = "https://github.com/Dpungee/jarvis-local-public/issues"
 drive = [
     "google-api-python-client==2.199.0",
     "google-auth==2.56.3",
-    "google-auth-httplib2==0.4.1",
+    "google-auth-httplib2==0.4.2",
     "google-auth-oauthlib==1.4.0",
 ]
 documents = [

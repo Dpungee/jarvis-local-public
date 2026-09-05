@@ -12,12 +12,29 @@ from contextlib import redirect_stdout
 from pathlib import Path
 
 from jarvis.governed_memory import (
+    MEMORY_ERASURE_INTENT,
+    MEMORY_ERASURE_SHAPE,
+    SKILL_PROMOTION_APPROVAL_INTENT,
+    SKILL_PROMOTION_APPROVAL_RECEIPTS,
+    SKILL_PROMOTION_APPROVAL_SHAPE,
+    SKILL_PROMOTION_CODE_ALPHABET,
+    SKILL_PROMOTION_CODE_LENGTH,
+    SKILL_PROMOTION_ROLLBACK_INTENT,
+    SKILL_PROMOTION_ROLLBACK_RECEIPTS,
+    SKILL_PROMOTION_ROLLBACK_SHAPE,
     GovernedMemoryCommandError,
+    looks_like_skill_promotion_command,
+    parse_explicit_memory_erasure,
     parse_explicit_project_fact,
+    parse_explicit_skill_promotion_approval,
+    parse_explicit_skill_promotion_rollback,
     project_claim_scope,
+    redact_skill_promotion_command,
+    skill_promotion_receipt,
 )
 from jarvis.cli import _display_memories
 from jarvis.memory import Memory, SCHEMA_VERSION
+from tests.legacy_store_fixture import seed_legacy_memory_row, strip_spine
 
 
 def _command(subject: str, predicate: str, value: str) -> str:
@@ -1306,15 +1323,13 @@ class GovernedProjectClaimMemoryTests(unittest.TestCase):
                 "project:9999999999999999999",
             )):
                 with self.subTest(scope=invalid_scope):
-                    memory.db.execute(
-                        """INSERT INTO memories(created_at, kind, content, source)
-                           VALUES ('2026-01-01T00:00:00+00:00', 'claim', ?,
-                                   'verified:scope trigger fixture')""",
-                        (f"invalid scope trigger backing {index}",),
+                    memory_id = seed_legacy_memory_row(
+                        memory,
+                        kind="claim",
+                        content=f"invalid scope trigger backing {index}",
+                        source="verified:scope trigger fixture",
+                        created_at="2026-01-01T00:00:00+00:00",
                     )
-                    memory_id = int(memory.db.execute(
-                        "SELECT last_insert_rowid()"
-                    ).fetchone()[0])
                     try:
                         with self.assertRaises(sqlite3.IntegrityError):
                             memory.db.execute(
@@ -1388,6 +1403,7 @@ class GovernedProjectClaimMemoryTests(unittest.TestCase):
                 raw.execute("DROP TRIGGER IF EXISTS memory_claim_scope_valid_insert")
                 raw.execute("DROP TRIGGER IF EXISTS memory_claim_scope_immutable")
                 raw.execute("ALTER TABLE memory_claims DROP COLUMN scope")
+                strip_spine(raw)
                 raw.execute("PRAGMA user_version=41")
                 raw.commit()
             finally:
@@ -1414,6 +1430,648 @@ class GovernedProjectClaimMemoryTests(unittest.TestCase):
                     [claim_id],
                 )
                 self.assertTrue(migrated.search("LegacyBeacon note legacy text"))
+
+
+class MemoryErasureParserTests(unittest.TestCase):
+    """``Erase memory #<id>`` (design 6.1): the exact-parser discipline of the
+    three claim verbs applied to an ordinary memory row's explicit id."""
+
+    def test_accepted_spellings_return_the_id(self) -> None:
+        for prompt, expected in (
+            ("Erase memory #12", 12),
+            ("erase memory #12", 12),
+            ("Delete memory #12", 12),
+            ("DELETE MEMORY #1", 1),
+            ("please erase memory #7", 7),
+            ("Please delete memory #7.", 7),
+            ("Erase memory #7!", 7),
+            ("  Erase memory #7  ", 7),
+            ("Erase memory # 7", 7),
+            ("Erase memory #999999999999999999", 999999999999999999),
+        ):
+            with self.subTest(prompt=prompt):
+                self.assertEqual(
+                    parse_explicit_memory_erasure(prompt), {"memory_id": expected}
+                )
+
+    def test_the_id_is_int64_safe_and_has_no_leading_zero(self) -> None:
+        # 18 digits is the widest accepted id, so int(...) can never exceed
+        # int64 and a store-side bound check cannot overflow.
+        self.assertEqual(
+            parse_explicit_memory_erasure("Erase memory #999999999999999999"),
+            {"memory_id": 999999999999999999},
+        )
+        for prompt in ("Erase memory #0", "Erase memory #012", "Erase memory #00"):
+            with self.subTest(prompt=prompt):
+                with self.assertRaises(GovernedMemoryCommandError):
+                    parse_explicit_memory_erasure(prompt)
+
+    def test_a_near_command_owns_the_turn_and_fails_closed(self) -> None:
+        for prompt in (
+            "Erase memory 12",
+            "Erase memory #1234567890123456789",
+            "Erase memory #12 and the log",
+            "Erase memory #12; then restart",
+            "please delete memory number 12",
+            "forget memory 12",
+            "Forget memory #12",
+            "Can you delete memory #12 for me?",
+            "Erase memory #12 #13",
+        ):
+            with self.subTest(prompt=prompt):
+                with self.assertRaises(GovernedMemoryCommandError) as caught:
+                    parse_explicit_memory_erasure(prompt)
+                self.assertIn("Erase memory #<id>", str(caught.exception))
+
+    def test_ordinary_talk_about_memory_is_not_owned(self) -> None:
+        for prompt in (
+            "What is the weather?",
+            "I delete memory dumps every week",
+            "We should erase memory pressure from the design",
+            "The docs say: erase memory #4 is the command",
+            'Say "delete memory #4" to remove one',
+            "Remember this project fact: {}",
+            "How much memory does the box have?",
+            "",
+        ):
+            with self.subTest(prompt=prompt):
+                self.assertIsNone(parse_explicit_memory_erasure(prompt))
+
+    def test_a_noncanonical_spelling_of_the_command_is_refused(self) -> None:
+        # A confusable spelling must not fall through to ordinary model
+        # routing, where a broader classifier could grant a write lane.
+        # The fullwidth characters are written as escapes on purpose: a
+        # literal one sets the public-release checker's whole-file
+        # "obfuscated" flag, which then rejects every allowed placeholder
+        # identifier elsewhere in the file.  The runtime strings are the
+        # same either way.
+        for prompt in (
+            "\uff25rase memory #12",
+            "Erase memory\uff03 12",
+            "Erase memory #\uff11\uff12",
+        ):
+            with self.subTest(prompt=prompt):
+                with self.assertRaises(GovernedMemoryCommandError):
+                    parse_explicit_memory_erasure(prompt)
+
+    def test_an_invisible_character_inside_a_word_is_the_pinned_boundary(self) -> None:
+        """A zero-width space that welds two words together is not recognized.
+
+        This is the same boundary the three pinned claim verbs have:
+        ``parse_explicit_project_fact`` returns None for
+        ``Remember<ZWSP>this project fact: {...}`` too, because the
+        canonical view drops the invisible character and leaves
+        ``Rememberthis``, which no prefix matches.  Nothing is stored
+        either way; the turn becomes ordinary text.  Widening it here
+        alone would put the fourth verb out of step with the three, so it
+        is pinned rather than changed.
+        """
+        self.assertIsNone(parse_explicit_memory_erasure("Erase\u200bmemory #12"))
+        self.assertIsNone(
+            parse_explicit_project_fact(
+                "Remember\u200bthis project fact: "
+                '{"subject":"a","predicate":"b","value":"c"}'
+            )
+        )
+
+    def test_a_project_fact_command_is_never_read_as_a_memory_erasure(self) -> None:
+        for prompt in (
+            'Erase this project fact: {"subject":"a","predicate":"b"}',
+            'Forget this project fact: {"subject":"a","predicate":"b"}',
+            'Remember this project fact: {"subject":"a","predicate":"b","value":"c"}',
+        ):
+            with self.subTest(prompt=prompt):
+                self.assertIsNone(parse_explicit_memory_erasure(prompt))
+
+    def test_an_oversized_command_is_refused(self) -> None:
+        with self.assertRaises(GovernedMemoryCommandError):
+            parse_explicit_memory_erasure(" " * 9_000 + "Erase memory #12")
+
+    def test_the_shape_constant_is_what_the_agent_quotes(self) -> None:
+        self.assertEqual(MEMORY_ERASURE_SHAPE, "Erase memory #<id>")
+        self.assertIsNotNone(MEMORY_ERASURE_INTENT.search("please erase memory #4"))
+        self.assertIsNone(MEMORY_ERASURE_INTENT.search("erase this project fact"))
+
+
+# A stand-in for secrets.token_urlsafe(12): sixteen characters drawn from the
+# url-safe alphabet, including both of its non-alphanumeric members.
+_CODE = "Clb-s_cqN7jBq-NA"
+
+
+class SkillPromotionParserTests(unittest.TestCase):
+    """The learning ladder's two operator verbs (VTMF M4 design 6.1, 7.11).
+
+    The exact-parser discipline of the four M1 verbs, plus one thing they do
+    not carry: an approval's trailing value is the operator's confirmation
+    code.  A near-command that is not recognized AS this verb would be routed
+    to a provider with that code inside it, so every shape below must fail
+    closed rather than fall through.
+    """
+
+    def test_accepted_approval_spellings_return_the_id_and_the_code(self) -> None:
+        for prompt, expected in (
+            (f"Approve skill promotion #12 {_CODE}", 12),
+            (f"approve skill promotion #12 {_CODE}", 12),
+            (f"APPROVE SKILL PROMOTION #12 {_CODE}", 12),
+            (f"Promote skill promotion #7 {_CODE}", 7),
+            (f"Please approve skill promotion #7 {_CODE}", 7),
+            (f"please promote skill promotion #7 {_CODE}.", 7),
+            (f"Approve skill promotion #7 {_CODE}!", 7),
+            (f"  Approve skill promotion #7 {_CODE}  ", 7),
+            (f"Approve skill promotion # 7 {_CODE}", 7),
+            (f"Approve skill promotion #999999999999999999 {_CODE}", 999999999999999999),
+        ):
+            with self.subTest(prompt=prompt):
+                self.assertEqual(
+                    parse_explicit_skill_promotion_approval(prompt),
+                    {"promotion_id": expected, "token": _CODE},
+                )
+
+    def test_accepted_rollback_spellings_return_the_id_and_no_code(self) -> None:
+        for prompt, expected in (
+            ("Roll back skill promotion #12", 12),
+            ("roll back skill promotion #12", 12),
+            ("Rollback skill promotion #12", 12),
+            ("ROLLBACK SKILL PROMOTION #12", 12),
+            ("Revert skill promotion #7", 7),
+            ("Please roll back skill promotion #7", 7),
+            ("Please revert skill promotion #7.", 7),
+            ("Roll back skill promotion #7!", 7),
+            ("Roll back skill promotion # 7", 7),
+        ):
+            with self.subTest(prompt=prompt):
+                parsed = parse_explicit_skill_promotion_rollback(prompt)
+                # A rollback carries no code at all: it only ever restores
+                # bytes the ladder itself replaced (design 3.6).
+                self.assertEqual(parsed, {"promotion_id": expected})
+
+    def test_the_code_is_case_sensitive_and_kept_verbatim(self) -> None:
+        # The verb is case-insensitive; the code is not.  hmac.compare_digest
+        # against the row would fail on a case-folded copy, so the parser must
+        # not normalize what it captures.
+        mixed = "aBcDeFgHiJkLmNoP"
+        self.assertEqual(
+            parse_explicit_skill_promotion_approval(
+                f"APPROVE SKILL PROMOTION #3 {mixed}"
+            ),
+            {"promotion_id": 3, "token": mixed},
+        )
+
+    def test_the_code_length_constant_matches_token_urlsafe_twelve(self) -> None:
+        import secrets
+
+        self.assertEqual(SKILL_PROMOTION_CODE_LENGTH, 16)
+        self.assertEqual(len(secrets.token_urlsafe(12)), SKILL_PROMOTION_CODE_LENGTH)
+
+    def test_the_id_is_int64_safe_and_has_no_leading_zero(self) -> None:
+        self.assertEqual(
+            parse_explicit_skill_promotion_approval(
+                f"Approve skill promotion #999999999999999999 {_CODE}"
+            ),
+            {"promotion_id": 999999999999999999, "token": _CODE},
+        )
+        for prompt in (
+            f"Approve skill promotion #0 {_CODE}",
+            f"Approve skill promotion #012 {_CODE}",
+            "Roll back skill promotion #0",
+            "Roll back skill promotion #012",
+        ):
+            with self.subTest(prompt=prompt):
+                with self.assertRaises(GovernedMemoryCommandError):
+                    parse_explicit_skill_promotion_approval(prompt)
+                    parse_explicit_skill_promotion_rollback(prompt)
+
+    def test_twenty_four_near_commands_own_the_turn_and_fail_closed(self) -> None:
+        """Design 7.11's near-miss list, at the parser layer.
+
+        The three agent-layer members of that list -- an attachment present,
+        the text produced by the model rather than the operator, and a command
+        combined with another action -- are asserted in
+        tests/test_agent_learning_ladder.py, which has an Agent to drive.
+        """
+        approvals = (
+            # wrong id shape
+            f"Approve skill promotion 12 {_CODE}",
+            f"Approve skill promotion #12a {_CODE}",
+            f"Approve skill promotion #1234567890123456789 {_CODE}",
+            f"Approve skill promotion # {_CODE}",
+            # wrong code length
+            "Approve skill promotion #12",
+            f"Approve skill promotion #12 {_CODE[:-1]}",
+            f"Approve skill promotion #12 {_CODE}x",
+            # wrong code alphabet
+            f"Approve skill promotion #12 {_CODE[:-1]}+",
+            f"Approve skill promotion #12 {_CODE[:-1]}.",
+            f"Approve skill promotion #12 {_CODE[:-1]} ",
+            # extra fields and combined commands
+            f"Approve skill promotion #12 {_CODE} and roll back #11",
+            f"Approve skill promotion #12 {_CODE}; then restart",
+            f"Approve skill promotion #12 #13 {_CODE}",
+            f"Approve skill promotions #12 {_CODE}",
+            f"Approve the skill promotion #12 {_CODE}",
+            # the code with no verb shape around it
+            f"Approve promotion #12 {_CODE}",
+        )
+        for prompt in approvals:
+            with self.subTest(prompt=prompt):
+                with self.assertRaises(GovernedMemoryCommandError) as caught:
+                    parse_explicit_skill_promotion_approval(prompt)
+                self.assertIn(
+                    SKILL_PROMOTION_APPROVAL_SHAPE, str(caught.exception)
+                )
+        rollbacks = (
+            "Roll back skill promotion 12",
+            "Roll back skill promotion #12a",
+            "Roll back skill promotion #1234567890123456789",
+            "Roll back skill promotion",
+            "Roll back skill promotion #12 and #13",
+            "Roll back skill promotion #12; then restart",
+            f"Roll back skill promotion #12 {_CODE}",
+            "Undo skill promotion #12",
+        )
+        for prompt in rollbacks:
+            with self.subTest(prompt=prompt):
+                with self.assertRaises(GovernedMemoryCommandError) as caught:
+                    parse_explicit_skill_promotion_rollback(prompt)
+                self.assertIn(
+                    SKILL_PROMOTION_ROLLBACK_SHAPE, str(caught.exception)
+                )
+        self.assertEqual(len(approvals) + len(rollbacks), 24)
+
+    def test_a_noncanonical_spelling_is_refused_as_this_verb(self) -> None:
+        """L-6: an NFKC or confusable spelling is refused AS the ladder verb.
+
+        Written as escapes on purpose: a literal fullwidth character sets the
+        public-release checker's whole-file "obfuscated" flag.
+        """
+        for prompt in (
+            f"\uff21pprove skill promotion #12 {_CODE}",
+            f"Approve skill promotion \uff03 12 {_CODE}",
+            f"Approve skill promotion #\uff11\uff12 {_CODE}",
+        ):
+            with self.subTest(prompt=prompt):
+                with self.assertRaises(GovernedMemoryCommandError) as caught:
+                    parse_explicit_skill_promotion_approval(prompt)
+                self.assertIn("non-canonical", str(caught.exception))
+            self.assertTrue(looks_like_skill_promotion_command(prompt))
+        for prompt in (
+            "\uff32oll back skill promotion #12",
+            "Roll back skill promotion #\uff11\uff12",
+        ):
+            with self.subTest(prompt=prompt):
+                with self.assertRaises(GovernedMemoryCommandError) as caught:
+                    parse_explicit_skill_promotion_rollback(prompt)
+                self.assertIn("non-canonical", str(caught.exception))
+
+    def test_a_noncanonical_code_is_refused_rather_than_repaired(self) -> None:
+        # NFKC would fold a fullwidth letter into an ASCII one and produce a
+        # code the operator never typed.  The ladder generated an ASCII code;
+        # anything else means the operator did not read it off the surface
+        # that shows it, so the approval is refused -- as a non-canonical
+        # spelling of THIS verb, never routed to a model.
+        for suffix in ("\uff21", "\u2460", "\ufb01"):
+            prompt = f"Approve skill promotion #12 {_CODE[:-1]}{suffix}"
+            with self.subTest(suffix=ascii(suffix)):
+                with self.assertRaises(GovernedMemoryCommandError):
+                    parse_explicit_skill_promotion_approval(prompt)
+
+    def test_the_code_alphabet_is_nfkc_invariant_so_no_guard_is_needed(self) -> None:
+        """Why the approval parser carries no NFKC check on the captured code.
+
+        There is no character the code group can match that folds under NFKC,
+        so a guard there would be an unreachable branch.  The property is
+        pinned here instead: widening SKILL_PROMOTION_CODE_ALPHABET without
+        re-checking it is exactly what would make the omission wrong, and this
+        fails on the day that happens.
+        """
+        import re as _re
+        import unicodedata as _unicodedata
+
+        alphabet = _re.compile(f"[{SKILL_PROMOTION_CODE_ALPHABET}]")
+        folding = [
+            ascii(chr(point))
+            for point in range(0x110000)
+            if alphabet.fullmatch(chr(point))
+            and _unicodedata.normalize("NFKC", chr(point)) != chr(point)
+        ]
+        self.assertEqual(folding, [])
+
+    def test_a_zero_width_weld_is_refused_not_routed_to_a_model(self) -> None:
+        """The ladder's boundary is deliberately WIDER than the M1 verbs'.
+
+        ``_secret_detection_view`` drops an invisible character, which welds
+        two words together: ``skill<ZWSP>promotion`` canonicalizes to
+        ``skillpromotion``.  For the four M1 verbs that shape is pinned as
+        "returns None, becomes ordinary text" -- nothing is stored either way.
+        Here it is not harmless: routing the turn to a provider would carry
+        the operator's confirmation code with it (design 7.11), so the
+        near-miss detector matches ``skill\\s*promotion`` and refuses.
+        """
+        with self.assertRaises(GovernedMemoryCommandError):
+            parse_explicit_skill_promotion_approval(
+                f"Approve skill\u200bpromotion #12 {_CODE}"
+            )
+        with self.assertRaises(GovernedMemoryCommandError):
+            parse_explicit_skill_promotion_rollback(
+                "Roll\u200bback skill promotion #12"
+            )
+
+    def test_a_nonbreaking_space_between_words_is_the_pinned_boundary(self) -> None:
+        """Accepted, exactly as the four shipped M1 verbs accept it.
+
+        ``\\s`` matches U+00A0 in a str pattern, so a nonbreaking space
+        between the verb's words parses for every governed verb in this
+        module.  Pinned rather than tightened: narrowing it for the ladder
+        alone would put two of the six verbs out of step, and narrowing it for
+        all six is a Codex-side decision.
+        """
+        self.assertEqual(
+            parse_explicit_skill_promotion_approval(
+                f"Approve\u00a0skill promotion #12 {_CODE}"
+            ),
+            {"promotion_id": 12, "token": _CODE},
+        )
+        self.assertEqual(
+            parse_explicit_memory_erasure("Erase\u00a0memory #12"),
+            {"memory_id": 12},
+        )
+
+    def test_ordinary_talk_about_the_ladder_is_not_owned(self) -> None:
+        for prompt in (
+            "What is the weather?",
+            "How do I approve a skill promotion?",
+            "What does rolling back a skill promotion do?",
+            "Can you explain the skill promotion ladder?",
+            'Say "approve skill promotion #4 CODE" to make it live',
+            "The docs say: approve skill promotion #4 is the shape",
+            "We should revert the deployment promotion process",
+            "Remember this project fact: {}",
+            "",
+        ):
+            with self.subTest(prompt=prompt):
+                self.assertIsNone(parse_explicit_skill_promotion_approval(prompt))
+                self.assertIsNone(parse_explicit_skill_promotion_rollback(prompt))
+
+    def test_the_two_verbs_never_read_each_other_or_the_m1_verbs(self) -> None:
+        approval = f"Approve skill promotion #12 {_CODE}"
+        rollback = "Roll back skill promotion #12"
+        self.assertIsNone(parse_explicit_skill_promotion_rollback(approval))
+        self.assertIsNone(parse_explicit_skill_promotion_approval(rollback))
+        self.assertIsNone(parse_explicit_memory_erasure(approval))
+        self.assertIsNone(parse_explicit_memory_erasure(rollback))
+        for prompt in (
+            "Erase memory #12",
+            'Erase this project fact: {"subject":"a","predicate":"b"}',
+            'Forget this project fact: {"subject":"a","predicate":"b"}',
+            'Remember this project fact: {"subject":"a","predicate":"b","value":"c"}',
+        ):
+            with self.subTest(prompt=prompt):
+                self.assertIsNone(parse_explicit_skill_promotion_approval(prompt))
+                self.assertIsNone(parse_explicit_skill_promotion_rollback(prompt))
+
+    def test_an_oversized_command_is_refused(self) -> None:
+        with self.assertRaises(GovernedMemoryCommandError):
+            parse_explicit_skill_promotion_approval(
+                " " * 9_000 + f"Approve skill promotion #12 {_CODE}"
+            )
+        with self.assertRaises(GovernedMemoryCommandError):
+            parse_explicit_skill_promotion_rollback(
+                " " * 9_000 + "Roll back skill promotion #12"
+            )
+
+    def test_the_shape_constants_are_what_the_agent_quotes(self) -> None:
+        self.assertEqual(
+            SKILL_PROMOTION_APPROVAL_SHAPE,
+            "Approve skill promotion #<id> <confirmation code>",
+        )
+        self.assertEqual(
+            SKILL_PROMOTION_ROLLBACK_SHAPE, "Roll back skill promotion #<id>"
+        )
+        self.assertIsNotNone(
+            SKILL_PROMOTION_APPROVAL_INTENT.search("approve skill promotion #4")
+        )
+        self.assertIsNotNone(
+            SKILL_PROMOTION_ROLLBACK_INTENT.search("roll back skill promotion #4")
+        )
+        # The two intents are disjoint, so a near miss is refused with the
+        # shape of the verb the operator was reaching for, not the other one.
+        self.assertIsNone(
+            SKILL_PROMOTION_ROLLBACK_INTENT.search("approve skill promotion #4")
+        )
+        self.assertIsNone(
+            SKILL_PROMOTION_APPROVAL_INTENT.search("roll back skill promotion #4")
+        )
+        self.assertIsNone(
+            SKILL_PROMOTION_APPROVAL_INTENT.search("erase this project fact")
+        )
+
+    def test_looks_like_reports_either_verb_on_the_canonical_view(self) -> None:
+        for prompt in (
+            f"Approve skill promotion #12 {_CODE}",
+            "Roll back skill promotion #12",
+            f"\uff21pprove skill promotion #12 {_CODE}",
+            'The docs say "approve skill promotion #N CODE" is the form',
+        ):
+            with self.subTest(prompt=prompt):
+                self.assertTrue(looks_like_skill_promotion_command(prompt))
+        for prompt in ("Erase memory #12", "What is the weather?", ""):
+            with self.subTest(prompt=prompt):
+                self.assertFalse(looks_like_skill_promotion_command(prompt))
+
+
+class SkillPromotionReceiptTests(unittest.TestCase):
+    """Design 6.1's thirteen fixed receipts, and the transcript redaction.
+
+    One table shared by the governed verb and by `jarvis ladder`, so the two
+    operator surfaces cannot tell the operator different things about the same
+    refusal.
+    """
+
+    def test_the_thirteen_receipts_are_verbatim(self) -> None:
+        digest = "a1b2c3d4e5f6" + "0" * 52
+        cases = [
+            (
+                ("approved", {"family": "code_fix", "digest": digest}),
+                "Approved skill promotion #12 for code_fix (document a1b2c3d4e5f6). "
+                "The previous version is kept for rollback.",
+            ),
+            (
+                ("approved_first", {"family": "code_fix", "digest": digest}),
+                "Approved skill promotion #12 for code_fix (document a1b2c3d4e5f6). "
+                "No previous version existed; a rollback removes it.",
+            ),
+            (
+                ("approved_over_legacy", {"family": "code_fix", "digest": digest}),
+                "Approved skill promotion #12 for code_fix (document a1b2c3d4e5f6). "
+                "The unapproved legacy document it replaced is kept for rollback.",
+            ),
+            (
+                ("missing", {}),
+                "No staged skill promotion matches that id; nothing changed.",
+            ),
+            (
+                ("token_mismatch", {}),
+                "That approval token does not match the staged promotion; "
+                "nothing changed.",
+            ),
+            (
+                ("proof_stale", {}),
+                "Skill promotion #12 no longer has a valid outcome proof; "
+                "nothing changed.",
+            ),
+            (
+                ("gate_closed", {"family": "code_fix"}),
+                "The code_fix calibration gate is closed; skill promotion #12 "
+                "cannot be approved.",
+            ),
+            (
+                ("ledger_regressed", {"family": "code_fix"}),
+                "The code_fix calibration ledger regressed in its newest sealed "
+                "epoch; skill promotion #12 cannot be approved.",
+            ),
+            (
+                ("workspace_mismatch", {}),
+                "Skill promotion #12 belongs to another project; nothing changed.",
+            ),
+        ]
+        for (outcome, extra), expected in cases:
+            with self.subTest(outcome=outcome):
+                self.assertEqual(
+                    skill_promotion_receipt(outcome, promotion_id=12, **extra),
+                    expected,
+                )
+        rollbacks = [
+            (
+                ("rolled_back", {"family": "code_fix"}),
+                "Rolled back skill promotion #12 for code_fix. "
+                "The previous version is restored.",
+            ),
+            (
+                ("rolled_back_removed", {"family": "code_fix"}),
+                "Rolled back skill promotion #12 for code_fix. "
+                "The learned skill is removed.",
+            ),
+            (
+                ("not_approved", {}),
+                "Skill promotion #12 is not approved; nothing changed.",
+            ),
+            (
+                ("not_newest", {"family": "code_fix", "newest_id": 15}),
+                "Skill promotion #12 is not the newest live promotion for "
+                "code_fix; roll back #15 first.",
+            ),
+        ]
+        for (outcome, extra), expected in rollbacks:
+            with self.subTest(outcome=outcome, verb="rollback"):
+                self.assertEqual(
+                    skill_promotion_receipt(
+                        outcome, promotion_id=12, verb="rollback", **extra
+                    ),
+                    expected,
+                )
+
+    def test_no_receipt_can_carry_a_code_a_digest_or_document_text(self) -> None:
+        code = _CODE
+        for table, verb in (
+            (SKILL_PROMOTION_APPROVAL_RECEIPTS, "approve"),
+            (SKILL_PROMOTION_ROLLBACK_RECEIPTS, "rollback"),
+        ):
+            for outcome in table:
+                with self.subTest(outcome=outcome, verb=verb):
+                    rendered = skill_promotion_receipt(
+                        outcome,
+                        promotion_id=12,
+                        verb=verb,
+                        family="code_fix",
+                        digest="f" * 64,
+                        newest_id=15,
+                    )
+                    self.assertNotIn(code, rendered)
+                    # At most twelve hex characters of a digest, never all 64.
+                    self.assertNotIn("f" * 13, rendered)
+
+    def test_an_unknown_refusal_still_produces_a_receipt(self) -> None:
+        """A refusal the operator never hears about is worse than an ugly
+        sentence: the store's reason set is closed but may gain a member
+        before this table does."""
+        self.assertEqual(
+            skill_promotion_receipt("spine_unavailable", promotion_id=9),
+            "Skill promotion #9 could not be approved (spine_unavailable); "
+            "nothing changed.",
+        )
+        self.assertEqual(
+            skill_promotion_receipt("pruned", promotion_id=9, verb="rollback"),
+            "Skill promotion #9 could not be rolled back (pruned); nothing changed.",
+        )
+
+    def test_the_transcript_redaction_keeps_the_id_and_drops_the_code(self) -> None:
+        """Design 7.11 via the boss's caller-side ruling.
+
+        Every governed verb writes the operator's raw turn to `messages`, and
+        conversation history is replayed into later prompts, so an unredacted
+        approval would put the code in front of the model.  memory.py performs
+        no redaction and knows nothing of this grammar; the caller does it.
+        """
+        for prompt, expected in (
+            (
+                f"Approve skill promotion #12 {_CODE}",
+                "Approve skill promotion #12 <confirmation code>",
+            ),
+            (
+                f"please promote skill promotion #7 {_CODE}.",
+                "please promote skill promotion #7 <confirmation code>.",
+            ),
+            (
+                f"  APPROVE SKILL PROMOTION # 3 {_CODE}  ",
+                "  APPROVE SKILL PROMOTION # 3 <confirmation code>  ",
+            ),
+        ):
+            with self.subTest(prompt=prompt):
+                redacted = redact_skill_promotion_command(prompt)
+                self.assertEqual(redacted, expected)
+                self.assertNotIn(_CODE, redacted)
+
+    def test_the_redaction_leaves_every_other_turn_untouched(self) -> None:
+        for prompt in (
+            "Roll back skill promotion #12",
+            "Erase memory #12",
+            "What is the weather?",
+            "I applied for promotion #12 last year",
+            "",
+        ):
+            with self.subTest(prompt=prompt):
+                self.assertEqual(redact_skill_promotion_command(prompt), prompt)
+
+    def test_a_turn_the_parser_refused_still_has_its_code_masked(self) -> None:
+        """Red team R-3 / ruling 18, the second half.
+
+        The exact parser claims only the canonical form.  A combined command, a
+        confusable spelling or a wording nobody anticipated is REFUSED rather
+        than routed -- but the operator's turn is still persisted, and
+        `redact_secrets` leaves a bare sixteen-character url-safe value alone
+        because it looks like an ordinary word.  So the masking runs on the way
+        past whether or not a parser claimed the turn.
+        """
+        for prompt in (
+            f"Approve skill promotion #12 {_CODE} and restart",
+            f"Approve \u0455kill promotion #12 {_CODE}",
+            f"Approve skill-promotion #12 {_CODE}",
+            f"Apply skill promotion #12 {_CODE}",
+            f"Skill promotion #12 approve {_CODE}",
+        ):
+            with self.subTest(prompt=ascii(prompt)):
+                masked = redact_skill_promotion_command(prompt)
+                self.assertNotIn(_CODE, masked)
+                self.assertIn("<confirmation code>", masked)
+                # The id survives: it is what the operator acted on.
+                self.assertIn("#12", masked)
+
+    def test_a_rollback_turn_needs_no_redaction_because_it_carries_no_code(
+        self,
+    ) -> None:
+        parsed = parse_explicit_skill_promotion_rollback("Roll back skill promotion #12")
+        self.assertEqual(parsed, {"promotion_id": 12})
+        self.assertNotIn("token", parsed)
 
 
 if __name__ == "__main__":

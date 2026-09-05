@@ -11,23 +11,33 @@ import sqlite3
 import stat
 import sys
 import tempfile
-from datetime import datetime, timedelta, timezone
-from dataclasses import is_dataclass, replace
-from contextlib import redirect_stderr, redirect_stdout
 import threading
 import time
+from collections.abc import Callable
+from contextlib import redirect_stderr, redirect_stdout
+from dataclasses import is_dataclass, replace
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any, Callable, TextIO
+from typing import Any, TextIO
 from uuid import uuid4
 
+from . import learning_ladder, memory_compaction, memory_graph
 from .agent import Agent, AgentResult
 from .attachments import ImageAttachment
 from .config import Config, create_project_workspace, resolve_project_workspace
 from .constitutional import (
     constitutional_status,
+)
+from .constitutional import (
     export_datasets as export_constitutional_datasets,
+)
+from .constitutional import (
     generate_records as generate_constitutional_records,
+)
+from .constitutional import (
     initialize_pack as initialize_constitutional_pack,
+)
+from .constitutional import (
     verify_records as verify_constitutional_records,
 )
 from .distillation import (
@@ -38,12 +48,16 @@ from .distillation import (
     initialize_pack,
     verify_candidates,
 )
+from .governed_memory import (
+    redact_skill_promotion_command,
+    skill_promotion_receipt,
+)
 from .memory import DEFAULT_LEASE_SECONDS, Memory
 from .memory_embeddings import EmbeddingError, run_memory_index_batch
+from .memory_spine import SpineError
 from .model_client import ModelClient, build_model_client, split_model_reference
 from .offline_documents import SUPPORTED_DOCUMENT_TYPES, build_offline_document
 from .ollama_client import OllamaError
-from .provider_setup import ProviderSetupRequired, ensure_ready as ensure_provider_ready
 from .proactive import (
     RuntimeGuard,
     build_self_model,
@@ -52,8 +66,15 @@ from .proactive import (
     initiative_eligibility,
     record_result_reflection,
 )
+from .provider_setup import ProviderSetupRequired
+from .provider_setup import ensure_ready as ensure_provider_ready
 from .redaction import (
-    contains_secret, is_redacted_descriptor, is_sensitive_key, redact_secrets,
+    contains_private_identifier_extended,
+    contains_secret,
+    is_redacted_descriptor,
+    is_sensitive_key,
+    redact_private_identifiers,
+    redact_secrets,
 )
 from .self_diagnosis import (
     run_capability_canaries,
@@ -65,6 +86,7 @@ from .skill_library import (
     list_available_skills,
     read_available_skill,
 )
+from .specialists import specialist_for_prompt
 from .strategy_transfer import STRATEGY_VOCABULARY
 from .strategy_transfer_operator import (
     StrategyTransferOperatorError,
@@ -72,11 +94,9 @@ from .strategy_transfer_operator import (
     sanitized_trial_status,
     trial_status_line,
 )
-from .vault import Vault
-from .specialists import specialist_for_prompt
-from .training import dataset_status, export_verified_dataset, parse_expected_terms
 from .tools import ToolBox
-
+from .training import dataset_status, export_verified_dataset, parse_expected_terms
+from .vault import Vault
 
 MIN_POLL_SECONDS = 1
 MAX_POLL_SECONDS = 3600
@@ -395,6 +415,401 @@ def _installed_model(wanted: str, installed: list[str]) -> bool:
     return False
 
 
+#: Distinguishes an ABSENT key from a present ``None``.  The two mean
+#: different things for the equivalence number and must not collapse.
+_UNSET = object()
+
+
+def _compaction_health(db_path: Path) -> dict[str, Any]:
+    """Run `verify_compaction` for `doctor`, or say why it could not.
+
+    Read-only and never raises.  Three refusal shapes have to be distinguished
+    from health, and the reason each one exists is that an operator would
+    otherwise be told nothing at all:
+
+    * the store file is absent -- nothing is created to look at it;
+    * the store refuses to OPEN.  `Memory.__init__` itself raises on a
+      downgraded store (`compaction_downgrade_refused`) and on one whose key
+      sidecar was deleted (VTMF M5 N-4: losing the sidecar makes the whole
+      store unopenable, which is the largest hazard in the phase, and
+      `doctor` is where an operator should learn it rather than at a failed
+      rehydrate months later).  `SpineError` is a `RuntimeError` subclass and
+      carries `code=None` on that raise, so nothing here depends on a code;
+    * the store opens but predates the compaction methods.
+
+    A refusal is never health.  `checked` is the field callers must read
+    before saying anything about the store: "no problems found" and "nothing
+    was looked at" are different facts, and only the first is good news.
+    """
+    unchecked = {
+        "checked": False,
+        "ok": False,
+        "chain_verified": None,
+        "refusal": "no_store",
+        "refusal_detail": None,
+        "milestones_checked": 0,
+        "counts": {},
+        "problems": [],
+    }
+    try:
+        if not db_path.exists():
+            return unchecked
+    except OSError as exc:
+        return {**unchecked, "refusal": "store_unreadable",
+                "refusal_detail": type(exc).__name__}
+    try:
+        with Memory(db_path) as memory:
+            verify = getattr(memory, "verify_compaction", None)
+            if not callable(verify):
+                return {**unchecked, "refusal": "compaction_unavailable"}
+            return dict(verify())
+    except (RuntimeError, sqlite3.Error, OSError, TypeError, ValueError) as exc:
+        # RuntimeError covers memory_spine.SpineError, which is how both the
+        # deleted-sidecar and the downgrade refusals arrive.
+        return {
+            **unchecked,
+            "refusal": "store_unavailable",
+            "refusal_detail": _safe_summary(exc, 200),
+        }
+
+
+def _print_compaction_health(health: dict[str, Any], indent: str = "  ") -> None:
+    """One line, and the qualifier rides ON it rather than beside it.
+
+    Two adjacent lines can be read independently, and an operator scanning for
+    red sees a green compaction line and moves on -- the absence-implies-status
+    error in a UI rather than in a field.  So:
+
+    * the chain warning is keyed off `chain_verified`, and the reason off
+      `refusal`, never off `refusal` alone: a real refusal such as
+      `schema_too_old` outranks the caller-supplied `spine_unverified`, so the
+      two do not co-vary and keying on the reason would silently drop the
+      warning in exactly the state that needs it;
+    * an empty problem list is NOT health when the chain did not verify.  On a
+      forged chain every receipt is present and every recorded digest matches
+      its record, so `problems` comes back empty and the warning can only come
+      from the qualifier;
+    * what is withheld in that state is the verdict, not the detail: the
+      problem list is still printed, because an operator whose chain is broken
+      is precisely the one who needs to see what the compaction records say.
+    """
+    counts = health.get("counts") or {}
+    chain_verified = health.get("chain_verified")
+    chain_failed = chain_verified is False
+    spine_clause = (
+        "; spine chain did not verify - run 'jarvis spine verify', "
+        "this result is downstream of it"
+        if chain_failed else ""
+    )
+
+    if not health.get("checked"):
+        reason = str(health.get("refusal") or "unknown")
+        detail = str(health.get("refusal_detail") or "").strip()
+        suffix = f" - {detail}" if detail else ""
+        print(f"{indent}Compaction: not checked ({reason}){suffix}{spine_clause}")
+        return
+
+    milestones = int(counts.get("milestones") or 0)
+    spans = int(counts.get("spans") or 0)
+    problems = list(health.get("problems") or [])
+    parts = [f"{milestones} milestone(s)", f"{spans} span(s)"]
+    if chain_failed:
+        # Deliberately no "verified" count here: the number would read as a
+        # clean bill over a chain that does not verify.
+        parts.append(f"{len(problems)} problem(s)")
+    else:
+        parts.append(f"{int(counts.get('verified') or 0)} verified")
+        if problems:
+            parts.append(f"{len(problems)} problem(s)")
+    print(f"{indent}Compaction: {', '.join(parts)}{spine_clause}")
+
+    equivalence = health.get("rebuild_equivalence_derived", _UNSET)
+    if equivalence is not _UNSET:
+        # Never a tick, a zero or a dash for an absent number: an operator
+        # reading a dash concludes "nothing to report" when the truth is "the
+        # comparison could not be made".
+        if equivalence is None:
+            why = str(health.get("equivalence_reason") or "not derivable")
+            print(f"{indent}  derived equivalence: NOT COMPARED ({why})")
+        else:
+            print(f"{indent}  derived equivalence: {equivalence}")
+
+    for problem in problems[:20]:
+        try:
+            milestone_id, kind, detail = problem[0], problem[1], problem[2]
+        except (IndexError, KeyError, TypeError):
+            continue
+        # Fields, never values -- the _graph_problem_lines convention.
+        print(f"{indent}  {milestone_id} {kind}: {_safe_summary(str(detail), 120)}")
+    if len(problems) > 20:
+        print(f"{indent}  ... and {len(problems) - 20} more")
+
+
+#: Design 2.12 / H-7d: the one sentence an operator must read before the
+#: bytes stop being plain rows.  It leads docs/COMPACTION.md too.
+_COMPACTION_KEY_HAZARD = (
+    "After compaction these turns can be read back only with "
+    "<database>.memory-spine.key. Losing that file makes them permanently "
+    "unreadable."
+)
+
+
+def _compaction_milestone_row(memory: Memory, handle: str) -> dict[str, Any] | None:
+    """The milestone a handle names, or ``None``.
+
+    The handle carries its own conversation and sequence, so this needs no
+    lookup table: parse it, ask that conversation for its milestones, and
+    match the sequence.  A handle whose 12 hex characters disagree with the
+    stored span is rejected by ``rehydrate``, not here -- this is metadata.
+    """
+    try:
+        parsed = memory_compaction.parse_handle(handle)
+    except (AttributeError, TypeError, ValueError):
+        return None
+    try:
+        report = memory.conversation_milestones(
+            int(parsed.conversation_id), limit=1_000
+        )
+    except (RuntimeError, sqlite3.Error, TypeError, ValueError):
+        return None
+    for row in list(report.get("rows") or []):
+        if int(row.get("seq") or 0) == int(parsed.seq):
+            return dict(row)
+    return None
+
+
+def _print_compaction_plan(report: dict[str, Any]) -> None:
+    """Counts, ids and handles.  Never a message body."""
+    refusal = report.get("refusal")
+    if refusal:
+        print(
+            f"Compaction refused: {refusal}"
+            + (f" - {_safe_summary(report.get('refusal_detail'), 200)}"
+               if report.get("refusal_detail") else "")
+        )
+        return
+    spans = list(report.get("spans") or [])
+    print(
+        f"Compaction plan for conversation {report.get('conversation_id')}: "
+        f"{report.get('candidate_rows', 0)} candidate row(s), "
+        f"{report.get('candidate_chars', 0)} chars, {len(spans)} span(s)."
+    )
+    held = list(report.get("held_back_messages") or [])
+    if held:
+        print(
+            f"  held back for live proposals: {len(held)} message(s) "
+            "(they stay live and readable)"
+        )
+    for span in spans:
+        print(
+            f"  seq {span.get('seq')}  messages "
+            f"{span.get('first_message_id')}-{span.get('last_message_id')}  "
+            f"{span.get('message_count')} row(s)  "
+            f"{span.get('source_chars')} chars  "
+            f"summary {span.get('summary_chars')} chars"
+        )
+    for skipped in list(report.get("skipped") or [])[:20]:
+        print(f"  skipped: {_safe_summary(str(skipped), 160)}")
+
+
+def _run_compaction_run(memory: Memory, args: argparse.Namespace) -> int:
+    """``compaction run --conversation N [--apply [--yes [--plan TOKEN]]]``.
+
+    The exit codes of ``graph rebuild``: 0 planned or applied, 1 a refusal
+    with nothing written, 2 a flag combination that would have changed
+    something without the operator saying so.
+    """
+    json_output = bool(getattr(args, "json", False))
+    apply = bool(getattr(args, "apply", False))
+    yes = bool(getattr(args, "yes", False))
+    requested_token = str(getattr(args, "plan", None) or "").strip()
+    if yes and not apply:
+        print("--yes requires --apply; nothing changed.")
+        return 2
+    if requested_token and not (apply and yes):
+        print("--plan requires --apply --yes; nothing changed.")
+        return 2
+
+    plan = memory.compact_conversation(int(args.conversation))
+    if not apply:
+        if json_output:
+            print(json.dumps(plan, ensure_ascii=False, indent=2, default=str))
+        else:
+            _print_compaction_plan(plan)
+            token = plan.get("plan_token")
+            if token and plan.get("spans"):
+                print(f"  plan token: {token}")
+                print(f"\n{_COMPACTION_KEY_HAZARD}")
+                print(
+                    f"Nothing applied. Re-run with --apply --yes --plan {token}"
+                )
+        return 1 if plan.get("refusal") else 0
+    if not yes:
+        # The plan is printed again rather than remembered: the operator
+        # confirms the pass in front of them, not one from a previous run.
+        if not json_output:
+            _print_compaction_plan(plan)
+            print(f"\n{_COMPACTION_KEY_HAZARD}")
+        token = plan.get("plan_token")
+        hint = f" --plan {token}" if token else ""
+        print(f"Re-run with --apply --yes{hint} to compact exactly this plan.")
+        return 2
+
+    applied = memory.compact_conversation(
+        int(args.conversation), apply=True, plan_token=requested_token or None
+    )
+    if json_output:
+        print(json.dumps(applied, ensure_ascii=False, indent=2, default=str))
+        return 1 if applied.get("refusal") else 0
+    refusal = applied.get("refusal")
+    if refusal:
+        print(f"Compaction refused: {refusal}; nothing was written.")
+        return 1
+    spans = list(applied.get("spans") or [])
+    print(
+        f"Compacted conversation {applied.get('conversation_id')}: "
+        f"{len(spans)} span(s) written."
+    )
+    for span in spans:
+        print(f"  {span.get('handle')}")
+    return 0
+
+
+def _run_compaction_show(memory: Memory, args: argparse.Namespace) -> int:
+    """``compaction show --handle H [--rehydrate]``.
+
+    Metadata and summary by default.  The original bytes only with
+    ``--rehydrate``, and only from a terminal with a typed confirmation --
+    the posture of ``spine tail``, which prints payload keys and never
+    values.
+    """
+    json_output = bool(getattr(args, "json", False))
+    handle = str(getattr(args, "handle", "") or "").strip()
+    row = _compaction_milestone_row(memory, handle)
+    if row is None:
+        print("No milestone for that handle in this store.")
+        return 1
+    if json_output and not getattr(args, "rehydrate", False):
+        print(json.dumps(row, ensure_ascii=False, indent=2, default=str))
+        return 0
+    if not json_output:
+        ids = dict(row.get("message_ids") or {})
+        print(f"Milestone {row.get('handle')}")
+        print(
+            f"  messages {ids.get('first')}-{ids.get('last')} "
+            f"({ids.get('count')} rows)   outcome {row.get('outcome')}"
+        )
+        print(f"  summary: {_safe_summary(str(row.get('summary') or ''), 1200)}")
+        for field in ("claim_keys", "files_touched"):
+            values = list(row.get(field) or [])
+            if values:
+                print(f"  {field}: {len(values)}")
+    if not getattr(args, "rehydrate", False):
+        return 0
+
+    if not sys.stdin.isatty():
+        print(
+            "--rehydrate prints the original conversation text and is refused "
+            "outside a terminal; nothing was read."
+        )
+        return 2
+    print(
+        "\n--rehydrate prints the ORIGINAL message text of this span, "
+        "including anything the operator typed."
+    )
+    try:
+        confirmation = input("Type the word rehydrate to continue: ")
+    except (EOFError, KeyboardInterrupt):
+        # A closed or interrupted stdin is a refusal, never a crash -- and
+        # never a silent yes.  isatty() is not sufficient on its own: it is
+        # true under some runners whose stdin still reads EOF immediately.
+        print(chr(10) + "Not confirmed; nothing was read.")
+        return 2
+    if confirmation.strip() != "rehydrate":
+        print("Not confirmed; nothing was read.")
+        return 2
+    try:
+        span = memory.rehydrate(handle)
+    except RuntimeError as exc:
+        code = getattr(exc, "code", None) or "store_unavailable"
+        print(f"Rehydration refused: {code}; nothing was returned.")
+        return 1
+    for message in list(span.get("messages") or []):
+        print(
+            f"  [{message.get('id')}] {message.get('created_at')} "
+            f"{message.get('role')}: {message.get('content')}"
+        )
+    return 0
+
+
+def _run_compaction(args: argparse.Namespace) -> int:
+    """Operator surfaces over transcript compaction (VTMF M5 half A).
+
+    ``status``, ``milestones`` and ``verify`` print ids, counts and handles
+    only.  ``show`` adds the deterministic summary.  Original message text
+    appears only behind ``show --rehydrate`` with a typed confirmation.
+    """
+    config = Config.load()
+    json_output = bool(getattr(args, "json", False))
+    db_path = config.data_dir / "jarvis.db"
+    with Memory(db_path) as memory:
+        if args.compaction_command == "status":
+            counts = memory_compaction.compaction_row_counts(memory.db)
+            payload = {
+                "ready": bool(counts),
+                "milestones": int(counts.get("memory_milestones", 0) or 0),
+                "spans": int(counts.get("memory_compacted_spans", 0) or 0),
+            }
+            if json_output:
+                print(json.dumps(payload, ensure_ascii=False, indent=2, default=str))
+            elif not payload["ready"]:
+                print("This store has no compaction tables (schema below 50).")
+            else:
+                print(
+                    f"Compaction: {payload['milestones']} milestone(s), "
+                    f"{payload['spans']} span(s) stored."
+                )
+                print("  run compaction verify to check them against the spine")
+            return 0
+        if args.compaction_command == "verify":
+            health = _compaction_health(db_path)
+            if json_output:
+                print(json.dumps(health, ensure_ascii=False, indent=2, default=str))
+            else:
+                _print_compaction_health(health, indent="")
+            if not health.get("checked"):
+                return 1
+            return 0 if health.get("ok") else 1
+        if args.compaction_command == "milestones":
+            report = memory.conversation_milestones(
+                int(args.conversation), limit=int(getattr(args, "limit", 50) or 50)
+            )
+            if json_output:
+                print(json.dumps(report, ensure_ascii=False, indent=2, default=str))
+                return 0
+            rows = list(report.get("rows") or [])
+            mode = str((report.get("report") or {}).get("mode") or "unknown")
+            print(
+                f"Conversation {args.conversation}: {len(rows)} milestone(s) "
+                f"[{mode}]"
+            )
+            for row in rows:
+                ids = dict(row.get("message_ids") or {})
+                print(
+                    f"  seq {row.get('seq')}  {row.get('handle')}  "
+                    f"messages {ids.get('first')}-{ids.get('last')} "
+                    f"({ids.get('count')} rows)  outcome {row.get('outcome')}"
+                )
+            if rows:
+                print("  run compaction show --handle H for a summary")
+            return 0
+        if args.compaction_command == "show":
+            return _run_compaction_show(memory, args)
+        if args.compaction_command == "run":
+            return _run_compaction_run(memory, args)
+    return 2
+
+
 def doctor(*, deep: bool = False) -> int:
     print("JARVIS system check")
     try:
@@ -504,11 +919,30 @@ def doctor(*, deep: bool = False) -> int:
         if not ready:
             errors.append("Explicitly selected model is missing")
 
+    # VTMF M5 design 2.12: informational, and it must NOT change the exit
+    # code.  It is deliberately outside the `deep` branch: a deleted key
+    # sidecar makes the whole store unopenable, and an operator should
+    # learn that from an ordinary `doctor` run.
+    _print_compaction_health(_compaction_health(config.data_dir / "jarvis.db"))
+
     if deep:
         try:
             with Memory(config.data_dir / "jarvis.db") as memory:
                 drift = memory.drift_report()
                 canaries = run_capability_canaries(config, memory)
+                # Design 3.7 and R-5 / ruling 20: doctor prints both
+                # ladder counts and the ledger's coverage.  A non-zero
+                # unverified count is a warning; a legacy count is
+                # informational; a coverage problem is neither -- it means
+                # the ledger no longer re-derives, which is the tamper
+                # design 2.4 calls the important one.
+                ladder_coverage = _ladder_coverage(memory)
+                try:
+                    ladder_rows = [
+                        dict(row) for row in memory.ladder_promotions()
+                    ]
+                except (AttributeError, RuntimeError, sqlite3.Error, ValueError):
+                    ladder_rows = []
             passed = sum(item["status"] == "pass" for item in canaries)
             failed = [item for item in canaries if item["status"] == "fail"]
             skipped = sum(item["status"] == "skip" for item in canaries)
@@ -530,6 +964,20 @@ def doctor(*, deep: bool = False) -> int:
                     print(f"    {finding['family']}: {signals}")
             else:
                 print("  Behavioral drift: no threshold crossings with sufficient data")
+            legacy_live = sum(
+                1 for row in ladder_rows
+                if str(row.get("stage")) == "unapproved_legacy"
+            )
+            if legacy_live:
+                print(f"  {legacy_live} legacy skills live without approval")
+            if ladder_coverage.get("checked") and int(
+                ladder_coverage.get("rows") or 0
+            ):
+                _print_ladder_coverage(ladder_coverage, indent="  ")
+                if not ladder_coverage.get("coverage_intact", True):
+                    errors.append(
+                        "Calibration ledger does not re-derive"
+                    )
             print(f"  Self-inspection: {getattr(config, 'self_inspect', 'disabled')}")
         except (OSError, ValueError, sqlite3.Error, RuntimeError) as exc:
             errors.append(f"Deep diagnosis failed: {type(exc).__name__}")
@@ -584,14 +1032,67 @@ def _run_selftest(args: argparse.Namespace) -> int:
 
 
 def _display_memories(memory: Memory) -> None:
-    records = memory.list_memories()
+    """``/memory``: the newest rows with the id ``Erase memory #<id>`` names.
+
+    ``memories.id`` is explicit and never reused since schema 47, so it is the
+    operator-facing identity of an ordinary memory (design 6.1).
+    """
+    try:
+        records = memory.list_memories(with_ids=True)
+    except TypeError:
+        records = memory.list_memories()
     if not records:
         print("No saved memories.")
         return
     for record in records:
         kind = _safe_summary(record.get("kind", "memory"), 30)
         content = _safe_summary(record.get("content", ""), 240)
-        print(f"  {kind}: {content}")
+        identifier = record.get("id")
+        prefix = f"#{int(identifier)} " if isinstance(identifier, int) else ""
+        print(f"  {prefix}{kind}: {content}")
+
+
+def _display_project_facts(memory: Memory, project_id: int, subject: str = "") -> None:
+    """List active governed project facts through the same screened read path."""
+    try:
+        facts = memory.current_claims(
+            str(subject or ""),
+            limit=50,
+            clock_mode="disabled",
+            project_id=int(project_id),
+        )
+    except (RuntimeError, ValueError) as exc:
+        print(f"Project facts unavailable: {_safe_summary(exc)}")
+        return
+    facts = [item for item in facts if str(item.get("scope") or "") != "global"]
+    if not facts:
+        report = memory.claim_recall_report() if hasattr(memory, "claim_recall_report") else {}
+        if report.get("abstained") and str(report.get("mode") or "") not in {
+            "screened", "project-unavailable"
+        }:
+            # An abstention is not "no facts": the pool overflowed or was
+            # ambiguous. Say so and offer the narrower read.
+            reason = _safe_summary(report.get("reason") or report.get("mode"), 80)
+            print(
+                f"Project fact listing abstained for project {int(project_id)}: "
+                f"{reason}. Filter by subject words to narrow the read."
+            )
+            return
+        reason = report.get("reason") if report.get("abstained") else None
+        suffix = f" ({_safe_summary(reason, 80)})" if reason else ""
+        print(f"No active project facts for project {int(project_id)}{suffix}.")
+        return
+    print(f"Active project facts for project {int(project_id)} (newest first):")
+    for item in facts:
+        subject_text = _safe_summary(item.get("subject", ""), 60)
+        predicate_text = _safe_summary(item.get("predicate", ""), 60)
+        value_text = _safe_summary(item.get("value", ""), 160)
+        status = _safe_summary(item.get("status", ""), 12)
+        print(f"  {subject_text} | {predicate_text} | {value_text} [{status}]")
+    print(
+        'Update with: Remember this project fact: {"subject":"...","predicate":"...","value":"..."}'
+    )
+    print('Retire with: Forget this project fact: {"subject":"...","predicate":"..."}')
 
 
 def _display_tasks(memory: Memory) -> None:
@@ -658,7 +1159,7 @@ def interactive() -> int:
             if prompt == "/help":
                 print(
                     "/new  /model [auto|fast|reasoning|coding|deep|provider:name]  "
-                    "/memory  /tasks  /quit"
+                    "/memory  /facts  /ladder  /tasks  /quit"
                 )
                 continue
             if prompt == "/model":
@@ -674,6 +1175,35 @@ def interactive() -> int:
                 continue
             if prompt == "/memory":
                 _display_memories(memory)
+                continue
+            if prompt == "/facts":
+                chat_project_id = 1
+                try:
+                    conversation_project = memory.conversation_project(conversation_id)
+                    if conversation_project is not None:
+                        chat_project_id = int(conversation_project["id"])
+                except (AttributeError, KeyError, RuntimeError, TypeError, ValueError):
+                    chat_project_id = 1
+                _display_project_facts(memory, chat_project_id)
+                continue
+            if prompt == "/ladder":
+                # Rendered by the CLI BEFORE any model call, exactly as
+                # /memory and /facts are.  This is one of only three
+                # surfaces that print a staged promotion's confirmation
+                # code, and the code never travels through a prompt or a
+                # reply to get here (design 6.2 item 4, 6.3).
+                chat_project_id = 1
+                try:
+                    conversation_project = memory.conversation_project(
+                        conversation_id
+                    )
+                    if conversation_project is not None:
+                        chat_project_id = int(conversation_project["id"])
+                except (
+                    AttributeError, KeyError, RuntimeError, TypeError, ValueError,
+                ):
+                    chat_project_id = 1
+                _display_ladder(config, memory, chat_project_id)
                 continue
             if prompt == "/tasks":
                 _display_tasks(memory)
@@ -1285,7 +1815,7 @@ class _ForegroundLease:
             except OSError:
                 return
 
-    def __enter__(self) -> "_ForegroundLease":
+    def __enter__(self) -> _ForegroundLease:
         try:
             _foreground_request_active(self.path.parent)
             _write_foreground_lease(self.path, self.token)
@@ -1402,6 +1932,7 @@ def worker(
                     if scheduled:
                         print(f"Queued {scheduled} recurring scheduled job(s).")
 
+
                     # Materializers enforce the same control state inside their
                     # transactions. Re-check before claiming to honor a control
                     # change that raced the scheduler calls.
@@ -1483,6 +2014,29 @@ def worker(
                                 print(f"Idle scheduler queued proactive task #{scheduled}.")
                                 idle_since = time.monotonic()
                                 continue
+                        # The learning ladder's consolidation pass
+                        # (correctness review HIGH-2), here and not earlier.
+                        #
+                        # It runs only once the claim above has already
+                        # returned nothing, for two reasons.  A maintenance
+                        # pass must never compete with foreground work for the
+                        # write lock; and nothing it does can then precede or
+                        # prevent a claim.  Placed before the claim, an
+                        # AttributeError from a store without the ladder
+                        # surface reached the worker's `except Exception` and
+                        # abandoned the whole iteration -- the task was never
+                        # claimed, and sixteen unrelated tests failed on
+                        # `IndexError` with no visible link to the ladder.
+                        #
+                        # The handler is deliberately broader than the pass's
+                        # own capability check: whatever goes wrong in a
+                        # background pass, the worker's job is the task loop.
+                        try:
+                            _report_ladder_pass(
+                                run_ladder_consolidation(config, memory)
+                            )
+                        except Exception as exc:  # noqa: BLE001 - never fatal
+                            _record_ladder_pass_failure(memory, exc)
                         idle_wait = (
                             min(poll_seconds, WORKER_STATUS_HEARTBEAT_SECONDS)
                             if max_cycles is None
@@ -1996,7 +2550,7 @@ class _RotatingTextWriter:
             self._stream.close()
             self._stream = None
 
-    def __enter__(self) -> "_RotatingTextWriter":
+    def __enter__(self) -> _RotatingTextWriter:
         return self
 
     def __exit__(self, *_: object) -> None:
@@ -2356,6 +2910,147 @@ def _run_usage(args: argparse.Namespace) -> int:
         "recover through retry or failover remain counted as failed calls."
     )
     return 0
+
+
+def _memory_preview(content: Any, limit: int = 120) -> str:
+    """A listing preview with secrets redacted and identifiers screened.
+
+    The widened screen of design 6.2 decides; a row that trips it prints
+    ``[PRIVATE]`` rather than its text, so a listing can never be the leak.
+    """
+    text = redact_private_identifiers(_safe_summary(content, limit))
+    if contains_private_identifier_extended(text):
+        return "[PRIVATE]"
+    return text
+
+
+def _run_memory_list(args: argparse.Namespace) -> int:
+    """``memory list [--limit N] [--json]``: ids, provenance, a screened preview."""
+    config = Config.load()
+    with Memory(config.data_dir / "jarvis.db") as memory:
+        try:
+            records = memory.list_memories(limit=int(args.limit), with_ids=True)
+        except TypeError:
+            records = memory.list_memories(limit=int(args.limit))
+    if bool(getattr(args, "json", False)):
+        payload = [
+            {
+                "id": record.get("id"),
+                "kind": record.get("kind"),
+                "created_at": record.get("created_at"),
+                "origin": record.get("origin"),
+                "eligible": record.get("eligible"),
+                "preview": _memory_preview(record.get("content", "")),
+            }
+            for record in records
+        ]
+        print(json.dumps(payload, ensure_ascii=False, indent=2, default=str))
+        return 0
+    if not records:
+        print("No saved memories.")
+        return 0
+    print("Saved memories (newest first):")
+    for record in records:
+        identifier = record.get("id")
+        marker = f"#{int(identifier)}" if isinstance(identifier, int) else "#?"
+        print(
+            f"  {marker}  {_safe_summary(record.get('kind', 'memory'), 20)}  "
+            f"{_safe_summary(record.get('created_at', ''), 19)}  "
+            f"{_safe_summary(record.get('origin', '-'), 30)}  "
+            f"{'eligible' if record.get('eligible') else 'ineligible'}  "
+            f"{_memory_preview(record.get('content', ''))}"
+        )
+    print("Erase one with: python -m jarvis memory erase <id> --yes")
+    return 0
+
+
+def _run_memory_erase(args: argparse.Namespace) -> int:
+    """``memory erase <id> [--yes]``.
+
+    Exit 2 without ``--yes``: the kind and created date are printed and
+    nothing is read or written beyond that lookup.  Exit 0 on an erase, 1 on
+    a refusal (a missing id, a claim backing row, or a vault-note mirror),
+    which changes nothing.  No content is echoed on any path.
+    """
+    config = Config.load()
+    identifier = int(args.memory_id)
+    json_output = bool(getattr(args, "json", False))
+    with Memory(config.data_dir / "jarvis.db") as memory:
+        if not bool(getattr(args, "yes", False)):
+            # By primary key, never through list_memories: that is a listing,
+            # it hides claim backing rows and stops at its limit, so it says
+            # "no such memory" about exactly the rows the erase has fixed
+            # refusals for.
+            described = memory.describe_memory(identifier)
+            if described is None:
+                reason, message = "missing", (
+                    f"No memory #{identifier} exists; nothing changed."
+                )
+            elif described.get("is_claim_backing"):
+                reason, message = "claim_backing", (
+                    f"Memory #{identifier} backs a project fact; use "
+                    'Erase this project fact: {...} (see /facts) instead.'
+                )
+            elif described.get("is_vault_note"):
+                reason, message = "vault_note", (
+                    f"Memory #{identifier} mirrors a vault note; delete the "
+                    "note in the vault and reindex."
+                )
+            else:
+                reason, message = "", ""
+            if reason:
+                # A refusal is settled: --yes would not change it.
+                if json_output:
+                    print(json.dumps({"erased": False, "reason": reason}))
+                else:
+                    print(message)
+                return 1
+            if json_output:
+                print(json.dumps({
+                    "erased": False,
+                    "reason": "confirmation required",
+                    "id": identifier,
+                    "kind": described.get("kind"),
+                    "created_at": described.get("created_at"),
+                    "origin": described.get("origin"),
+                    "eligible": described.get("eligible"),
+                    "content_length": described.get("content_length"),
+                }, ensure_ascii=False, default=str))
+            else:
+                origin = described.get("origin")
+                print(
+                    f"Would erase memory #{identifier} "
+                    f"(kind: {_safe_summary(described.get('kind', 'memory'), 20)}, "
+                    f"created {_safe_summary(described.get('created_at', ''), 19)}, "
+                    f"{int(described.get('content_length') or 0)} characters"
+                    # A legacy import has no provenance row at all.
+                    + (f", origin {_safe_summary(origin, 30)}" if origin else "")
+                    + ")."
+                )
+                print("Re-run with --yes to erase it; nothing changed.")
+            return 2
+        receipt = memory.erase_memory(
+            None, identifier, permission="operator:cli"
+        )
+    if json_output:
+        print(json.dumps(receipt, ensure_ascii=False, indent=2, default=str))
+    else:
+        # The store owns the fixed receipt text; the CLI never re-renders it.
+        print(_safe_detail(str(receipt.get("assistant_message", "")), 2_000))
+    return 0 if str(receipt.get("action")) == "erased" else 1
+
+
+def _run_memory(args: argparse.Namespace) -> int:
+    """``memory [status|list|erase]``; ``status`` stays the default."""
+    command = str(getattr(args, "memory_command", "status") or "status")
+    if command == "list":
+        return _run_memory_list(args)
+    if command == "erase":
+        if getattr(args, "memory_id", None) is None:
+            print("memory erase requires an id: python -m jarvis memory erase <id>")
+            return 2
+        return _run_memory_erase(args)
+    return _run_memory_quality(args)
 
 
 def _run_memory_quality(args: argparse.Namespace) -> int:
@@ -2991,6 +3686,1793 @@ def _run_gateway(args: argparse.Namespace) -> int:
     return 0
 
 
+# The divergence kinds `--apply` refuses on (the spine history itself is
+# inconsistent); a failed chain is counted from the verification report.
+_SPINE_SIDE_DIVERGENCES = frozenset({"payload", "order", "redaction"})
+
+
+def _print_claim_rebuild_report(report: dict[str, Any], *, heading: str) -> None:
+    """Dry-run report lines: counts, then one line per divergence.  The
+    store's ``detail`` names fields and digests, never a value, a subject, a
+    predicate, or a source text; the CLI still bounds it with
+    ``_safe_summary``."""
+    state = "equivalent" if report.get("ok") else "DIVERGENT"
+    print(
+        f"{heading}: {state}; live rows {int(report.get('rows_live', 0))}, "
+        f"rebuilt rows {int(report.get('rows_rebuilt', 0))}."
+    )
+    for item in list(report.get("divergences") or [])[:50]:
+        print(
+            f"  claim {item.get('claim_id')}: {item.get('kind')}: "
+            f"{_safe_summary(item.get('detail'), 160)}"
+        )
+
+
+def _claim_rebuild_plan(report: dict[str, Any]) -> dict[str, int]:
+    """What ``--apply`` would do with a dry-run report, by divergence kind."""
+    plan = {"updates": 0, "recreations": 0, "removals": 0, "spine_side": 0}
+    verification = report.get("verification")
+    if isinstance(verification, dict) and not bool(
+        verification.get("chain_ok", verification.get("ok", True))
+    ):
+        # The chain, head, key, triggers, redactions, or sequences fail:
+        # the spine is wrong, and apply refuses with verify_failed.
+        plan["spine_side"] += 1
+    updated: set[Any] = set()
+    for item in list(report.get("divergences") or []):
+        kind = str(item.get("kind") or "")
+        if kind in _SPINE_SIDE_DIVERGENCES:
+            plan["spine_side"] += 1
+        elif kind == "verify":
+            # A verification problem is either the chain (counted above) or
+            # a lineage problem, which apply repairs through the row-level
+            # kinds below; it is never a change of its own.
+            continue
+        elif kind == "missing_in_live":
+            plan["recreations"] += 1
+        elif kind == "missing_in_rebuild":
+            plan["removals"] += 1
+        else:
+            claim_id = item.get("claim_id")
+            if claim_id not in updated:
+                updated.add(claim_id)
+                plan["updates"] += 1
+    return plan
+
+
+def _plan_token_of(report: dict[str, Any]) -> str:
+    """The store's plan token (12 hex characters over the head event id and
+    the sorted (claim id, kind) divergences); empty when the store has none."""
+    token = report.get("plan_token")
+    return str(token).strip() if isinstance(token, str) and token.strip() else ""
+
+
+def _print_claim_rebuild_plan(report: dict[str, Any], plan: dict[str, int]) -> None:
+    """The plan an operator confirms: the dry-run lines, what apply would do,
+    and the token that binds a later ``--apply --yes --plan`` to exactly it."""
+    _print_claim_rebuild_report(report, heading="Claim projection rebuild (plan)")
+    line = (
+        f"Would change: {plan['updates']} field updates, "
+        f"{plan['recreations']} recreations, {plan['removals']} removals"
+    )
+    if plan["spine_side"]:
+        line += (
+            f"; {plan['spine_side']} spine-side divergences would make "
+            "apply refuse"
+        )
+    print(line + ".")
+    token = _plan_token_of(report)
+    if token:
+        print(f"plan token: {token}")
+
+
+def _id_list(values: Any) -> list[int]:
+    return [
+        int(value)
+        for value in (values or [])
+        if isinstance(value, int) and not isinstance(value, bool)
+    ]
+
+
+def _run_spine_rebuild_claims(memory: Memory, args: argparse.Namespace) -> int:
+    """``spine rebuild-claims [--apply [--yes [--plan TOKEN]]] [--json]``.
+
+    Exit 0: equivalent, applied, or nothing to apply.  Exit 1: divergent dry
+    run, or ``--apply --yes`` refused (the spine failed verification, a
+    spine-side divergence, a divergence remained after the in-transaction
+    re-check, or ``--plan TOKEN`` no longer matches the store: ``stale_plan``)
+    with nothing changed.  Exit 2: ``--apply`` without ``--yes`` when
+    something would change (the plan and its token are printed), ``--yes``
+    without ``--apply``, or ``--plan`` without ``--apply --yes``.
+
+    The plan token binds the apply to the plan the operator saw: with a
+    token the dry run is re-run and must produce the same token; without one
+    the fresh plan is printed and applied.  Either way the dry-run report is
+    handed to the store as ``plan=`` so its in-transaction check is real.
+    """
+    json_output = bool(getattr(args, "json", False))
+    apply = bool(getattr(args, "apply", False))
+    yes = bool(getattr(args, "yes", False))
+    requested_token = str(getattr(args, "plan", None) or "").strip()
+    if yes and not apply:
+        if json_output:
+            print(json.dumps({"ok": False, "applied": False, "error": "--yes requires --apply"}))
+        else:
+            print("--yes requires --apply; nothing changed.")
+        return 2
+    if requested_token and not (apply and yes):
+        if json_output:
+            print(json.dumps({"ok": False, "applied": False, "error": "--plan requires --apply --yes"}))
+        else:
+            print("--plan requires --apply --yes; nothing changed.")
+        return 2
+    report = memory.rebuild_claim_projection()
+    if not apply:
+        if json_output:
+            print(json.dumps(report, ensure_ascii=False, indent=2, default=str))
+        else:
+            _print_claim_rebuild_report(report, heading="Claim projection rebuild (dry run)")
+        return 0 if report.get("ok") else 1
+    if report.get("ok"):
+        if json_output:
+            print(json.dumps(
+                {"applied": False, "reason": "nothing to apply", **report},
+                ensure_ascii=False, indent=2, default=str,
+            ))
+        else:
+            print("Nothing to apply: the live claim projection is equivalent to the spine.")
+        return 0
+    plan = _claim_rebuild_plan(report)
+    fresh_token = _plan_token_of(report)
+    if not yes:
+        if json_output:
+            print(json.dumps(
+                {"applied": False, "would_change": plan, **report},
+                ensure_ascii=False, indent=2, default=str,
+            ))
+        else:
+            _print_claim_rebuild_plan(report, plan)
+            hint = f" --plan {fresh_token}" if fresh_token else ""
+            print(f"Re-run with --apply --yes{hint} to reconcile exactly this plan.")
+        return 2
+    if requested_token:
+        if not fresh_token or requested_token != fresh_token:
+            # The store changed since the plan was printed, or the token is
+            # not this store's: refuse before touching anything.
+            if json_output:
+                print(json.dumps({
+                    "ok": False, "applied": False, "refusal": "stale_plan",
+                    "requested_plan_token": requested_token,
+                    "plan_token": fresh_token or None,
+                }))
+            else:
+                current = fresh_token or "unavailable"
+                print(
+                    "Claim projection rebuild refused: stale_plan; the store no "
+                    "longer matches the plan you confirmed (current plan token: "
+                    f"{current}); nothing changed."
+                )
+            return 1
+    elif not json_output:
+        # No token given: the plan being applied is shown first, token
+        # included, so the operator sees exactly what changes.
+        _print_claim_rebuild_plan(report, plan)
+    try:
+        applied = memory.rebuild_claim_projection(apply=True, plan=report)
+    except SpineError as exc:
+        reason = str(getattr(exc, "code", None) or _safe_summary(exc, 120))
+        if json_output:
+            print(json.dumps({"ok": False, "applied": False, "refusal": reason}))
+        else:
+            print(f"Claim projection rebuild refused: {reason}; nothing changed.")
+        return 1
+    refusal = applied.get("refusal")
+    if refusal or not applied.get("ok"):
+        reason = _safe_summary(refusal or "divergences remain", 120)
+        if json_output:
+            print(json.dumps(applied, ensure_ascii=False, indent=2, default=str))
+        else:
+            print(f"Claim projection rebuild refused: {reason}; nothing changed.")
+            for item in list(applied.get("divergences") or [])[:50]:
+                print(
+                    f"  claim {item.get('claim_id')}: {item.get('kind')}: "
+                    f"{_safe_summary(item.get('detail'), 160)}"
+                )
+        return 1
+    if json_output:
+        print(json.dumps(applied, ensure_ascii=False, indent=2, default=str))
+        return 0
+    if not applied.get("applied", True):
+        print("Nothing to apply: the live claim projection is equivalent to the spine.")
+        return 0
+    print(
+        f"Claim projection rebuilt: rows before {int(applied.get('rows_before', 0))}, "
+        f"rows after {int(applied.get('rows_after', 0))}, divergences fixed "
+        f"{int(applied.get('divergences_fixed', 0))}."
+    )
+    for label, key in (
+        ("removed", "removed_ids"),
+        ("updated", "updated_ids"),
+        ("recreated", "recreated_ids"),
+        ("evidence lost for", "lost_evidence_claim_ids"),
+    ):
+        ids = _id_list(applied.get(key))
+        if ids:
+            print(f"  {label}: {', '.join(str(value) for value in ids[:200])}")
+    event_id = applied.get("event_id")
+    if isinstance(event_id, int) and not isinstance(event_id, bool):
+        print(f"  receipt: projection.rebuilt event #{event_id}")
+    return 0
+
+
+def _graph_problem_lines(items: Any, limit: int = 50) -> None:
+    """One line per graph problem: ids, kind, and a detail that names fields.
+
+    ``verify_graph`` and the rebuild report name fields, never values (the
+    M-1 / F-1 rule); the CLI bounds the text anyway.
+    """
+    for item in list(items or [])[:limit]:
+        if not isinstance(item, dict):
+            continue
+        claim_id = item.get("claim_id")
+        entity_id = item.get("entity_id")
+        subject = (
+            f"claim {claim_id}" if claim_id is not None else f"entity {entity_id}"
+        )
+        print(
+            f"  {subject}: {item.get('kind')}: "
+            f"{_safe_summary(item.get('detail'), 160)}"
+        )
+
+
+def _graph_excluded_line(excluded: Any) -> str:
+    """The three exclusion categories of design 2.2, or a legacy integer."""
+    if isinstance(excluded, dict):
+        return (
+            f"{int(excluded.get('excluded_predicate', 0) or 0)} reserved-predicate, "
+            f"{int(excluded.get('subject_private', 0) or 0)} private-subject, "
+            f"{int(excluded.get('subject_too_long', 0) or 0)} over-long-subject"
+        )
+    if isinstance(excluded, int) and not isinstance(excluded, bool):
+        return f"{excluded} excluded"
+    return "0 excluded"
+
+
+def _last_graph_projection_event(memory: Memory) -> int | None:
+    """The newest ``projection.rebuilt`` event id, or None.
+
+    Payload values never leave the store, so this cannot say whether the
+    newest one re-projected the claims or the graph; the caller labels it as
+    the last projection receipt, not as the graph's own.
+    """
+    try:
+        events = memory.spine_tail(limit=200)
+    except (AttributeError, RuntimeError, sqlite3.Error, TypeError, ValueError):
+        return None
+    for item in events:
+        if str(item.get("kind") or "") == "projection.rebuilt":
+            identifier = item.get("id")
+            if isinstance(identifier, int) and not isinstance(identifier, bool):
+                return identifier
+    return None
+
+
+def _print_graph_report(report: dict[str, Any], *, heading: str) -> None:
+    state = "equivalent" if report.get("ok") else "DIVERGENT"
+    print(
+        f"{heading}: {state}; live edges "
+        f"{int(report.get('edges_live', report.get('edges', 0)) or 0)}, "
+        f"expected edges "
+        f"{int(report.get('edges_expected', report.get('edges', 0)) or 0)}; "
+        f"live entities {int(report.get('entities_live', 0) or 0)}, "
+        f"expected entities {int(report.get('entities_expected', 0) or 0)}."
+    )
+    _graph_problem_lines(report.get("divergences") or report.get("problems"))
+
+
+def _graph_rebuild_plan(report: dict[str, Any]) -> dict[str, int]:
+    """What ``--apply`` would do with a graph dry-run report, by kind."""
+    plan = {"reprojections": 0, "removals": 0, "entity_sweeps": 0}
+    for item in list(report.get("divergences") or report.get("problems") or []):
+        if not isinstance(item, dict):
+            continue
+        kind = str(item.get("kind") or "")
+        if kind in {"extra_edge"}:
+            plan["removals"] += 1
+        elif kind in {"orphan_entity"}:
+            plan["entity_sweeps"] += 1
+        else:
+            plan["reprojections"] += 1
+    return plan
+
+
+def _print_graph_rebuild_plan(report: dict[str, Any], plan: dict[str, int]) -> None:
+    _print_graph_report(report, heading="Graph projection rebuild (plan)")
+    print(
+        f"Would change: {plan['reprojections']} re-projections, "
+        f"{plan['removals']} edge removals, {plan['entity_sweeps']} orphan "
+        "entity sweeps."
+    )
+    token = _plan_token_of(report)
+    if token:
+        print(f"plan token: {token}")
+
+
+def _run_graph_rebuild(memory: Memory, args: argparse.Namespace) -> int:
+    """``graph rebuild [--apply [--yes [--plan TOKEN]]] [--json]``.
+
+    The exit codes of ``spine rebuild-claims``: 0 equivalent, applied, or
+    nothing to apply; 1 a divergent dry run or a refused apply (including a
+    ``stale_plan``) with nothing changed; 2 ``--apply`` without ``--yes`` when
+    something would change, ``--yes`` without ``--apply``, or ``--plan``
+    without ``--apply --yes``.
+    """
+    json_output = bool(getattr(args, "json", False))
+    apply = bool(getattr(args, "apply", False))
+    yes = bool(getattr(args, "yes", False))
+    requested_token = str(getattr(args, "plan", None) or "").strip()
+    if yes and not apply:
+        if json_output:
+            print(json.dumps({"ok": False, "applied": False, "error": "--yes requires --apply"}))
+        else:
+            print("--yes requires --apply; nothing changed.")
+        return 2
+    if requested_token and not (apply and yes):
+        if json_output:
+            print(json.dumps({"ok": False, "applied": False, "error": "--plan requires --apply --yes"}))
+        else:
+            print("--plan requires --apply --yes; nothing changed.")
+        return 2
+    report = memory.rebuild_graph_projection()
+    if not apply:
+        if json_output:
+            print(json.dumps(report, ensure_ascii=False, indent=2, default=str))
+        else:
+            _print_graph_report(report, heading="Graph projection rebuild (dry run)")
+        return 0 if report.get("ok") else 1
+    if report.get("ok"):
+        if json_output:
+            print(json.dumps(
+                {"applied": False, "reason": "nothing to apply", **report},
+                ensure_ascii=False, indent=2, default=str,
+            ))
+        else:
+            print("Nothing to apply: the graph projection is equivalent to the claims.")
+        return 0
+    plan = _graph_rebuild_plan(report)
+    fresh_token = _plan_token_of(report)
+    if not yes:
+        if json_output:
+            print(json.dumps(
+                {"applied": False, "would_change": plan, **report},
+                ensure_ascii=False, indent=2, default=str,
+            ))
+        else:
+            _print_graph_rebuild_plan(report, plan)
+            hint = f" --plan {fresh_token}" if fresh_token else ""
+            print(f"Re-run with --apply --yes{hint} to reconcile exactly this plan.")
+        return 2
+    if requested_token:
+        if not fresh_token or requested_token != fresh_token:
+            # The store changed since the plan was printed, or the token is
+            # not this store's: refuse before touching anything.
+            if json_output:
+                print(json.dumps({
+                    "ok": False, "applied": False, "refusal": "stale_plan",
+                    "requested_plan_token": requested_token,
+                    "plan_token": fresh_token or None,
+                }))
+            else:
+                current = fresh_token or "unavailable"
+                print(
+                    "Graph projection rebuild refused: stale_plan; the store no "
+                    "longer matches the plan you confirmed (current plan token: "
+                    f"{current}); nothing changed."
+                )
+            return 1
+    elif not json_output:
+        _print_graph_rebuild_plan(report, plan)
+    try:
+        applied = memory.rebuild_graph_projection(
+            apply=True, plan=report, actor="operator", permission="operator:cli"
+        )
+    except SpineError as exc:
+        reason = str(getattr(exc, "code", None) or _safe_summary(exc, 120))
+        if json_output:
+            print(json.dumps({"ok": False, "applied": False, "refusal": reason}))
+        else:
+            print(f"Graph projection rebuild refused: {reason}; nothing changed.")
+        return 1
+    refusal = applied.get("refusal")
+    if refusal or not applied.get("ok"):
+        reason = _safe_summary(refusal or "divergences remain", 120)
+        if json_output:
+            print(json.dumps(applied, ensure_ascii=False, indent=2, default=str))
+        else:
+            print(f"Graph projection rebuild refused: {reason}; nothing changed.")
+            _graph_problem_lines(
+                applied.get("divergences") or applied.get("problems")
+            )
+        return 1
+    if json_output:
+        print(json.dumps(applied, ensure_ascii=False, indent=2, default=str))
+        return 0
+    if not applied.get("applied", True):
+        print("Nothing to apply: the graph projection is equivalent to the claims.")
+        return 0
+    print(
+        f"Graph projection rebuilt: edges before "
+        f"{int(applied.get('edges_before', 0) or 0)}, edges after "
+        f"{int(applied.get('edges_after', 0) or 0)}, divergences fixed "
+        f"{int(applied.get('divergences_fixed', 0) or 0)}."
+    )
+    for label, key in (
+        ("removed", "removed_ids"),
+        ("updated", "updated_ids"),
+        ("recreated", "recreated_ids"),
+    ):
+        ids = _id_list(applied.get(key))
+        if ids:
+            print(f"  {label}: {', '.join(str(value) for value in ids[:200])}")
+    removed_entities = _id_list(applied.get("removed_entity_ids"))
+    if removed_entities:
+        print(
+            "  entities swept: "
+            f"{', '.join(str(value) for value in removed_entities[:200])}"
+        )
+    event_id = applied.get("event_id")
+    if isinstance(event_id, int) and not isinstance(event_id, bool):
+        print(f"  receipt: projection.rebuilt event #{event_id}")
+    return 0
+
+
+def _print_graph_chain_rows(rows: list[dict[str, Any]], hops: int) -> None:
+    """The screened chains the agent would see, in hop order.
+
+    Values are shown, exactly as ``facts`` shows them: this goes through
+    ``Memory.graph_chains``, so every row already passed the eligibility check
+    and both endpoint screens.  Raw tables are never read here.
+    """
+    for row in rows:
+        hop = row.get("hop")
+        if isinstance(hop, int) and not isinstance(hop, bool) and hop > hops:
+            continue
+        chain = row.get("chain")
+        marker = f"chain {chain} hop {hop}" if chain is not None else "row"
+        flags = []
+        if row.get("incomplete"):
+            flags.append("incomplete")
+        if row.get("weakest"):
+            flags.append("weakest")
+        if row.get("retracted"):
+            flags.append("retracted")
+        suffix = f" [{', '.join(flags)}]" if flags else ""
+        print(
+            f"  {marker}: {_safe_summary(row.get('subject', ''), 60)} | "
+            f"{_safe_summary(row.get('predicate', ''), 60)} | "
+            f"{_safe_summary(row.get('value', ''), 160)} "
+            f"[{_safe_summary(row.get('status', ''), 12)}]{suffix}"
+        )
+        note = row.get("note")
+        if note:
+            print(f"      note: {_safe_summary(note, 200)}")
+
+
+def _print_unresolved_names(names: list[str]) -> None:
+    """Names the walk could not identify (design 10.7 item 4).
+
+    A chain that answers for one name while silently ignoring another reads as
+    a complete answer, so the names that resolved to nothing are printed
+    whether or not anything was found.  They are already screened store side.
+    """
+    if not names:
+        return
+    print(f"  no stored fact identifies: {', '.join(names)}")
+
+
+# ---------------------------------------------------------------------------
+# The learning ladder (VTMF M4 design 6.3): ten subcommands over the
+# calibration ledger and the promotion record.
+#
+# `ladder list`, `ladder show` and the chat surface `/ladder` are the ONLY
+# three places the confirmation code of a staged promotion is printed.  It is
+# not a capability: it is sixteen random characters stored in cleartext on the
+# row whose whole job is to prove the operator looked at the staged document
+# before making it live.  It reaches no spine payload, no activity_log row, no
+# run metric, no Presence payload and no model prompt (design S-1, 6.2, 7.11).
+# ---------------------------------------------------------------------------
+
+
+#: The confirmation code's alphabet, as `ladder_promotions.approval_token`'s
+#: own CHECK names it.  Shape-checked before `hmac.compare_digest`, which
+#: raises TypeError rather than returning False on a non-ASCII operand (R-4).
+APPROVAL_CODE_SHAPE = re.compile(r"\A[A-Za-z0-9_-]{16,43}\Z")
+
+
+class LadderWorkspaceUnavailable(RuntimeError):
+    """The project a promotion belongs to has no reachable workspace (S-8)."""
+
+
+#: Set once when a store turns out to have no ladder surface.
+_LADDER_SURFACE_WARNED = False
+
+
+def _report_ladder_pass(outcomes: list[dict[str, Any]]) -> None:
+    """Print only what an operator watching a worker log needs to see."""
+    for outcome in outcomes:
+        if not outcome.get("ok", True):
+            print(
+                "Learning ladder pass for project "
+                f"{outcome.get('project_id')} did not run: "
+                f"{outcome.get('reason')}.",
+                file=sys.stderr,
+            )
+            continue
+        sealed = int(outcome.get("sealed") or 0)
+        staged = int(outcome.get("staged") or 0)
+        if sealed or staged:
+            print(
+                f"Learning ladder: sealed {sealed} epoch(s), "
+                f"staged {staged} promotion(s)."
+            )
+
+
+def _record_ladder_pass_failure(memory: Memory, exc: BaseException) -> None:
+    """A failed background pass is receipted, then forgotten.
+
+    Both halves matter.  Receipted, because a refusal nobody hears about is
+    the defect the old `except Exception: pass` distiller had.  Forgotten,
+    because the worker's job is the task loop and a background pass must never
+    cost it that.
+    """
+    detail = f"{type(exc).__name__}: {_safe_summary(exc, 200)}"
+    print(
+        f"Learning ladder pass failed and was skipped ({detail}); "
+        "the task loop is unaffected.",
+        file=sys.stderr,
+    )
+    logger = getattr(memory, "log_activity", None)
+    if not callable(logger):
+        return
+    try:
+        logger("ladder", "worker", "failed", details={"error": detail})
+    except Exception:  # noqa: BLE001 - the receipt is best-effort
+        pass
+
+
+def _ladder_pass_projects(memory: Memory) -> list[int]:
+    """Every enabled project the ladder should consider this cycle.
+
+    Returns an empty list rather than guessing.  An earlier version fell back
+    to ``[1]`` when enumeration failed or found nothing enabled, which invents
+    a fact: if the store cannot say which projects exist, consolidating "the
+    one that probably does" is a guess, and if every project is disabled then
+    consolidating one of them is wrong outright.  A real store always carries
+    project 1 (``Default workspace``, relative path ``.``), so the guess only
+    ever fired in the abnormal cases where it was least defensible.
+
+    Doing nothing costs nothing: the pass runs again on the next idle cycle.
+    """
+    try:
+        projects = list(memory.list_projects())
+    except (AttributeError, RuntimeError, sqlite3.Error, TypeError, ValueError):
+        return []
+    return [
+        int(project["id"])
+        for project in projects
+        if project.get("id") is not None
+        and project.get("enabled", 1) not in (0, False)
+    ]
+
+
+def run_ladder_consolidation(
+    config: Config, memory: Memory, *, source: str = "worker"
+) -> list[dict[str, Any]]:
+    """One learning-ladder pass over every enabled project.
+
+    The correctness review found the ladder had no runtime driver: with the
+    ungoverned distiller removed, nothing sealed an epoch or staged a
+    candidate outside the CLI, so the whole mechanism was inert in the
+    product.  This is the driver's call site.
+
+    It never approves -- approval is a typed operator command and nothing
+    else -- and it is idempotent, so a second cycle over an unchanged store
+    does nothing.  Every outcome, including a refusal, is written to
+    `activity_log` under category `ladder`, and an exception is logged rather
+    than swallowed: a refusal nobody hears about is the defect the old
+    `except Exception: pass` distiller had.
+
+    **A store without the ladder surface is not an error.**  Not every object
+    a caller passes here is a full `Memory`: the worker tests drive `worker()`
+    with a stub that implements only the task-lease methods, and a store below
+    schema 49 has no ladder at all.  Asking such a store for `get_project`
+    raised `AttributeError` out of this function, through the worker's
+    `except Exception` recovery, and abandoned the whole cycle -- so the task
+    was never claimed and sixteen tests failed on a symptom (`IndexError` on
+    an empty list) with no visible connection to the ladder.  The lesson is
+    the general one: a BACKGROUND pass must never cost the foreground loop its
+    work, so this returns quietly instead.
+    """
+    outcomes: list[dict[str, Any]] = []
+    seen: set[tuple[int, str]] = set()
+    required = (
+        "list_projects", "get_project", "ladder_candidates",
+        "seal_calibration_epoch",
+    )
+    missing = [name for name in required if not hasattr(memory, name)]
+    if missing:
+        # Logged ONCE per process, not once per cycle: a store that will never
+        # grow the ladder surface would otherwise fill the worker log with a
+        # line that never changes.
+        global _LADDER_SURFACE_WARNED
+        if not _LADDER_SURFACE_WARNED:
+            _LADDER_SURFACE_WARNED = True
+            print(
+                "Learning ladder: this store has no ladder surface "
+                f"({', '.join(missing)} absent); consolidation is skipped.",
+                file=sys.stderr,
+            )
+        return outcomes
+    for project_id in _ladder_pass_projects(memory):
+        try:
+            workspace = _ladder_workspace(config, memory, project_id)
+        except LadderWorkspaceUnavailable:
+            outcomes.append({
+                "project_id": project_id, "ok": False,
+                "reason": "workspace_unavailable",
+            })
+            continue
+        # Once per (project, workspace) per cycle: two projects can resolve to
+        # one workspace, and sealing it twice would be wasted lock time.
+        key = (int(project_id), str(workspace))
+        if key in seen:
+            continue
+        seen.add(key)
+        try:
+            result = dict(learning_ladder.run_ladder_pass(
+                memory=memory, workspace=workspace, project_id=int(project_id)
+            ))
+            result["project_id"] = int(project_id)
+            result.setdefault("ok", True)
+        except Exception as exc:  # noqa: BLE001 - logged, never swallowed
+            result = {
+                "project_id": int(project_id), "ok": False,
+                "reason": f"{type(exc).__name__}",
+                "detail": _safe_summary(exc, 200),
+            }
+        outcomes.append(result)
+        _log_ladder_outcome(memory, result, source=source)
+    return outcomes
+
+
+def _log_ladder_outcome(
+    memory: Memory, result: dict[str, Any], *, source: str
+) -> None:
+    """Every pass leaves a receipt, including the ones that did nothing."""
+    logger = getattr(memory, "log_activity", None)
+    if not callable(logger):
+        return
+    status = "ok" if result.get("ok", True) else "failed"
+    try:
+        logger(
+            "ladder", source, status,
+            details={
+                "project_id": result.get("project_id"),
+                "sealed": int(result.get("sealed") or 0),
+                "staged": int(result.get("staged") or 0),
+                "refusals": int(result.get("refusals") or 0),
+                "errors": len(result.get("errors") or {}),
+                "reason": result.get("reason"),
+            },
+        )
+    except (AttributeError, RuntimeError, sqlite3.Error, TypeError, ValueError):
+        # The receipt is best-effort; losing it must not stop the worker.
+        print(
+            f"Learning ladder: receipt not recorded for project "
+            f"{result.get('project_id')}.",
+            file=sys.stderr,
+        )
+
+
+def _ladder_workspace(config: Config, memory: Memory, project_id: int) -> Path:
+    """Derive a promotion's workspace from its project, never from a flag.
+
+    Two steps, because ``resolve_project_workspace`` takes a canonical
+    relative path (``"."`` or ``"@projects/<slug>"``) and not an id -- the same
+    derivation this module already performs for a task.  Projects have distinct
+    workspaces and a learned document's name carries no project component, so
+    approving promotion #7 of project 3 from the default workspace would write
+    into the wrong ``.jarvis-skills`` (design 3.1, M-10).  A vanished project
+    directory raises rather than resolving somewhere else (S-8).
+    """
+    project = memory.get_project(int(project_id))
+    if not project:
+        raise LadderWorkspaceUnavailable("workspace_unavailable")
+    try:
+        return resolve_project_workspace(
+            config, str(project.get("relative_path") or "")
+        )
+    except (OSError, PermissionError, ValueError) as exc:
+        raise LadderWorkspaceUnavailable("workspace_unavailable") from exc
+
+
+def _ladder_code_of(row: Any) -> str:
+    """The confirmation code, shown only while the row is still staged.
+
+    A row that has been approved, rolled back, withdrawn or discarded has spent
+    or lost its code, and printing it afterwards would suggest it still does
+    something (design 7.11: none of the three surfaces prints it for a
+    non-staged row).
+    """
+    if str(_row_get(row, "stage") or "") != "staged":
+        return ""
+    return str(_row_get(row, "approval_token") or "")
+
+
+def _row_get(row: Any, key: str) -> Any:
+    try:
+        return row[key]
+    except (IndexError, KeyError, TypeError):
+        return None
+
+
+def _ladder_row_line(row: Any) -> str:
+    parts = [
+        f"#{int(_row_get(row, 'id') or 0)}",
+        f"{_row_get(row, 'family') or '?'}",
+        f"[{_row_get(row, 'stage') or '?'}]",
+        f"{_row_get(row, 'skill_name') or '?'}",
+    ]
+    digest = str(
+        _row_get(row, "approved_sha256") or _row_get(row, "staged_sha256") or ""
+    )
+    if digest:
+        parts.append(f"document {digest[:12]}")
+    reason = str(_row_get(row, "stage_reason") or "")
+    if reason:
+        parts.append(f"({reason})")
+    line = "  ".join(parts)
+    code = _ladder_code_of(row)
+    if code:
+        line += f"\n      confirmation code: {code}"
+    return line
+
+
+def _ladder_monotone_line(verdict: Any) -> str:
+    """Say what the operator can act on, not just "regressed".
+
+    ``newest_regressed`` means the last epoch looked bad; only
+    ``currently_regressed`` refuses staging and approval, and that needs
+    ``LADDER_REGRESSION_STREAK`` consecutive bad epochs.  An operator shown one
+    word for both states, who then cannot stage, reasonably concludes the
+    surface is lying to them.
+    """
+    streak = int(_row_get(verdict, "consecutive_regressed") or 0)
+    needed = int(getattr(learning_ladder, "LADDER_REGRESSION_STREAK", 2))
+    if _row_get(verdict, "currently_regressed"):
+        return (
+            f"regressed for {streak} consecutive epochs - staging and approval "
+            "refused"
+        )
+    if _row_get(verdict, "newest_regressed"):
+        return f"last epoch regressed ({streak} of {needed} needed to refuse)"
+    if not _row_get(verdict, "monotone"):
+        return "monotone now; an earlier epoch regressed (see violations)"
+    return "monotone"
+
+
+def _ladder_coverage(memory: Memory, family: str | None = None) -> dict[str, Any]:
+    """Run `verify_calibration_ledger` and reduce it to what a surface prints.
+
+    Red team R-5 / ruling 20: the method implemented all five checks correctly
+    and had NO caller anywhere in the product.  A re-cut epoch -- the tamper
+    2.4 calls "the important one" -- was detected by nobody, and
+    `ladder status` went on printing `monotone=True coverage_intact=True` over
+    a ledger whose keyed digest no longer matched its rows.
+
+    `coverage_intact` here is false on ANY problem, not only a gap: the
+    monotonicity verdict's own flag reads only the gap check, so a
+    `coverage_digest_mismatch` left it true.
+    """
+    try:
+        report = dict(memory.verify_calibration_ledger(family))
+    except (AttributeError, RuntimeError, sqlite3.Error, TypeError, ValueError):
+        return {
+            "checked": False, "rows": 0, "re_derivable": 0,
+            "coverage_intact": True, "problems": [], "coverage_gaps": [],
+        }
+    problems = [dict(item) for item in (report.get("problems") or [])]
+    gaps = [dict(item) for item in (report.get("coverage_gaps") or [])]
+    rows = int(report.get("rows") or 0)
+    # A row is re-derivable when nothing named it in either list.
+    unhealthy = {
+        (str(item.get("family")), int(item.get("epoch") or 0))
+        for item in problems + gaps
+        if item.get("epoch") is not None
+    }
+    return {
+        "checked": True,
+        "rows": rows,
+        "re_derivable": max(0, rows - len(unhealthy)),
+        "coverage_intact": bool(
+            report.get("coverage_intact", True) and not problems and not gaps
+        ),
+        "chain_ok": bool(report.get("chain_ok", True)),
+        "sequence_ok": bool(report.get("sequence_ok", True)),
+        "lineage_ok": bool(report.get("lineage_ok", True)),
+        "problems": problems,
+        "coverage_gaps": gaps,
+    }
+
+
+def _print_ladder_coverage(coverage: dict[str, Any], indent: str = "  ") -> None:
+    """The 6.3 line, printed wherever an operator looks after a warning."""
+    if not coverage.get("checked"):
+        return
+    rows = int(coverage.get("rows") or 0)
+    print(
+        f"{indent}coverage: {int(coverage.get('re_derivable') or 0)} of {rows} "
+        "epochs re-derivable"
+    )
+    for problem in (coverage.get("problems") or [])[:5]:
+        print(
+            f"{indent}  PROBLEM {problem.get('kind')}: "
+            f"{problem.get('family')} epoch {problem.get('epoch')}"
+        )
+    for gap in (coverage.get("coverage_gaps") or [])[:5]:
+        print(
+            f"{indent}  gap: {gap.get('family')} epoch {gap.get('epoch')} "
+            f"({gap.get('missing')} covered row(s) gone)"
+        )
+
+
+def _ladder_status_payload(
+    config: Config, memory: Memory, project_id: int | None
+) -> dict[str, Any]:
+    coverage = _ladder_coverage(memory)
+    rows = [dict(row) for row in memory.ladder_promotions(project_id=project_id)]
+    legacy = [row for row in rows if str(row.get("stage")) == "unapproved_legacy"]
+    unverified: list[dict[str, Any]] = []
+    workspace_error: str | None = None
+    for candidate in sorted({int(row.get("project_id") or 0) for row in rows}):
+        if not candidate:
+            continue
+        try:
+            workspace = _ladder_workspace(config, memory, candidate)
+        except LadderWorkspaceUnavailable:
+            workspace_error = "workspace_unavailable"
+            continue
+        unverified.extend(
+            memory.ladder_unverified_promotions(
+                workspace=workspace, project_id=candidate
+            )
+        )
+    per_family: list[dict[str, Any]] = []
+    for family in sorted(learning_ladder.LADDER_FAMILIES):
+        gate = memory.calibration_gate(
+            family, **learning_ladder.LADDER_GATE_THRESHOLDS
+        )
+        verdict = memory.calibration_ledger_monotonicity(family)
+        epochs = memory.calibration_ledger(family=family)
+        newest = dict(epochs[-1]) if epochs else {}
+        stage = next(
+            (
+                str(row.get("stage"))
+                for row in reversed(rows)
+                if str(row.get("family")) == family
+                and str(row.get("stage"))
+                in {"staged", "approved", "unapproved_legacy"}
+            ),
+            "none",
+        )
+        per_family.append({
+            "family": family,
+            "gate_allowed": bool(gate.get("allowed")),
+            "attempts": gate.get("attempts"),
+            "brier": gate.get("brier"),
+            "calibration_error": gate.get("calibration_error"),
+            "epochs": len(epochs),
+            "monotone": bool(verdict.get("monotone")),
+            "newest_regressed": bool(verdict.get("newest_regressed")),
+            "currently_regressed": bool(verdict.get("currently_regressed")),
+            "consecutive_regressed": int(verdict.get("consecutive_regressed") or 0),
+            "violations": list(verdict.get("violations") or []),
+            # R-5: the verdict's own flag reads only the gap check, so a
+            # re-cut epoch left it true.  A ledger with ANY problem is
+            # not intact, and the two surfaces must agree about that.
+            "coverage_intact": bool(
+                verdict.get("coverage_intact", True)
+                and coverage.get("coverage_intact", True)
+            ),
+            "lift_pp": verdict.get("lift_pp"),
+            "applied_n": verdict.get("applied_n"),
+            "unapplied_n": verdict.get("unapplied_n"),
+            "refused_stagings": newest.get("refused_stagings"),
+            "refused_approvals": newest.get("refused_approvals"),
+            "withdrawals": newest.get("withdrawals"),
+            "screened_components": newest.get("screened_components"),
+            "unverified_at_seal": newest.get("unverified_at_seal"),
+            "artefact_stage": stage,
+        })
+    return {
+        "project_id": project_id,
+        "coverage": coverage,
+        "families": per_family,
+        "unverified_promotions": len(unverified),
+        "unverified": unverified,
+        "legacy_documents": len(legacy),
+        "workspace_error": workspace_error,
+    }
+
+
+def _print_ladder_status(payload: dict[str, Any]) -> None:
+    for family in payload.get("families") or []:
+        gate = "open" if family["gate_allowed"] else "closed"
+        brier = family.get("brier")
+        error = family.get("calibration_error")
+        print(
+            f"{family['family']}: gate {gate} (attempts {family.get('attempts')}, "
+            f"brier {'n/a' if brier is None else format(float(brier), '.3f')}, "
+            "calibration error "
+            f"{'n/a' if error is None else format(float(error), '.3f')})"
+        )
+        print(
+            f"  sealed epochs: {family['epochs']}; {_ladder_monotone_line(family)}"
+        )
+        for violation in (family.get("violations") or [])[:3]:
+            print(
+                f"    epoch {violation.get('epoch')} failed clause "
+                f"{violation.get('clause')}"
+            )
+        if not family.get("coverage_intact", True):
+            print("  coverage: NOT re-derivable for every epoch (run ladder verify)")
+        lift = family.get("lift_pp")
+        if lift is not None:
+            print(
+                f"  applied vs unapplied: {float(lift):+.1f} pp over "
+                f"{family.get('applied_n')} applied / "
+                f"{family.get('unapplied_n')} unapplied outcomes "
+                "(observational, not randomized)"
+            )
+        if family.get("unverified_at_seal") is not None:
+            print(
+                f"  newest epoch: {family.get('refused_stagings')} refused "
+                f"stagings, {family.get('refused_approvals')} refused approvals, "
+                f"{family.get('withdrawals')} withdrawals, "
+                f"{family.get('screened_components')} screened components; "
+                f"unverified at seal {family.get('unverified_at_seal')}"
+            )
+        print(f"  artefact: {family['artefact_stage']}")
+    _print_ladder_coverage(dict(payload.get("coverage") or {}))
+    print(f"Unverified promotions: {int(payload.get('unverified_promotions') or 0)}")
+    legacy = int(payload.get("legacy_documents") or 0)
+    if legacy:
+        # Design ruling 2 / S-4: their own bucket, in their own words.  These
+        # are live documents no operator ever approved -- the pre-M4 status quo
+        # made visible, not a fault, and not unverified promotions.
+        print(f"{legacy} legacy skills live without approval")
+        print(
+            "  approve or roll back each one; see "
+            "ladder list --stage unapproved_legacy"
+        )
+    if payload.get("workspace_error"):
+        print(
+            "  at least one project workspace is unavailable; its documents "
+            "were not checked"
+        )
+
+
+def _ladder_refusal(
+    result: dict[str, Any], *, json_output: bool, verb: str, promotion_id: int
+) -> int:
+    reason = str(result.get("reason") or result.get("refusal") or "refused")
+    if json_output:
+        print(json.dumps(
+            {"ok": False, "promotion_id": promotion_id, "refusal": reason},
+            ensure_ascii=False, indent=2, default=str,
+        ))
+    else:
+        print(skill_promotion_receipt(
+            reason,
+            promotion_id=promotion_id,
+            verb=verb,
+            family=result.get("family"),
+            newest_id=result.get("newest_id"),
+        ))
+    return 1
+
+
+def _print_ladder_pass(
+    outcomes: list[dict[str, Any]], *, json_output: bool
+) -> int:
+    """Report a consolidation pass: what it sealed, staged and refused."""
+    if json_output:
+        print(json.dumps(outcomes, ensure_ascii=False, indent=2, default=str))
+        return 0 if all(item.get("ok", True) for item in outcomes) else 1
+    if not outcomes:
+        print("No enabled project has a reachable workspace; nothing ran.")
+        return 1
+    failed = False
+    for outcome in outcomes:
+        project = outcome.get("project_id")
+        if not outcome.get("ok", True):
+            failed = True
+            print(f"project {project}: pass did not run ({outcome.get('reason')})")
+            continue
+        sealed = int(outcome.get("sealed") or 0)
+        staged = int(outcome.get("staged") or 0)
+        refusals = int(outcome.get("refusals") or 0)
+        print(
+            f"project {project}: sealed {sealed} epoch(s), "
+            f"staged {staged} promotion(s), {refusals} refusal(s)"
+        )
+        for promotion_id in list(outcome.get("staged_promotions") or [])[:10]:
+            # The code is NOT printed here: `ladder list` and `ladder show`
+            # are the surfaces that show it, and a worker pass writes to a log.
+            print(
+                f"  staged #{promotion_id} -- see ladder list for its "
+                "confirmation code"
+            )
+        for family, reason in sorted(
+            (outcome.get("refusals_by_family") or {}).items()
+        )[:10]:
+            print(f"  {family}: {reason}")
+        for family, detail in sorted((outcome.get("errors") or {}).items())[:10]:
+            failed = True
+            print(f"  {family}: ERROR {detail}")
+    return 1 if failed else 0
+
+
+def _run_ladder_stage(
+    config: Config, memory: Memory, args: argparse.Namespace
+) -> int:
+    """``ladder stage --family F [--project N] [--yes]``.
+
+    Stage ONE family by hand.  The consolidation worker's own pass
+    (`run_ladder_consolidation`, also reachable as `ladder run`) stages every
+    qualifying family each cycle; this is the single-family form.  It refuses
+    with a closed reason rather than raising, so an operator sees WHY a family
+    did not qualify instead of a traceback.
+    """
+    json_output = bool(getattr(args, "json", False))
+    family = str(getattr(args, "family", "") or "").strip()
+    project_id = int(getattr(args, "project", None) or 1)
+    if not bool(getattr(args, "yes", False)):
+        print("ladder stage writes a staged document; re-run with --yes.")
+        return 2
+    if family not in learning_ladder.LADDER_FAMILIES:
+        reason = (
+            "family_excluded"
+            if family in learning_ladder.LADDER_EXCLUDED_FAMILIES
+            else "family_unsupported"
+        )
+        if json_output:
+            print(json.dumps({"ok": False, "staged": False, "reason": reason}))
+        else:
+            print(f"{family or '(none)'} cannot be staged: {reason}; nothing changed.")
+        return 1
+    try:
+        workspace = _ladder_workspace(config, memory, project_id)
+    except LadderWorkspaceUnavailable:
+        if json_output:
+            print(json.dumps(
+                {"ok": False, "staged": False, "reason": "workspace_unavailable"}
+            ))
+        else:
+            print(
+                f"Project {project_id} has no reachable workspace; nothing changed."
+            )
+        return 1
+    result = dict(memory.stage_ladder_promotion(
+        family=family, project_id=project_id, workspace=workspace
+    ))
+    if not result.get("staged"):
+        reason = str(result.get("reason") or "refused")
+        if json_output:
+            print(json.dumps({"ok": False, "staged": False, "reason": reason}))
+        else:
+            print(f"Nothing staged for {family}: {reason}.")
+        return 1
+    promotion_id = int(result.get("promotion_id") or 0)
+    code = str(result.get("approval_token") or "")
+    if json_output:
+        print(json.dumps(result, ensure_ascii=False, indent=2, default=str))
+    else:
+        print(f"Staged skill promotion #{promotion_id} for {family}.")
+        print(f"  confirmation code: {code}")
+        print(
+            f"  approve with: Approve skill promotion #{promotion_id} {code}"
+        )
+        print("  the staged document is not visible to the model until approved")
+    return 0
+
+
+def _run_ladder_transition(
+    config: Config, memory: Memory, args: argparse.Namespace, command: str
+) -> int:
+    """``ladder approve|rollback|discard <id> --yes``.
+
+    Every one of them derives its workspace from the row's project, never from
+    a flag, and prints the design 6.1 receipt the governed verb prints, from
+    the same table.
+    """
+    json_output = bool(getattr(args, "json", False))
+    promotion_id = int(args.id)
+    if not bool(getattr(args, "yes", False)):
+        print(f"ladder {command} changes the live workspace; re-run with --yes.")
+        return 2
+    row = memory.ladder_promotion(promotion_id)
+    if row is None:
+        return _ladder_refusal(
+            {"reason": "missing"},
+            json_output=json_output,
+            verb=command,
+            promotion_id=promotion_id,
+        )
+    row = dict(row)
+    try:
+        workspace = _ladder_workspace(config, memory, int(row.get("project_id") or 0))
+    except LadderWorkspaceUnavailable:
+        return _ladder_refusal(
+            {"reason": "workspace_unavailable", "family": row.get("family")},
+            json_output=json_output,
+            verb=command,
+            promotion_id=promotion_id,
+        )
+    if command == "approve":
+        code = str(getattr(args, "token", "") or "")
+        if not code or APPROVAL_CODE_SHAPE.fullmatch(code) is None:
+            # Red team R-4 / ruling 19: `hmac.compare_digest` raises TypeError
+            # on a non-ASCII str, and `cli.main` does not catch TypeError, so a
+            # fullwidth, en-dashed, Cyrillic or zero-width --token gave the
+            # operator a raw traceback instead of a refusal.  The alphabet is
+            # the one the column's own CHECK names.
+            return _ladder_refusal(
+                {
+                    "reason": "token_malformed" if code else "token_mismatch",
+                    "family": row.get("family"),
+                },
+                json_output=json_output,
+                verb=command,
+                promotion_id=promotion_id,
+            )
+        result = dict(memory.apply_ladder_promotion(
+            promotion_id,
+            approval_token=code,
+            workspace=workspace,
+            actor="operator",
+            permission="operator:cli",
+            # Redacted at the CALLER: memory.py writes operator_prompt to
+            # `messages` verbatim and knows nothing of this grammar, and an
+            # unredacted turn would carry the code into a later prompt.
+            operator_prompt=redact_skill_promotion_command(
+                f"Approve skill promotion #{promotion_id} {code}"
+            ),
+        ))
+    elif command == "rollback":
+        result = dict(memory.rollback_ladder_promotion(
+            promotion_id,
+            workspace=workspace,
+            actor="operator",
+            permission="operator:cli",
+            operator_prompt=f"Roll back skill promotion #{promotion_id}",
+        ))
+    else:
+        result = dict(memory.discard_ladder_promotion(
+            promotion_id,
+            workspace=workspace,
+            actor="operator",
+            permission="operator:cli",
+        ))
+    if result.get("reason") or result.get("refusal"):
+        return _ladder_refusal(
+            result, json_output=json_output, verb=command, promotion_id=promotion_id
+        )
+    if json_output:
+        print(json.dumps(result, ensure_ascii=False, indent=2, default=str))
+        return 0
+    if command == "discard":
+        print(f"Discarded staged skill promotion #{promotion_id}; nothing was live.")
+        return 0
+    if command == "approve":
+        # R-7 / ruling 22: `retired_legacy` and `restored` are the names the
+        # store returns; the CLI and the governed verb read the same two.
+        if result.get("retired_legacy"):
+            outcome = "approved_over_legacy"
+        elif result.get("prior_sha256"):
+            outcome = "approved"
+        else:
+            outcome = "approved_first"
+    else:
+        outcome = "rolled_back" if result.get("restored") else "rolled_back_removed"
+    print(skill_promotion_receipt(
+        outcome,
+        promotion_id=promotion_id,
+        verb=command,
+        family=result.get("family") or row.get("family"),
+        digest=result.get("approved_sha256") or row.get("approved_sha256"),
+    ))
+    return 0
+
+
+def _run_ladder_verify(
+    config: Config, memory: Memory, args: argparse.Namespace
+) -> int:
+    """``ladder verify [--apply --yes --plan TOKEN] [--json]``.
+
+    The reconciler AND the one-time grandfather pass, on the exact discipline
+    ``graph rebuild`` and ``spine rebuild-claims`` use:
+
+      0  nothing to reconcile, or applied
+      1  a refused apply, including ``stale_plan``, with nothing changed
+      2  a dry run that WOULD change something, or misuse of the flags
+
+    The database is the record and the filesystem is reconciled to it, never
+    the other way round: a live document whose digest has drifted is withdrawn
+    rather than restored, so an operator's own edit is never overwritten.
+    """
+    json_output = bool(getattr(args, "json", False))
+    apply = bool(getattr(args, "apply", False))
+    yes = bool(getattr(args, "yes", False))
+    requested_token = str(getattr(args, "plan", None) or "").strip()
+    if yes and not apply:
+        print("--yes requires --apply; nothing changed.")
+        return 2
+    if requested_token and not (apply and yes):
+        print("--plan requires --apply --yes; nothing changed.")
+        return 2
+    if apply and yes and not requested_token:
+        # Red team R-11 / ruling 22: a deliberate departure from the
+        # `graph rebuild` and `spine rebuild-claims` shape, where --plan is
+        # optional.  `ladder verify` is the only reconciler whose apply path
+        # moves an operator's live learned skill out of the live root, so the
+        # plan the operator read is the plan that gets applied, always.
+        print(
+            "--apply --yes requires --plan TOKEN for ladder verify: it is the "
+            "one reconciler that can remove a live learned skill, so it "
+            "applies only the plan you read.\n"
+            "Run it without --apply first and pass the token it prints."
+        )
+        return 2
+    project_id = getattr(args, "project", None)
+    project_id = int(project_id) if project_id is not None else 1
+    try:
+        workspace = _ladder_workspace(config, memory, project_id)
+    except LadderWorkspaceUnavailable:
+        # S-8: a project whose directory is gone is reported and skipped, not
+        # silently resolved to some other workspace.
+        if json_output:
+            print(json.dumps({"ok": False, "refusal": "workspace_unavailable"}))
+        else:
+            print(
+                f"Project {project_id} has no reachable workspace "
+                "(workspace_unavailable); nothing changed."
+            )
+        return 1
+    plan = dict(memory.ladder_reconciliation_plan(workspace, project_id=project_id))
+    actions = list(plan.get("actions") or [])
+    # R-5: the reconciler is where an operator looks after a coverage
+    # warning, so the ledger's own integrity is reported here too.
+    plan["coverage"] = _ladder_coverage(memory)
+    fresh_token = str(plan.get("plan_token") or "")
+    if not apply:
+        if json_output:
+            print(json.dumps(plan, ensure_ascii=False, indent=2, default=str))
+        else:
+            _print_ladder_verify(plan)
+            if actions:
+                hint = f" --plan {fresh_token}" if fresh_token else ""
+                print(
+                    f"Re-run with --apply --yes{hint} to reconcile exactly this plan."
+                )
+        return 2 if actions else 0
+    if not actions:
+        if json_output:
+            print(json.dumps(
+                {"applied": False, "reason": "nothing to apply", **plan},
+                ensure_ascii=False, indent=2, default=str,
+            ))
+        else:
+            print("Nothing to apply: the ladder record matches the workspace.")
+        return 0
+    if not yes:
+        _print_ladder_verify(plan)
+        hint = f" --plan {fresh_token}" if fresh_token else ""
+        print(f"Re-run with --apply --yes{hint} to reconcile exactly this plan.")
+        return 2
+    applied = dict(memory.reconcile_ladder(
+        workspace,
+        project_id=project_id,
+        apply=True,
+        plan_token=requested_token or None,
+        actor="operator",
+        permission="operator:cli",
+    ))
+    refusal = str(applied.get("refusal") or applied.get("reason") or "")
+    if refusal:
+        if json_output:
+            print(json.dumps(
+                {"ok": False, "applied": False, "refusal": refusal,
+                 "requested_plan_token": requested_token or None,
+                 "plan_token": fresh_token or None},
+                ensure_ascii=False, indent=2, default=str,
+            ))
+        elif refusal == "stale_plan":
+            print(
+                "Ladder reconciliation refused: stale_plan; the store no longer "
+                "matches the plan you confirmed (current plan token: "
+                f"{fresh_token or 'unavailable'}); nothing changed."
+            )
+        else:
+            print(f"Ladder reconciliation refused: {refusal}; nothing changed.")
+        return 1
+    if json_output:
+        print(json.dumps(applied, ensure_ascii=False, indent=2, default=str))
+    else:
+        _print_ladder_verify(applied, heading="Ladder reconciliation (applied)")
+    return 0
+
+
+def _print_ladder_verify(
+    plan: dict[str, Any], heading: str = "Ladder reconciliation (dry run)"
+) -> None:
+    print(heading)
+    actions = list(plan.get("actions") or [])
+    if not actions:
+        print("  nothing to reconcile")
+        _print_ladder_coverage(dict(plan.get("coverage") or {}))
+        return
+    for action in actions[:20]:
+        line = (
+            f"  {action.get('action')}: {action.get('skill_name') or '?'} "
+            f"({action.get('reason') or 'no reason recorded'})"
+        )
+        # An action the store planned but did not perform comes back with
+        # `done: False` and a note saying why.  Printing it as though it had
+        # happened would tell an operator a live document moved when it is
+        # still sitting there -- the one thing this surface must never get
+        # wrong.
+        if "done" in action and not action.get("done"):
+            line += "  [not performed]"
+        note = str(action.get("note") or "")
+        if note:
+            line += f" -- {note}"
+        print(line)
+    if len(actions) > 20:
+        print(f"  ... and {len(actions) - 20} more")
+    if "changed" in plan:
+        changed = int(plan.get("changed") or 0)
+        print(
+            f"  {changed} of {len(actions)} action(s) performed"
+            if changed != len(actions)
+            else f"  {changed} action(s) performed"
+        )
+    _print_ladder_coverage(dict(plan.get("coverage") or {}))
+    token = str(plan.get("plan_token") or "")
+    if token:
+        print(f"  plan token: {token}")
+
+
+def _display_ladder(config: Config, memory: Memory, project_id: int) -> None:
+    """`/ladder` in chat: staged and live promotions, with their codes.
+
+    Rendered before any model call, like `/facts` and `/memory`, so the
+    confirmation code of a staged row never passes through a prompt or a reply
+    to reach the operator (design 6.2 item 4).
+    """
+    try:
+        rows = [
+            dict(row)
+            for row in memory.ladder_promotions(
+                project_id=project_id, include_token=True
+            )
+        ]
+    except (AttributeError, RuntimeError, sqlite3.Error, TypeError, ValueError):
+        print("This store has no learning ladder.")
+        return
+    live = [
+        row
+        for row in rows
+        if str(row.get("stage")) in {"staged", "approved", "unapproved_legacy"}
+    ]
+    if not live:
+        print("No skill promotions are staged or live for this project.")
+    for row in live:
+        print(_ladder_row_line(row))
+    legacy = sum(1 for row in rows if str(row.get("stage")) == "unapproved_legacy")
+    if legacy:
+        print(f"{legacy} legacy skills live without approval")
+    try:
+        report = memory.lesson_recall_report()
+    except (AttributeError, RuntimeError, sqlite3.Error, ValueError):
+        report = None
+    if isinstance(report, dict) and str(report.get("mode") or "idle") != "idle":
+        # The operator-visible answer to "why did my lesson go quiet"; never
+        # shown to the model (design 5.4).
+        line = f"Last lesson read: {report.get('mode')}"
+        if report.get("reason"):
+            line += f" ({report.get('reason')})"
+        shadowed = report.get("superseded_shadowed")
+        if shadowed:
+            line += f"; {shadowed} row(s) shadowed by a lifecycle change"
+        print(line)
+
+
+def _run_ladder(args: argparse.Namespace) -> int:
+    """Operator surfaces over the learning ladder (VTMF M4 design 6.3)."""
+    config = Config.load()
+    json_output = bool(getattr(args, "json", False))
+    command = str(getattr(args, "ladder_command", "") or "")
+    project_id = getattr(args, "project", None)
+    project_id = int(project_id) if project_id is not None else None
+    with Memory(config.data_dir / "jarvis.db") as memory:
+        if command == "status":
+            payload = _ladder_status_payload(config, memory, project_id)
+            if json_output:
+                print(json.dumps(payload, ensure_ascii=False, indent=2, default=str))
+            else:
+                _print_ladder_status(payload)
+            return 0
+        if command == "list":
+            stage = str(getattr(args, "stage", "") or "").strip() or None
+            rows = [
+                dict(row)
+                for row in memory.ladder_promotions(
+                    project_id=project_id,
+                    stages=[stage] if stage else None,
+                    include_token=True,
+                )
+            ]
+            if json_output:
+                # The code rides in --json too: this is one of the three
+                # surfaces that may show it, and an operator scripting an
+                # approval needs it.  It is still absent for a non-staged row.
+                print(json.dumps(
+                    [
+                        {**row, "approval_token": _ladder_code_of(row) or None}
+                        for row in rows
+                    ],
+                    ensure_ascii=False, indent=2, default=str,
+                ))
+            elif not rows:
+                print("No skill promotions are recorded.")
+            else:
+                for row in rows:
+                    print(_ladder_row_line(row))
+            return 0
+        if command == "show":
+            row = memory.ladder_promotion(int(args.id), include_token=True)
+            if row is None:
+                print(f"No skill promotion #{int(args.id)} exists.")
+                return 1
+            row = dict(row)
+            if json_output:
+                print(json.dumps(
+                    {**row, "approval_token": _ladder_code_of(row) or None},
+                    ensure_ascii=False, indent=2, default=str,
+                ))
+                return 0
+            print(_ladder_row_line(row))
+            print(
+                f"  project: {row.get('project_id')}   "
+                f"created: {row.get('created_at')}"
+            )
+            print(
+                f"  proof {str(row.get('proof_sha256') or '')[:12]} over "
+                f"{row.get('reuse_count')} verified reuses in "
+                f"{row.get('context_count')} distinct contexts"
+            )
+            # Design 3.3 / M-1, in the operator's own words: this number is a
+            # usage threshold, not a significance test, and an application row
+            # is filed when the lesson MATCHED, not when the model used it.
+            print(
+                "  (a usage threshold, not a significance test: an application "
+                "row is filed when the lesson matched the turn, not when the "
+                "model used it)"
+            )
+            if row.get("approved_at"):
+                print(f"  approved: {row.get('approved_at')}")
+            if row.get("prior_sha256"):
+                print(f"  previous version kept: {str(row['prior_sha256'])[:12]}")
+            elif str(row.get("stage")) in {"approved", "unapproved_legacy"}:
+                print("  no previous version existed; a rollback removes the document")
+            return 0
+        if command == "ledger":
+            family = str(getattr(args, "family", "") or "").strip() or None
+            rows = [dict(row) for row in memory.calibration_ledger(family=family)]
+            coverage = _ladder_coverage(memory, family)
+            if json_output:
+                print(json.dumps(rows, ensure_ascii=False, indent=2, default=str))
+            elif not rows:
+                print("No calibration epochs are sealed.")
+            else:
+                for row in rows:
+                    print(
+                        f"{row.get('family')} epoch {row.get('epoch')}: "
+                        f"n={row.get('n')} successes={row.get('successes')} "
+                        f"brier={float(row.get('brier') or 0.0):.3f} "
+                        "calibration_error="
+                        f"{float(row.get('calibration_error') or 0.0):.3f} "
+                        f"unverified_at_seal={row.get('unverified_at_seal')}"
+                    )
+                _print_ladder_coverage(coverage)
+            return 0
+        if command == "seal":
+            family = str(getattr(args, "family", "") or "").strip()
+            everything = bool(getattr(args, "all", False))
+            if bool(family) == everything:
+                print("Give exactly one of --family F or --all; nothing changed.")
+                return 2
+            if everything:
+                # HIGH-2: --all is the same pass the worker runs, so the
+                # two can never drift into sealing by different rules.
+                outcomes = run_ladder_consolidation(
+                    config, memory, source="operator"
+                )
+                return _print_ladder_pass(outcomes, json_output=json_output)
+            families = [family]
+            sealed: list[dict[str, Any]] = []
+            for name in families:
+                sealed.extend(
+                    dict(row)
+                    for row in memory.seal_calibration_epoch(
+                        name, actor="operator", permission="operator:cli"
+                    )
+                )
+            if json_output:
+                print(json.dumps(sealed, ensure_ascii=False, indent=2, default=str))
+            elif not sealed:
+                print("No whole epoch was ready to seal; nothing changed.")
+            else:
+                for row in sealed:
+                    print(
+                        f"Sealed {row.get('family')} epoch {row.get('epoch')} "
+                        f"(n={row.get('n')})."
+                    )
+                if everything:
+                    # L-5: many short write locks, not one long one.  Say so,
+                    # because an operator watching a bulk catch-up should know
+                    # the turn path is not blocked for its whole duration.
+                    print(
+                        f"{len(sealed)} epochs sealed, each in its own brief "
+                        "write transaction."
+                    )
+            return 0
+        if command == "run":
+            # The same pass the consolidation worker runs each cycle.
+            return _print_ladder_pass(
+                run_ladder_consolidation(config, memory, source="operator"),
+                json_output=json_output,
+            )
+        if command == "stage":
+            return _run_ladder_stage(config, memory, args)
+        if command in {"approve", "rollback", "discard"}:
+            return _run_ladder_transition(config, memory, args, command)
+        if command == "verify":
+            return _run_ladder_verify(config, memory, args)
+    return 2
+
+
+def _run_graph(args: argparse.Namespace) -> int:
+    """Operator surfaces over the temporal graph projection (VTMF M3).
+
+    ``status`` and ``verify`` print ids and counts only; ``paths`` shows
+    values because it is the same screened read the agent performs.
+    """
+    config = Config.load()
+    json_output = bool(getattr(args, "json", False))
+    with Memory(config.data_dir / "jarvis.db") as memory:
+        if args.graph_command == "status":
+            # Counts only: verify_graph compares every claim to its edge and
+            # costs seconds on a large store, which is not what "status" is.
+            counts = memory_graph.graph_counts(memory.db)
+            payload = {
+                "ready": bool(counts.get("ready", True)),
+                "edges": int(counts.get("edges", 0) or 0),
+                "entities": int(counts.get("entities", 0) or 0),
+                "excluded": counts.get("excluded"),
+                "last_projection_event_id": _last_graph_projection_event(memory),
+            }
+            if json_output:
+                print(json.dumps(payload, ensure_ascii=False, indent=2, default=str))
+            elif not payload["ready"]:
+                print("This store has no graph projection.")
+            else:
+                print(
+                    f"Memory graph: {payload['edges']} edges, "
+                    f"{payload['entities']} entities; excluded "
+                    f"{_graph_excluded_line(payload['excluded'])}."
+                )
+                event_id = payload["last_projection_event_id"]
+                if isinstance(event_id, int) and not isinstance(event_id, bool):
+                    print(f"  last projection receipt: event #{event_id}")
+                print("  run graph verify to check it against the claims")
+            return 0
+        if args.graph_command == "verify":
+            report = memory.verify_graph()
+            if json_output:
+                print(json.dumps(report, ensure_ascii=False, indent=2, default=str))
+            elif not report.get("ready", True):
+                print("This store has no graph projection; nothing to verify.")
+            else:
+                state = "OK" if report.get("ok") else "FAILED"
+                print(
+                    f"Memory graph {state}: {int(report.get('edges', 0) or 0)} edges, "
+                    f"{int(report.get('entities', 0) or 0)} entities; excluded "
+                    f"{_graph_excluded_line(report.get('excluded'))}."
+                )
+                _graph_problem_lines(report.get("problems"))
+            return 0 if report.get("ok") else 1
+        if args.graph_command == "rebuild":
+            return _run_graph_rebuild(memory, args)
+        subject = " ".join(args.subject or []).strip()
+        requested_hops = int(getattr(args, "hops", memory_graph.MAX_HOPS))
+        if not 1 <= requested_hops <= memory_graph.MAX_HOPS:
+            # Silently widening --hops 0 to the full walk would print more
+            # than the operator asked to see.
+            print(
+                f"--hops must be between 1 and {memory_graph.MAX_HOPS}; "
+                "nothing was read."
+            )
+            return 2
+        hops = requested_hops
+        if contains_secret(subject):
+            raise ValueError("Potential secret detected; no subject was read")
+        # The subject is a start, not a question: passed as the query its own
+        # words would act as an asked-predicate filter and no chain would
+        # terminate on them.  An empty query is the open read, which is what
+        # "the chains the agent would see for that subject" means.
+        result = memory.graph_chains(
+            "",
+            project_id=int(args.project),
+            subjects=[subject] if subject else [],
+            seed_claims=[],
+            temporal=bool(getattr(args, "temporal", False)),
+        )
+        rows = [row for row in (result.get("rows") or []) if isinstance(row, dict)]
+        overflow = [
+            row for row in (result.get("overflow") or []) if isinstance(row, dict)
+        ]
+        report = result.get("report") or {}
+        if json_output:
+            print(json.dumps(result, ensure_ascii=False, indent=2, default=str))
+            return 0
+        mode = _safe_summary(report.get("mode"), 40)
+        unresolved = [
+            _safe_summary(name, 60)
+            for name in (report.get("unresolved") or [])
+            if isinstance(name, str) and name.strip()
+        ]
+        if not rows:
+            print(f"No chain answers \"{_safe_summary(subject, 60)}\" ({mode}).")
+            _print_unresolved_names(unresolved)
+            return 0
+        print(
+            f"Chains from \"{_safe_summary(subject, 60)}\" in project "
+            f"{int(args.project)} ({mode}):"
+        )
+        _print_graph_chain_rows(rows, hops)
+        for entry in overflow:
+            print(
+                f"  overflow at hop {entry.get('hop')}: "
+                f"{_safe_summary(entry.get('subject', ''), 60)} - "
+                f"{_safe_summary(entry.get('note'), 200)}"
+            )
+        _print_unresolved_names(unresolved)
+        return 0
+
+
+def _run_spine(args: argparse.Namespace) -> int:
+    """Operator surfaces over the memory spine; prints keys and counts only."""
+    config = Config.load()
+    json_output = bool(getattr(args, "json", False))
+    with Memory(config.data_dir / "jarvis.db") as memory:
+        if args.spine_command == "verify":
+            report = memory.verify_spine()
+            if json_output:
+                print(json.dumps(report, ensure_ascii=False, indent=2, default=str))
+            else:
+                state = "OK" if report.get("ok") else "FAILED"
+                claim_backing = report.get(
+                    "claim_backing_rows", report.get("claim_rows", 0)
+                )
+                print(
+                    f"Memory spine {state}: {int(report.get('events', 0))} events, "
+                    f"{int(report.get('redacted', 0))} redacted; "
+                    f"{int(report.get('memory_rows', 0))} memories, "
+                    f"{int(claim_backing or 0)} claim backing rows, "
+                    f"{int(report.get('memory_events', 0))} memory events."
+                )
+                if "graph_edges" in report:
+                    # Informational only: a drifted projection is a rebuild
+                    # matter, so it never changes this exit code (design 4.6).
+                    print(
+                        f"Memory graph: {int(report.get('graph_edges', 0) or 0)} "
+                        f"edges, {int(report.get('graph_entities', 0) or 0)} "
+                        "entities; projection "
+                        f"{'OK' if report.get('graph_ok') else 'DIVERGENT'}."
+                    )
+                for text in list(report.get("problems") or [])[:50]:
+                    print(f"  problem: {_safe_summary(text, 160)}")
+                # R-5 / ruling 20: the calibration ledger's integrity is
+                # reported beside the chain's.  Informational here -- a
+                # ledger problem is a ladder matter, not a chain fault --
+                # so it never changes this exit code.
+                _print_ladder_coverage(_ladder_coverage(memory))
+            return 0 if report.get("ok") else 1
+        if args.spine_command == "rebuild-milestones":
+            # E-2's surface.  `rebuild_equivalence_derived` can legitimately be
+            # None -- a partial or empty derivation -- and None must never
+            # render as a tick, a zero or a dash: an operator reading a dash
+            # concludes "nothing to report" when the truth is "the comparison
+            # could not be made".
+            report = memory.rebuild_milestones()
+            if json_output:
+                print(json.dumps(report, ensure_ascii=False, indent=2, default=str))
+                return 0 if report.get("ok") else 1
+            equivalence = report.get("rebuild_equivalence_derived")
+            if equivalence is None:
+                reason = str(report.get("equivalence_reason") or "not derivable")
+                print(f"Milestone rebuild: NOT COMPARED ({reason}).")
+            else:
+                state = "equivalent" if report.get("ok") else "DIVERGENT"
+                print(
+                    f"Milestone rebuild: {state}; derived equivalence "
+                    f"{equivalence}."
+                )
+            if not report.get("chain_verified", True):
+                print(
+                    "  spine chain did not verify - run 'jarvis spine verify', "
+                    "this result is downstream of it"
+                )
+            for milestone_id in list(report.get("equivalence_mismatched") or [])[:50]:
+                print(f"  milestone {milestone_id}: derived block diverged")
+            return 0 if report.get("ok") else 1
+        if args.spine_command == "rebuild-claims":
+            return _run_spine_rebuild_claims(memory, args)
+        if args.spine_command == "rebuild-memories":
+            report = memory.rebuild_memory_projection()
+            if json_output:
+                print(json.dumps(report, ensure_ascii=False, indent=2, default=str))
+            else:
+                state = "equivalent" if report.get("ok") else "DIVERGENT"
+                print(
+                    f"Memory projection rebuild (dry run): {state}; live rows "
+                    f"{int(report.get('rows_live', 0))}, rebuilt rows "
+                    f"{int(report.get('rows_rebuilt', 0))}."
+                )
+                for item in list(report.get("divergences") or [])[:50]:
+                    print(
+                        f"  memory {item.get('memory_id')}: {item.get('kind')}: "
+                        f"{_safe_summary(item.get('detail'), 160)}"
+                    )
+            return 0 if report.get("ok") else 1
+        items = memory.spine_tail(limit=int(args.limit))
+        if json_output:
+            print(json.dumps(items, ensure_ascii=False, indent=2))
+        else:
+            if not items:
+                print("Memory spine is empty.")
+            for item in items:
+                flags = " redacted" if item.get("redacted") else ""
+                print(
+                    f"  #{item['id']} {item['created_at'][:19]} {item['kind']} "
+                    f"[{item['actor']}/{item['outcome']}] {item['scope']} "
+                    f"{item.get('subject_kind') or '-'}:{item.get('subject_id') or '-'} "
+                    f"keys={','.join(item.get('payload_keys') or [])}{flags}"
+                )
+        return 0
+
+
+def _run_facts(args: argparse.Namespace) -> int:
+    config = Config.load()
+    with Memory(config.data_dir / "jarvis.db") as memory:
+        _display_project_facts(
+            memory, int(args.project), " ".join(args.subject or [])
+        )
+    return 0
+
+
 def _run_preference(args: argparse.Namespace) -> int:
     config = Config.load()
     with Memory(config.data_dir / "jarvis.db") as memory:
@@ -3021,6 +5503,8 @@ def _run_feedback(args: argparse.Namespace) -> int:
             kind="feedback",
             source="explicit user feedback",
             origin="explicit_user_feedback",
+            actor="operator",
+            permission="operator:cli",
         )
         feedback_key = "feedback_" + hashlib.sha256(
             content.encode("utf-8")
@@ -3251,7 +5735,7 @@ def _run_initiative(args: argparse.Namespace) -> int:
 
 def _run_brief(args: argparse.Namespace) -> int:
     config = Config.load()
-    since = datetime.now(timezone.utc) - timedelta(hours=args.since)
+    since = datetime.now(UTC) - timedelta(hours=args.since)
     with Memory(config.data_dir / "jarvis.db") as memory:
         events = memory.list_initiative_events(since=since)
     if not events:
@@ -3514,6 +5998,44 @@ def _parser() -> argparse.ArgumentParser:
         description="Bounded multi-provider autonomous agent",
     )
     sub = parser.add_subparsers(dest="command")
+    compaction = sub.add_parser(
+        "compaction", help="inspect and run transcript compaction"
+    )
+    compaction_sub = compaction.add_subparsers(
+        dest="compaction_command", required=True
+    )
+    compaction_status = compaction_sub.add_parser(
+        "status", help="stored milestone and span counts"
+    )
+    compaction_status.add_argument("--json", action="store_true")
+    compaction_milestones = compaction_sub.add_parser(
+        "milestones", help="list one conversation's milestones"
+    )
+    compaction_milestones.add_argument("--conversation", type=int, required=True)
+    compaction_milestones.add_argument("--limit", type=int, default=50)
+    compaction_milestones.add_argument("--json", action="store_true")
+    compaction_show = compaction_sub.add_parser(
+        "show", help="one milestone's metadata and summary"
+    )
+    compaction_show.add_argument("--handle", required=True)
+    compaction_show.add_argument(
+        "--rehydrate", action="store_true",
+        help="also print the ORIGINAL message text (terminal only, confirmed)",
+    )
+    compaction_show.add_argument("--json", action="store_true")
+    compaction_run = compaction_sub.add_parser(
+        "run", help="plan or apply one compaction pass"
+    )
+    compaction_run.add_argument("--conversation", type=int, required=True)
+    compaction_run.add_argument("--apply", action="store_true")
+    compaction_run.add_argument("--yes", action="store_true")
+    compaction_run.add_argument("--plan")
+    compaction_run.add_argument("--json", action="store_true")
+    compaction_verify = compaction_sub.add_parser(
+        "verify", help="check every milestone against its span and receipt"
+    )
+    compaction_verify.add_argument("--json", action="store_true")
+
     doctor_parser = sub.add_parser(
         "doctor", help="check model providers and local readiness"
     )
@@ -3562,14 +6084,33 @@ def _parser() -> argparse.ArgumentParser:
         help="show measured prediction and outcome history",
     )
     memory_quality = sub.add_parser(
-        "memory", help="inspect neural recall and automatic memory improvement"
+        "memory",
+        help=(
+            "inspect neural recall and automatic memory improvement; list "
+            "ordinary memories by id, or erase one"
+        ),
     )
     memory_quality.add_argument(
         "memory_command",
         nargs="?",
-        choices=("status",),
+        choices=("status", "list", "erase"),
         default="status",
         help=argparse.SUPPRESS,
+    )
+    memory_quality.add_argument(
+        "memory_id",
+        nargs="?",
+        type=int,
+        default=None,
+        help="with erase: the memory id shown by memory list or /memory",
+    )
+    memory_quality.add_argument(
+        "--yes",
+        action="store_true",
+        help=(
+            "confirm memory erase; without it the kind and created date are "
+            "printed and the exit status is 2"
+        ),
     )
     memory_quality.add_argument("--json", action="store_true")
     memory_quality.add_argument("--limit", type=int, default=20)
@@ -3811,6 +6352,255 @@ def _parser() -> argparse.ArgumentParser:
     skill_show.add_argument("name")
     skill_forget = skill_sub.add_parser("forget")
     skill_forget.add_argument("name")
+    spine = sub.add_parser(
+        "spine",
+        help=(
+            "inspect the append-only memory spine (verify, rebuild-claims, "
+            "rebuild-memories, tail)"
+        ),
+    )
+    spine_sub = spine.add_subparsers(dest="spine_command", required=True)
+    spine_verify = spine_sub.add_parser(
+        "verify", help="recompute the keyed event chain and claim lineage"
+    )
+    spine_verify.add_argument("--json", action="store_true")
+    spine_rebuild = spine_sub.add_parser(
+        "rebuild-claims",
+        help=(
+            "replay the spine into a shadow claim projection and report divergences; "
+            "--apply --yes reconciles the live rows in place"
+        ),
+    )
+    spine_rebuild.add_argument(
+        "--apply",
+        action="store_true",
+        help="reconcile the live claim projection from the spine (requires --yes)",
+    )
+    spine_rebuild.add_argument(
+        "--yes",
+        action="store_true",
+        help=(
+            "confirm --apply; without it the plan and its plan token are printed "
+            "and the exit status is 2"
+        ),
+    )
+    spine_rebuild.add_argument(
+        "--plan",
+        metavar="TOKEN",
+        default=None,
+        help=(
+            "with --apply --yes: apply only the plan whose token was printed by "
+            "--apply without --yes; a store that changed since then is refused "
+            "with stale_plan and nothing is changed"
+        ),
+    )
+    spine_rebuild.add_argument("--json", action="store_true")
+    spine_rebuild_memories = spine_sub.add_parser(
+        "rebuild-memories",
+        help=(
+            "replay memory and lesson events into a shadow projection and report "
+            "divergences (dry run; digests and ids, never content)"
+        ),
+    )
+    spine_rebuild_memories.add_argument("--json", action="store_true")
+    spine_rebuild_milestones = spine_sub.add_parser(
+        "rebuild-milestones",
+        help="re-derive every milestone's derived block from the spine",
+    )
+    spine_rebuild_milestones.add_argument("--json", action="store_true")
+    spine_tail = spine_sub.add_parser(
+        "tail", help="recent spine events (payload keys only, never values)"
+    )
+    spine_tail.add_argument("--limit", type=int, default=20)
+    spine_tail.add_argument("--json", action="store_true")
+    ladder = sub.add_parser(
+        "ladder",
+        help=(
+            "the learning ladder: calibration epochs and governed skill "
+            "promotions (status, list, show, stage, approve, rollback, "
+            "discard, seal, verify, ledger)"
+        ),
+    )
+    ladder_sub = ladder.add_subparsers(dest="ladder_command", required=True)
+    ladder_status = ladder_sub.add_parser(
+        "status",
+        help=(
+            "per family: the gate, the sealed epochs and their monotonicity, "
+            "the artefact stage, unverified promotions, and legacy documents"
+        ),
+    )
+    ladder_status.add_argument("--project", type=int)
+    ladder_status.add_argument("--json", action="store_true")
+    ladder_list = ladder_sub.add_parser(
+        "list",
+        help=(
+            "every recorded skill promotion; prints the confirmation code of "
+            "a staged one (one of only three surfaces that ever do)"
+        ),
+    )
+    ladder_list.add_argument("--project", type=int)
+    ladder_list.add_argument(
+        "--stage",
+        choices=[
+            "staged", "approved", "unapproved_legacy", "rolled_back",
+            "withdrawn", "discarded",
+        ],
+    )
+    ladder_list.add_argument("--json", action="store_true")
+    ladder_show = ladder_sub.add_parser(
+        "show", help="one promotion, its proof counts, and its confirmation code"
+    )
+    ladder_show.add_argument("id", type=int)
+    ladder_show.add_argument("--json", action="store_true")
+    ladder_stage = ladder_sub.add_parser(
+        "stage",
+        help=(
+            "derive an outcome proof and stage a skill document the model "
+            "cannot read; refuses with a reason rather than raising"
+        ),
+    )
+    ladder_stage.add_argument("--family", required=True)
+    ladder_stage.add_argument("--project", type=int, default=1)
+    ladder_stage.add_argument("--yes", action="store_true")
+    ladder_stage.add_argument("--json", action="store_true")
+    ladder_approve = ladder_sub.add_parser(
+        "approve",
+        help=(
+            "make a staged document live; requires the confirmation code from "
+            "ladder list or ladder show"
+        ),
+    )
+    ladder_approve.add_argument("id", type=int)
+    ladder_approve.add_argument("--token", required=True)
+    ladder_approve.add_argument("--yes", action="store_true")
+    ladder_approve.add_argument("--json", action="store_true")
+    ladder_rollback = ladder_sub.add_parser(
+        "rollback",
+        help=(
+            "restore the exact bytes a promotion replaced, or remove the "
+            "document when nothing was live before; needs no code"
+        ),
+    )
+    ladder_rollback.add_argument("id", type=int)
+    ladder_rollback.add_argument("--yes", action="store_true")
+    ladder_rollback.add_argument("--json", action="store_true")
+    ladder_discard = ladder_sub.add_parser(
+        "discard", help="throw away a staged document that was never approved"
+    )
+    ladder_discard.add_argument("id", type=int)
+    ladder_discard.add_argument("--yes", action="store_true")
+    ladder_discard.add_argument("--json", action="store_true")
+    ladder_seal = ladder_sub.add_parser(
+        "seal",
+        help=(
+            "seal every whole unsealed block of resolved outcomes; boundaries "
+            "are mechanical, so --all is a catch-up and never a choice"
+        ),
+    )
+    ladder_seal.add_argument("--family")
+    ladder_seal.add_argument("--all", action="store_true")
+    ladder_seal.add_argument("--json", action="store_true")
+    ladder_verify = ladder_sub.add_parser(
+        "verify",
+        help=(
+            "reconcile the ladder record against the workspace, and run the "
+            "one-time grandfather pass; --apply --yes reconciles in place"
+        ),
+    )
+    ladder_verify.add_argument("--project", type=int)
+    ladder_verify.add_argument("--apply", action="store_true")
+    ladder_verify.add_argument("--yes", action="store_true")
+    ladder_verify.add_argument("--plan")
+    ladder_verify.add_argument("--json", action="store_true")
+    ladder_run = ladder_sub.add_parser(
+        "run",
+        help=(
+            "run one consolidation pass now: seal every complete epoch, "
+            "then stage every candidate. Never approves."
+        ),
+    )
+    ladder_run.add_argument("--json", action="store_true")
+    ladder_ledger = ladder_sub.add_parser(
+        "ledger", help="the sealed calibration epochs, oldest first"
+    )
+    ladder_ledger.add_argument("--family")
+    ladder_ledger.add_argument("--json", action="store_true")
+    graph = sub.add_parser(
+        "graph",
+        help=(
+            "inspect the temporal graph projection (status, verify, rebuild, "
+            "paths)"
+        ),
+    )
+    graph_sub = graph.add_subparsers(dest="graph_command", required=True)
+    graph_status = graph_sub.add_parser(
+        "status", help="edge, entity, and exclusion counts for the projection"
+    )
+    graph_status.add_argument("--json", action="store_true")
+    graph_verify = graph_sub.add_parser(
+        "verify",
+        help=(
+            "check every edge against its claim row and every entity against "
+            "its edges (fields only, never values)"
+        ),
+    )
+    graph_verify.add_argument("--json", action="store_true")
+    graph_rebuild = graph_sub.add_parser(
+        "rebuild",
+        help=(
+            "re-project the graph from the live claim rows and report "
+            "divergences; --apply --yes reconciles it in place"
+        ),
+    )
+    graph_rebuild.add_argument(
+        "--apply",
+        action="store_true",
+        help="reconcile the live graph projection (requires --yes)",
+    )
+    graph_rebuild.add_argument(
+        "--yes",
+        action="store_true",
+        help=(
+            "confirm --apply; without it the plan and its plan token are "
+            "printed and the exit status is 2"
+        ),
+    )
+    graph_rebuild.add_argument(
+        "--plan",
+        metavar="TOKEN",
+        default=None,
+        help=(
+            "with --apply --yes: apply only the plan whose token was printed "
+            "by --apply without --yes; a store that changed since then is "
+            "refused with stale_plan and nothing is changed"
+        ),
+    )
+    graph_rebuild.add_argument("--json", action="store_true")
+    graph_paths = graph_sub.add_parser(
+        "paths",
+        help="the screened chains the agent would see for one subject",
+    )
+    graph_paths.add_argument("subject", nargs="+")
+    graph_paths.add_argument("--project", type=int, default=1)
+    graph_paths.add_argument(
+        "--hops",
+        type=int,
+        default=3,
+        help="show only hops up to this depth (1-3); the store walks three",
+    )
+    graph_paths.add_argument(
+        "--temporal",
+        action="store_true",
+        help="include superseded versions, as a past-tense question does",
+    )
+    graph_paths.add_argument("--json", action="store_true")
+    facts = sub.add_parser(
+        "facts", help="list active governed project facts for one project"
+    )
+    facts.add_argument("--project", type=int, default=1)
+    facts.add_argument(
+        "subject", nargs="*", help="optional subject or predicate words to filter by"
+    )
     preference = sub.add_parser("preference", help="manage durable user preferences")
     preference_sub = preference.add_subparsers(dest="preference_command", required=True)
     preference_set = preference_sub.add_parser("set")
@@ -3990,7 +6780,7 @@ def main(argv: list[str] | None = None) -> None:
         elif args.command == "competence":
             code = _run_competence(args)
         elif args.command == "memory":
-            code = _run_memory_quality(args)
+            code = _run_memory(args)
         elif args.command == "usage":
             code = _run_usage(args)
         elif args.command == "control":
@@ -4025,6 +6815,16 @@ def main(argv: list[str] | None = None) -> None:
             code = _run_doc(args)
         elif args.command == "skill":
             code = _run_skill(args)
+        elif args.command == "facts":
+            code = _run_facts(args)
+        elif args.command == "ladder":
+            code = _run_ladder(args)
+        elif args.command == "compaction":
+            code = _run_compaction(args)
+        elif args.command == "graph":
+            code = _run_graph(args)
+        elif args.command == "spine":
+            code = _run_spine(args)
         elif args.command == "preference":
             code = _run_preference(args)
         elif args.command == "feedback":

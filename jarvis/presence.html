@@ -1,21 +1,21 @@
 <!doctype html>
-<html lang="en">
+<html lang="en" data-theme="dark">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
-  <meta name="color-scheme" content="dark">
+  <meta name="color-scheme" content="dark light">
   <title>JARVIS Presence</title>
   <link rel="stylesheet" href="/presence.css">
 </head>
 <body>
   <div class="shell">
-    <aside class="rail">
+    <aside class="rail" aria-label="Jarvis sidebar">
       <div class="brand-row">
         <div class="brand">
           <div class="mark" aria-hidden="true">J</div>
-          <div><strong>Jarvis</strong><small>Personal AI</small></div>
+          <div><strong>Jarvis</strong><small>Local intelligence</small></div>
         </div>
-        <button id="rail-toggle" class="icon-button rail-toggle" type="button" title="Toggle sidebar" aria-label="Toggle sidebar">☰</button>
+        <button id="rail-toggle" class="icon-button rail-toggle" type="button" title="Collapse sidebar (Ctrl+B)" aria-label="Collapse sidebar">☰</button>
       </div>
 
       <div class="mode-tabs" role="tablist" aria-label="Workspace mode">
@@ -23,17 +23,41 @@
         <button id="code-mode" class="mode-tab" type="button" role="tab" aria-selected="false"><span>‹/›</span> Code</button>
       </div>
 
+      <button id="new-chat" class="new-chat" type="button" title="New chat (Ctrl+Shift+O)"><span>＋</span> New chat <kbd class="kbd">Ctrl ⇧ O</kbd></button>
+      <button id="open-palette" class="palette-launch" type="button" title="Search everything (Ctrl+K)"><span class="nav-icon">⌕</span><span>Search or jump to…</span><kbd class="kbd">Ctrl K</kbd></button>
+
       <nav class="primary-nav" aria-label="Jarvis navigation">
-        <button id="new-chat" class="nav-item" type="button"><span class="nav-icon">＋</span><span>New</span></button>
-        <button class="nav-item" type="button" data-view="projects"><span class="nav-icon">▰</span><span>Projects</span></button>
-        <button class="nav-item" type="button" data-view="artifacts"><span class="nav-icon">◇</span><span>Project files</span></button>
-        <button class="nav-item" type="button" data-view="scheduled"><span class="nav-icon">◷</span><span>Scheduled</span></button>
-        <button class="nav-item" type="button" data-view="dispatch"><span class="nav-icon">⇄</span><span>Dispatch</span><span class="beta-badge">Beta</span></button>
-        <button class="nav-item" type="button" data-view="performance"><span class="nav-icon">⌁</span><span>Performance</span></button>
-        <button class="nav-item" type="button" data-view="devices"><span class="nav-icon">⌑</span><span>Devices</span></button>
-        <button class="nav-item" type="button" data-view="companion"><span class="nav-icon">◉</span><span>Companion</span></button>
-        <button class="nav-item" type="button" data-view="public-presence"><span class="nav-icon">◎</span><span>Public Presence</span></button>
-        <button class="nav-item" type="button" data-view="customize"><span class="nav-icon">☷</span><span>Settings</span></button>
+        <div class="nav-group" data-nav-group="workspace">
+          <button class="nav-group-title" type="button" aria-expanded="true">Workspace</button>
+          <div class="nav-group-items">
+            <button class="nav-item" type="button" data-view="overview"><span class="nav-icon">◫</span><span>Overview</span></button>
+            <button class="nav-item" type="button" data-view="projects"><span class="nav-icon">▰</span><span>Projects</span></button>
+            <button class="nav-item" type="button" data-view="artifacts"><span class="nav-icon">◇</span><span>Project files</span></button>
+          </div>
+        </div>
+        <div class="nav-group" data-nav-group="automation">
+          <button class="nav-group-title" type="button" aria-expanded="true">Automation &amp; memory</button>
+          <div class="nav-group-items">
+            <button class="nav-item" type="button" data-view="scheduled"><span class="nav-icon">◷</span><span>Scheduled</span></button>
+            <button class="nav-item" type="button" data-view="dispatch"><span class="nav-icon">⇄</span><span>Dispatch</span><span class="beta-badge">Beta</span></button>
+            <button class="nav-item" type="button" data-view="memory"><span class="nav-icon">◍</span><span>Memory</span></button>
+            <button class="nav-item" type="button" data-view="activity"><span class="nav-icon">≡</span><span>Activity</span></button>
+            <button class="nav-item" type="button" data-view="performance"><span class="nav-icon">⌁</span><span>Performance</span></button>
+          </div>
+        </div>
+        <div class="nav-group" data-nav-group="security">
+          <button class="nav-group-title" type="button" aria-expanded="true">Devices &amp; safety</button>
+          <div class="nav-group-items">
+            <button class="nav-item" type="button" data-view="devices"><span class="nav-icon">⌑</span><span>Devices</span></button>
+            <button class="nav-item" type="button" data-view="companion"><span class="nav-icon">◉</span><span>Companion</span></button>
+            <button class="nav-item" type="button" data-view="public-presence"><span class="nav-icon">◎</span><span>Public Presence</span></button>
+          </div>
+        </div>
+        <div class="nav-group" data-nav-group="settings">
+          <div class="nav-group-items">
+            <button class="nav-item" type="button" data-view="customize"><span class="nav-icon">☷</span><span>Settings</span></button>
+          </div>
+        </div>
       </nav>
 
       <section class="project-switcher" aria-label="Current project workspace">
@@ -48,7 +72,10 @@
       <div class="section-title"><span>Pinned projects</span><span class="section-rule"></span><button id="pin-project" class="section-add" type="button" title="Pin current project" aria-label="Pin current project">＋</button></div>
       <nav id="pinned-projects" class="pinned-projects" aria-label="Pinned projects"></nav>
 
-      <div class="section-title"><span>Chats in this project</span><span class="section-rule"></span></div>
+      <div class="section-title"><span>Chats in this project</span><span class="section-rule"></span><span id="conversation-count" class="section-count" aria-live="polite"></span></div>
+      <div class="chat-search-row">
+        <input id="chat-search" type="search" placeholder="Filter chats" aria-label="Filter chats in this project" autocomplete="off">
+      </div>
       <nav id="conversation-list" class="conversation-list" aria-label="Chats in the active project"></nav>
 
       <div class="rail-footer">
@@ -57,7 +84,7 @@
         </button>
         <label class="toggle sidebar-action"><input id="speak-toggle" type="checkbox"><span class="switch"></span><span>Voice responses</span></label>
         <section class="system-card" aria-label="System status">
-          <div class="status-line"><span id="status-dot" class="dot"></span><b id="status-label">Connecting</b></div>
+          <div class="status-line"><span id="status-dot" class="dot"></span><b id="status-label">Connecting</b><button id="runtime-quick" class="runtime-quick" type="button" title="Runtime control" hidden>running</button></div>
           <div id="provider-label" class="muted">Model provider pending</div>
           <div id="control-label" class="muted">Runtime state pending</div>
           <div id="agent-label" class="muted">Agent pool pending</div>
@@ -69,9 +96,11 @@
       <header class="topbar">
         <div class="title-group">
           <button id="mobile-rail-toggle" class="icon-button mobile-rail-toggle" type="button" title="Open sidebar" aria-label="Open sidebar">☰</button>
-          <div>
-            <button id="project-context" class="project-context" type="button" title="Open project workspace">Default workspace</button>
-            <h1 id="chat-title">New task</h1>
+          <div class="title-stack">
+            <div class="breadcrumb">
+              <button id="project-context" class="project-context" type="button" title="Open project workspace">Default workspace</button>
+            </div>
+            <h1 id="chat-title" title="Double-click to rename" tabindex="0">New task</h1>
             <p id="activity">Ready</p>
           </div>
         </div>
@@ -99,15 +128,16 @@
               </div>
             </section>
           </div>
-          <select id="model">
+          <select id="model" title="Model profile for the next message" aria-label="Model profile">
             <option value="auto">Auto</option>
             <option value="fast">Fast</option>
             <option value="reasoning">Reasoning</option>
             <option value="coding">Coding</option>
             <option value="deep">Deep / Security</option>
           </select>
-          <button id="split-view" class="ghost split-view-toggle" type="button" aria-pressed="false" title="Open a second independent Jarvis chat">Split</button>
-          <button id="stop" class="danger" disabled>Stop</button>
+          <button id="theme-toggle" class="icon-button top-icon" type="button" title="Switch theme" aria-label="Switch theme">◐</button>
+          <button id="split-view" class="ghost split-view-toggle" type="button" aria-pressed="false" title="Open a second independent Jarvis chat (Ctrl+Shift+S)">Split</button>
+          <button id="stop" class="danger" disabled title="Stop the current request (Esc)">Stop</button>
         </div>
       </header>
 
@@ -125,7 +155,10 @@
         <div class="utility-shell">
           <header class="utility-head">
             <div><p id="utility-kicker">Workspace</p><h2 id="utility-title">Projects</h2><p id="utility-description"></p></div>
-            <button id="close-utility" class="ghost" type="button">Back to chat</button>
+            <div class="utility-head-actions">
+              <button id="refresh-utility" class="ghost" type="button" title="Reload this view">Refresh</button>
+              <button id="close-utility" class="ghost" type="button">Back to chat</button>
+            </div>
           </header>
           <div id="utility-content" class="utility-content"></div>
         </div>
@@ -142,16 +175,19 @@
           </div>
         </article>
       </section>
+      <button id="scroll-to-bottom" class="scroll-to-bottom" type="button" title="Jump to latest" aria-label="Jump to latest message" hidden>↓</button>
 
       <div class="composer-area">
+        <div id="quick-actions" class="quick-actions" aria-label="Quick prompts"></div>
         <form id="composer" class="composer">
           <textarea id="prompt" rows="1" maxlength="50000" placeholder="Message Jarvis" autocomplete="off"></textarea>
           <div class="composer-actions">
             <div class="composer-left">
-              <button id="attach-image" class="composer-button" type="button" title="Attach images" aria-label="Attach images">＋</button>
+              <button id="attach-image" class="composer-button" type="button" title="Attach images (or paste / drop)" aria-label="Attach images">＋</button>
               <input id="image-input" type="file" accept="image/png,image/jpeg,image/webp,image/gif" multiple hidden>
               <button id="microphone" class="composer-button" type="button" title="Voice input" aria-label="Voice input">⌁</button>
-              <span class="composer-context">Jarvis can use tools and work across projects</span>
+              <span class="composer-context">Enter to send · Shift+Enter for a new line</span>
+              <span id="prompt-counter" class="prompt-counter" aria-live="polite" hidden></span>
             </div>
             <button id="send" class="send" type="submit" title="Send message" aria-label="Send message">↑</button>
           </div>
@@ -187,6 +223,48 @@
       </section>
     </main>
   </div>
+
+  <dialog id="palette-dialog" class="palette-dialog" aria-label="Command palette">
+    <form id="palette-form" class="palette-form">
+      <input id="palette-input" type="text" placeholder="Search chats, projects, views, and actions…" autocomplete="off" spellcheck="false" aria-label="Command palette search" aria-controls="palette-list" aria-autocomplete="list">
+      <div id="palette-list" class="palette-list" role="listbox" aria-label="Results"></div>
+      <div class="palette-foot"><span><kbd class="kbd">↑↓</kbd> navigate</span><span><kbd class="kbd">Enter</kbd> open</span><span><kbd class="kbd">Esc</kbd> close</span></div>
+    </form>
+  </dialog>
+
+  <dialog id="shortcuts-dialog" class="shortcuts-dialog">
+    <div class="dialog-head">
+      <div><h2>Keyboard shortcuts</h2><p>Work faster without leaving the keyboard.</p></div>
+      <button id="close-shortcuts" class="ghost" type="button">Close</button>
+    </div>
+    <div id="shortcuts-list" class="shortcuts-list"></div>
+  </dialog>
+
+  <dialog id="confirm-dialog" class="confirm-dialog">
+    <div class="dialog-head">
+      <div><h2 id="confirm-title">Are you sure?</h2><p id="confirm-copy"></p></div>
+      <button id="cancel-confirm" class="ghost" type="button">Cancel</button>
+    </div>
+    <div class="delete-chat-actions">
+      <button id="accept-confirm" class="danger" type="button">Confirm</button>
+    </div>
+  </dialog>
+
+  <dialog id="rename-chat-dialog" class="rename-chat-dialog">
+    <form id="rename-chat-form" class="project-form">
+      <div class="dialog-head">
+        <div><h2>Rename chat</h2><p>The new title is saved with the conversation.</p></div>
+        <button id="cancel-rename-chat" class="ghost" type="button">Cancel</button>
+      </div>
+      <div class="project-form-body">
+        <label for="rename-chat-title">Title</label>
+        <input id="rename-chat-title" name="rename-chat-title" maxlength="120" autocomplete="off" required>
+        <div class="project-form-actions">
+          <button id="confirm-rename-chat" class="primary" type="submit">Save title</button>
+        </div>
+      </div>
+    </form>
+  </dialog>
 
   <dialog id="approval-dialog">
     <div class="dialog-head">

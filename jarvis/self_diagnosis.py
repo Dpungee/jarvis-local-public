@@ -56,7 +56,16 @@ _IMMUTABLE_REPAIR_FILES = frozenset({
     "jarvis/approvals.py",
     "jarvis/constitutional.py",
     "jarvis/config.py",
+    # After M4, promote_staged_skill is the only function that moves bytes into
+    # the live learned-skill root, so self-repair must never be able to draft
+    # over the ladder, its staging writers, or the document template.
+    "jarvis/learning_ladder.py",
+    "jarvis/skill_library.py",
+    "jarvis/skill_evolution.py",
     "jarvis/memory.py",
+    "jarvis/memory_compaction.py",
+    "jarvis/memory_graph.py",
+    "jarvis/memory_spine.py",
     "jarvis/policy.py",
     "jarvis/proactive.py",
     "jarvis/public_bridge.py",

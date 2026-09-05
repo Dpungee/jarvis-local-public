@@ -1,0 +1,24 @@
+{
+  "_comment": [
+    "The offline fallback for the LoCoMo shape. Reported under the name",
+    "locomo-shape, never as LoCoMo."
+  ],
+  "n_cases": 24,
+  "sampling": {
+    "strategy": "generated",
+    "key": "category",
+    "seed": 20260904
+  },
+  "runtime": {
+    "JARVIS_COMPACTION_ENABLED": false,
+    "JARVIS_MEMORY_EMBEDDINGS": "disabled",
+    "JARVIS_CONTEXT_LENGTH": 32768
+  },
+  "model": {
+    "answer": "claude-cli:claude-sonnet-4-5",
+    "judge": "claude-cli:claude-sonnet-4-5",
+    "allowed_model_prefixes": [
+      "claude-cli:claude-sonnet"
+    ]
+  }
+}

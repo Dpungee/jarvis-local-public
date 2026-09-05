@@ -27,7 +27,7 @@ FIXTURE = (
 )
 EVALUATOR = ROOT / "jarvis" / "long_horizon_eval.py"
 WORKER = ROOT / "jarvis" / "long_horizon_eval_worker.py"
-FIXTURE_SHA256 = "e4bdd7d9124be3f1caff93489ec90431e10fc1b5bfa20c9dd85036d66e9b10af"
+FIXTURE_SHA256 = "bad7b9b76625d9efaaccd57f2d6f910fad188a061ea8862af268a8024b9ee681"
 EVALUATOR_SHA256 = "cc668abc247c837da8f05e17e991a2c9069d0ca5a63b15ba60fd657118781287"
 WORKER_SHA256 = "e81378ed4e27c9ffcdbd25017369376a6d5d67ab488ed341d2677d339f456bef"
 

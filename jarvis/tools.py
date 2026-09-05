@@ -33,7 +33,7 @@ from ctypes import wintypes
 from dataclasses import asdict, dataclass
 from html.parser import HTMLParser
 from pathlib import Path, PurePosixPath
-from typing import Any, Callable, Iterator
+from typing import Any, Callable, Iterable, Iterator
 
 from .approvals import SENSITIVE_ACTIONS, approval_display_resource, approval_resource
 from .attachments import MAX_IMAGE_BYTES, ImageAttachment, inspect_image_attachment
@@ -211,6 +211,14 @@ MUTATING_TOOLS = frozenset({
 })
 _PROTECTED_PATH_COMPONENTS = frozenset({
     ".aws", ".azure", ".git", ".gnupg", ".jarvis-runtime", ".jarvis-skills",
+    # The learning ladder's staging root holds skill documents that no
+    # operator has approved yet.  It must be at least as unreachable as the
+    # live root: the skill catalog never walks it, and the model's file tools
+    # refuse it here for read, write, list, and as a shell working directory.
+    # Spelled out rather than imported from skill_library so a rename there
+    # fails a test (tests/test_tools_hardening.py) instead of silently moving
+    # the protection off the directory that still holds the files.
+    ".jarvis-skills-staging",
     ".kube", ".ssh",
     "codex-cli-home", "gateway",
 })
@@ -1001,6 +1009,20 @@ def _yahoo_results(document: str, max_results: int) -> list[dict[str, str]]:
     return results
 
 
+def _refuse_protected_components(parts: Iterable[str]) -> None:
+    """Refuse any path component naming a credential or runtime-control path.
+
+    Split out so it can be applied to BOTH spellings of the same path: the one
+    the caller typed, and the one the filesystem actually resolves it to.
+    """
+    for part in parts:
+        folded = str(part).rstrip(" .").casefold()
+        if folded in _PROTECTED_PATH_COMPONENTS or folded in _PROTECTED_FILENAMES:
+            raise PermissionError("Credential and runtime-control paths are protected")
+        if folded == ".env" or folded.startswith(".env."):
+            raise PermissionError("Credential and runtime-control paths are protected")
+
+
 def _safe_target(workspace: Path, user_path: str | Path) -> Path:
     workspace = workspace.resolve()
     raw = Path(user_path)
@@ -1011,11 +1033,7 @@ def _safe_target(workspace: Path, user_path: str | Path) -> Path:
         raise PermissionError("Path must stay inside the workspace") from exc
     current = workspace
     for part in relative.parts:
-        folded = part.rstrip(" .").casefold()
-        if folded in _PROTECTED_PATH_COMPONENTS or folded in _PROTECTED_FILENAMES:
-            raise PermissionError("Credential and runtime-control paths are protected")
-        if folded == ".env" or folded.startswith(".env."):
-            raise PermissionError("Credential and runtime-control paths are protected")
+        _refuse_protected_components((part,))
         current = current / part
         if not os.path.lexists(current):
             continue
@@ -1023,7 +1041,27 @@ def _safe_target(workspace: Path, user_path: str | Path) -> Path:
         attributes = getattr(stat_result, "st_file_attributes", 0)
         if os.path.islink(current) or attributes & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400):
             raise PermissionError("Symlinks and reparse points are blocked in workspace tool paths")
-    return resolve_workspace_path(workspace, user_path)
+    target = resolve_workspace_path(workspace, user_path)
+    # The loop above compares the components the CALLER typed.  On NTFS a
+    # directory has a second legal spelling -- the 8.3 short name -- so
+    # `JARVIS~1/learned-code-fix/SKILL.md` passed every check above and then
+    # `resolve_workspace_path` expanded it to `.jarvis-skills-staging/...`
+    # AFTER the decision was made.  The same alias reached `.aws`, `.ssh` and
+    # `.jarvis-runtime` (red team R-2).  Re-running the loop over the RESOLVED
+    # path closes every alias spelling at once, because whatever name the
+    # caller used, the filesystem canonicalizes it to the one real name.
+    #
+    # `realpath` and not just `resolve_workspace_path`: the latter is what
+    # produced the expansion, but a junction or symlink in the middle can
+    # still leave a protected component only realpath reveals.
+    try:
+        canonical = Path(os.path.realpath(target)).relative_to(
+            Path(os.path.realpath(workspace))
+        )
+    except ValueError as exc:
+        raise PermissionError("Path must stay inside the workspace") from exc
+    _refuse_protected_components(canonical.parts)
+    return target
 
 
 def _is_protected_mutation_path(workspace: Path, target: Path) -> bool:
@@ -6682,6 +6720,25 @@ class ToolBox:
             raise ValueError("Potential secret detected; memory write refused")
         if _INSTRUCTION_PATTERN.search(content):
             raise ValueError("Instruction-like memory refused")
+        context = getattr(self, "memory_write_context", None)
+        if isinstance(context, dict) and context:
+            # Set by the agent for exactly one dispatched call and reset in
+            # its finally: the spine records who wrote the row.
+            conversation_id = context.get("conversation_id")
+            return self.memory.remember_verified(
+                content,
+                kind,
+                source,
+                origin="explicit_operator_memory",
+                actor=str(context.get("actor") or "model"),
+                permission=str(context.get("permission") or "runtime")[:80],
+                conversation_id=(
+                    int(conversation_id)
+                    if isinstance(conversation_id, int)
+                    and not isinstance(conversation_id, bool)
+                    else None
+                ),
+            )
         return self.memory.remember_verified(
             content,
             kind,

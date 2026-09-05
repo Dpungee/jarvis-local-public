@@ -14,6 +14,7 @@ from tests.sqlite_crash_fixture import (
     create_hot_future_database,
     snapshot_directory,
 )
+from tests.legacy_store_fixture import strip_spine
 
 
 @contextmanager
@@ -80,6 +81,7 @@ class MemoryReliabilityTests(unittest.TestCase):
                 legacy.execute("DROP TRIGGER IF EXISTS tasks_schedule_binding_immutable")
                 legacy.execute("ALTER TABLE tasks DROP COLUMN availability_mode")
                 legacy.execute("ALTER TABLE tasks DROP COLUMN initial_available_at")
+                strip_spine(legacy)
                 legacy.execute("PRAGMA user_version=40")
                 legacy.commit()
             finally:
@@ -128,6 +130,7 @@ class MemoryReliabilityTests(unittest.TestCase):
                 )
                 legacy.execute("ALTER TABLE tasks DROP COLUMN availability_mode")
                 legacy.execute("ALTER TABLE tasks DROP COLUMN initial_available_at")
+                strip_spine(legacy)
                 legacy.execute("PRAGMA user_version=40")
                 legacy.commit()
             finally:
@@ -179,6 +182,7 @@ class MemoryReliabilityTests(unittest.TestCase):
             legacy.execute("DROP INDEX IF EXISTS idx_predictions_family")
             legacy.execute("DROP INDEX IF EXISTS idx_predictions_open")
             legacy.execute("DROP TABLE IF EXISTS task_predictions")
+            strip_spine(legacy)
             legacy.execute("PRAGMA user_version=7")
             legacy.commit()
             legacy.close()

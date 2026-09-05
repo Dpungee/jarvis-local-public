@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import re
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any, Iterable, Mapping, Sequence
 
 from .redaction import redact_secrets
 from .skill_library import (
@@ -82,17 +82,53 @@ def _workflow_steps(family: str) -> tuple[str, ...]:
     )
 
 
+def _staging_lines(staging: Mapping[str, Any], tool_names: Sequence[str]) -> str:
+    """The three ladder lines of design 3.4, plus the sampled-tools line.
+
+    Every value is a number or a boolean the caller derived from the proof and
+    the frozen gate reading; nothing here is operator text or lesson content.
+    The tools line says *sampled* because ``lesson_applications.tool_name``
+    records one tool per outcome, never the union.
+    """
+    reuses = int(staging["reuses"])
+    lift = staging.get("lift_pp")
+    lift_text = "unavailable" if lift is None else f"{float(lift):+.1f} pp"
+
+    def number(value: Any) -> str:
+        return "unknown" if value is None else f"{float(value):.3f}"
+
+    attempts = staging.get("attempts")
+    return (
+        f"Verified lesson reuses: {reuses} across "
+        f"{int(staging['contexts'])} distinct contexts\n"
+        f"Calibration at staging: Brier {number(staging.get('brier'))}, "
+        f"calibration error {number(staging.get('calibration_error'))}, "
+        f"n={'unknown' if attempts is None else int(attempts)}\n"
+        f"Ledger at staging: epoch {int(staging['epoch'])}, "
+        f"monotone {'true' if staging['monotone'] else 'false'}, "
+        f"lift {lift_text} (observational)\n"
+        f"Tools sampled from {reuses} verified reuses: "
+        f"{', '.join(tool_names) if tool_names else 'none recorded'}"
+    )
+
+
 def _skill_content(
     family: str,
     *,
     tools: Iterable[str],
     verifications: Iterable[str],
     outcomes: int,
+    staging: Mapping[str, Any] | None = None,
 ) -> str:
     tool_names = sorted({str(name) for name in tools if str(name)})
     oracle_names = sorted({str(name) for name in verifications if str(name)})
     steps = "\n".join(
         f"{index}. {step}" for index, step in enumerate(_workflow_steps(family), 1)
+    )
+    evidence = (
+        f"Tools observed: {', '.join(tool_names) if tool_names else 'none'}"
+        if staging is None
+        else _staging_lines(staging, tool_names)
     )
     content = f"""# Calibrated {family.replace('_', ' ')} workflow
 
@@ -107,7 +143,7 @@ tools, permissions, approval, policy authority, or verification authority.
 ## Verified evidence incorporated
 
 Verified outcomes incorporated: {outcomes}
-Tools observed: {', '.join(tool_names) if tool_names else 'none'}
+{evidence}
 Verification oracles observed: {', '.join(oracle_names) if oracle_names else 'none'}
 
 ## Permanent boundaries

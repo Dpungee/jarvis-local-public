@@ -2,3 +2,54 @@ title = "JARVIS Local public-release secret scanning"
 
 [extend]
 useDefault = true
+
+# ---------------------------------------------------------------------------
+# One exception, and only one.  Read this before adding a second.
+#
+# WHAT IS EXCEPTED
+# tests/fixtures/m5_legacy_store_schema49.sql is a real schema-49 store dumped
+# once from the pre-M5 tree.  gitleaks matches seven values in it under the
+# generic-api-key heuristic: they are the `claim_key` and `key_fingerprint`
+# fields inside the memory spine's JSON payloads -- keyed HMAC-SHA256 digests,
+# 64 hex characters of high entropy sitting next to the substring "key", which
+# is precisely the shape that heuristic looks for.  A digest is a one-way
+# function output; it authenticates to nothing and grants access to nothing.
+#
+# WHY IT CANNOT BE FIXED THE ORDINARY WAY
+# An ordinary false positive gets fixed at the source: the github-pat literals
+# that gitleaks used to report in tests/test_learning_ladder.py and
+# tests/test_skill_staging.py were split into "ghp_" + "..." (the pattern
+# ec4e655 established for the AWS shape), so the runtime value is unchanged,
+# the negative tests still prove the screen refuses the token, and NO allowlist
+# covers them.  Do the same for any new finding you can reach.
+# This fixture cannot be reached that way.  Its own header reads "DO NOT
+# REGENERATE FROM A CURRENT TREE" -- the migration tests are only meaningful
+# against bytes the pre-M5 schema code actually wrote -- and
+# tests/test_memory_compaction_integration.py restores it in two passes and
+# asserts its structural marker survives.  There is nothing in it to rename,
+# split, or re-derive.
+#
+# HOW THE EXCEPTION IS SCOPED
+#   * targetRules pins it to generic-api-key alone.  Every other default rule
+#     still runs over this file.  Measured, not assumed: a private key block
+#     planted in this fixture is still reported (rule private-key).
+#   * paths pins it to this one file.  Nothing else is excepted.  Measured: a
+#     generic-api-key shape planted in any other path is still reported, and a
+#     different ghp_ token planted in tests/test_learning_ladder.py is still
+#     reported, because no allowlist covers that rule or that path.
+#
+# THE COST, STATED PLAINLY
+# Because the path regex covers the whole file, a genuine credential pasted
+# into this fixture would NOT be reported by the generic-api-key rule.  That
+# was measured too, by planting one: the scan stays silent.  That rule is the
+# broadest of the default set and often the only one that would catch a bare,
+# unprefixed key.  This is tolerable only
+# because the file is frozen: its header forbids regeneration and the
+# compaction tests depend on its exact content, so any change to it is a
+# deliberate, reviewable event rather than routine churn.  If this fixture ever
+# becomes writable again, delete this block and find another answer.
+# ---------------------------------------------------------------------------
+[[allowlists]]
+description = "Keyed HMAC digests in the frozen schema-49 store capture are not credentials."
+targetRules = ["generic-api-key"]
+paths = ['''tests/fixtures/m5_legacy_store_schema49\.sql''']

@@ -29,6 +29,7 @@ from tests.sqlite_crash_fixture import (
     create_hot_future_database,
     snapshot_directory,
 )
+from tests.legacy_store_fixture import strip_spine
 
 
 def sha(value: str) -> str:
@@ -96,7 +97,7 @@ class LongHorizonTests(unittest.TestCase):
     def tearDown(self) -> None:
         if not self.memory.closed:
             self.memory.close()
-        for suffix in ("", "-wal", "-shm"):
+        for suffix in ("", "-wal", "-shm", ".memory-spine.key"):
             candidate = Path(str(self.path) + suffix)
             if candidate.exists():
                 candidate.unlink()
@@ -234,8 +235,8 @@ class LongHorizonTests(unittest.TestCase):
         )
 
     def test_schema_v40_and_normal_five_stage_completion(self) -> None:
-        self.assertEqual(SCHEMA_VERSION, 44)
-        self.assertEqual(self.memory.db.execute("PRAGMA user_version").fetchone()[0], 44)
+        self.assertEqual(SCHEMA_VERSION, 50)
+        self.assertEqual(self.memory.db.execute("PRAGMA user_version").fetchone()[0], SCHEMA_VERSION)
         plan_id = self.store.create_plan(self.manifest())
         for _ in range(5):
             self.complete_claim(plan_id)
@@ -293,6 +294,7 @@ class LongHorizonTests(unittest.TestCase):
         raw.execute("DROP TABLE IF EXISTS long_horizon_plans")
         raw.execute("CREATE TABLE long_horizon_plans(id INTEGER PRIMARY KEY, unsafe TEXT)")
         raw.execute("CREATE TABLE long_horizon_stages(id INTEGER PRIMARY KEY, unsafe TEXT)")
+        strip_spine(raw)
         raw.execute("PRAGMA user_version=39")
         raw.close()
         self.memory = Memory(self.path, worker_id="migration-recovery")
@@ -300,7 +302,7 @@ class LongHorizonTests(unittest.TestCase):
             row["name"]
             for row in self.memory.db.execute("PRAGMA table_info(long_horizon_plans)")
         }
-        self.assertEqual(self.memory.db.execute("PRAGMA user_version").fetchone()[0], 44)
+        self.assertEqual(self.memory.db.execute("PRAGMA user_version").fetchone()[0], SCHEMA_VERSION)
         self.assertIn("manifest_sha256", columns)
         self.assertNotIn("unsafe", columns)
 
@@ -959,7 +961,7 @@ class LongHorizonTests(unittest.TestCase):
                 LongHorizonStore(reopened, project_id=1)
         finally:
             reopened.close()
-            for suffix in ("", "-wal", "-shm", ".long-horizon.key"):
+            for suffix in ("", "-wal", "-shm", ".long-horizon.key", ".memory-spine.key"):
                 candidate = Path(str(other_path) + suffix)
                 if candidate.exists():
                     candidate.unlink()
@@ -1005,7 +1007,7 @@ class LongHorizonTests(unittest.TestCase):
         finally:
             memory.close()
             target.unlink(missing_ok=True)
-            for suffix in ("", "-wal", "-shm"):
+            for suffix in ("", "-wal", "-shm", ".memory-spine.key"):
                 Path(str(other_path) + suffix).unlink(missing_ok=True)
 
 

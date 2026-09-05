@@ -87,3 +87,47 @@ authority keys, and cannot authorize live activation. Executor/recovery processe
 receive no private authority key; the separate verifier process must reopen and
 hash the real deterministic artifact bytes plus the effect ledger and exported
 workflow evidence before signing.
+
+The memory-graph holdout (v4) is the sealed regression gate for the temporal
+graph, in the same sense the Phase 4A and Phase 5 holdouts are for their
+subjects. It was authored by an independent agent that never read the graph
+implementation, scored once, and passed: chain precision 1.0, recall 1.0,
+abstention 91/91, leakage 0, store-side p95 20.4 ms. Three earlier holdouts
+(v1-v3) were each scored once, failed the gate, and are quarantined; a
+quarantined fixture is never restored, rescored, or tuned against.
+
+It pins the runtime it was scored against. `runtime_sha256` inside
+`tests/fixtures/memory_graph_holdout_v4.json` holds a per-file sha256 of
+`jarvis/memory.py`, `jarvis/memory_graph.py`, `jarvis/memory_retrieval.py` and
+`jarvis/redaction.py`; the scored test refuses to run against a runtime whose
+digests differ. `jarvis/agent.py` is deliberately not pinned, because the
+scoring path is store-side and pinning the agent would break the seal on every
+prompt edit without covering anything the scorer executes.
+
+The scored test **skips unless a run token is supplied**:
+
+```powershell
+$env:JARVIS_MEMORY_GRAPH_HOLDOUT_V4_TOKEN = "<token>"
+python -m unittest -v tests.test_memory_graph_holdout_v4
+```
+
+The token is `sha256("<FIXTURE_SHA256>:<SCORER_SHA256>")`, over the two
+constants the test file pins — the fixture's own bytes and the sealed scorer
+block between its `BEGIN`/`END` markers. It is a tamper seal, not a secret:
+anyone holding the file can derive it, and `scripts/reseal_runtime_pins.py`
+prints it. **One-use is procedural, not cryptographic** — the discipline is
+that the gate is scored once against a frozen pin and the result recorded, and
+that a failure quarantines the fixture rather than prompting a retry.
+
+A sealed fixture is never edited except its `*_sha256` digests. When a
+legitimate change to a pinned source file invalidates the seals, recompute them
+with the reseal tool and confirm the sealed evaluations still report identical
+metrics — the digests prove provenance, the metrics prove the result:
+
+```powershell
+python scripts/reseal_runtime_pins.py .            # check only, prints the plan
+python scripts/reseal_runtime_pins.py . --apply    # write the recomputed digests
+```
+
+The tool refuses to write if any field whose name does not end in `_sha256`
+would change, because that would be a rescore rather than a reseal.

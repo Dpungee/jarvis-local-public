@@ -348,7 +348,7 @@ class LongHorizonCliTests(unittest.TestCase):
             self.assertEqual(persisted["status"], "active")
         finally:
             manifest_path.unlink(missing_ok=True)
-            for suffix in ("", "-wal", "-shm"):
+            for suffix in ("", "-wal", "-shm", ".memory-spine.key"):
                 Path(f"{database}{suffix}").unlink(missing_ok=True)
             Path(f"{database}.long-horizon.key").unlink(missing_ok=True)
 
@@ -440,7 +440,7 @@ class LongHorizonCliTests(unittest.TestCase):
         finally:
             manifest_one.unlink(missing_ok=True)
             manifest_two.unlink(missing_ok=True)
-            for suffix in ("", "-wal", "-shm"):
+            for suffix in ("", "-wal", "-shm", ".memory-spine.key"):
                 Path(f"{database}{suffix}").unlink(missing_ok=True)
             Path(f"{database}.long-horizon.key").unlink(missing_ok=True)
 
@@ -468,7 +468,7 @@ class LongHorizonCliTests(unittest.TestCase):
             self.assertNotIn(str(key_path), rendered)
             self.assertNotIn(key_bytes.hex(), rendered)
         finally:
-            for suffix in ("", "-wal", "-shm"):
+            for suffix in ("", "-wal", "-shm", ".memory-spine.key"):
                 Path(f"{database}{suffix}").unlink(missing_ok=True)
             key_path.unlink(missing_ok=True)
 

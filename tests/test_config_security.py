@@ -38,6 +38,19 @@ class ConfigSecurityTests(unittest.TestCase):
         )
         self.assertEqual(config_module._DOTENV_KEYS - documented, set())
 
+    def test_every_active_example_setting_is_loadable(self):
+        """Copying .env.example to .env must never fail startup.
+
+        The previous guard only proved that every supported key is documented;
+        an example line for a key the loader rejects (JARVIS_STRATEGY_TRANSFER
+        was one) broke every command on first run.
+        """
+        example = (Path(__file__).resolve().parents[1] / ".env.example").read_text(
+            encoding="utf-8"
+        )
+        active = set(re.findall(r"(?m)^([A-Z][A-Z0-9_]+)=", example))
+        self.assertEqual(active - config_module._DOTENV_KEYS, set())
+
     def test_default_endpoint_is_loopback(self):
         config = load_config({})
         self.assertEqual(config.ollama_url, "http://127.0.0.1:11434")

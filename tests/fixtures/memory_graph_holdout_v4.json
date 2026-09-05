@@ -1,0 +1,5753 @@
+{
+  "holdout": "memory_graph_holdout_v4",
+  "version": 4,
+  "authored": "2026-09-03",
+  "author": "independent reviewer agent (fourth)",
+  "domain": "a fictional upland honey circuit: a hive is worked from an apiary yard, a yard answers to a holding estate, an estate sells at a market fair, and a fair keeps an overseer bailiff",
+  "fictional_only": true,
+  "public_safe": true,
+  "generator_seed": 20260904,
+  "clock": {
+    "start": "2031-03-01T09:00:00+00:00",
+    "tick_seconds": 7
+  },
+  "runtime_sha256": {
+    "jarvis/memory.py": "7fc91cd9b53f9f9a7ee24f29b73ce7ba6636a8e984d4dcc08a755ac34666cc5b",
+    "jarvis/memory_graph.py": "ebb04ce47b2064636c3c6b0fd86510ee1c9263850b797d4b03d5e40c2a1fbf59",
+    "jarvis/memory_retrieval.py": "b9d3fc23e06691a1f2023402c412c837c063c9cc1c598006b7fe3dab562e76f1",
+    "jarvis/redaction.py": "49e28e6ed1ac4d0bfde9cd4fbf90780591a04ad24464ed2977cebfd14289403a"
+  },
+  "thresholds": {
+    "chain_precision": 1.0,
+    "chain_recall": 0.9,
+    "abstention_accuracy": 1.0,
+    "leakage": 0,
+    "store_p95_ms": 25
+  },
+  "stores": [
+    {
+      "id": "core",
+      "projects": [
+        1
+      ],
+      "padding_claims": 0,
+      "records": [
+        {
+          "id": "s1-01",
+          "op": "claim",
+          "scope": "project:1",
+          "subject": "Quillet hive",
+          "predicate": "apiary",
+          "value": "Dornhale yard",
+          "authority": "operator",
+          "confidence": 1.0
+        },
+        {
+          "id": "s1-02",
+          "op": "claim",
+          "scope": "project:1",
+          "subject": "Dornhale yard",
+          "predicate": "holding",
+          "value": "Ashperry estate",
+          "authority": "operator",
+          "confidence": 1.0
+        },
+        {
+          "id": "s1-03",
+          "op": "claim",
+          "scope": "project:1",
+          "subject": "Ashperry estate",
+          "predicate": "market",
+          "value": "Vantrey fair",
+          "authority": "operator",
+          "confidence": 1.0
+        },
+        {
+          "id": "s1-04",
+          "op": "claim",
+          "scope": "project:1",
+          "subject": "Vantrey fair",
+          "predicate": "overseer",
+          "value": "Ferrowin bailiff",
+          "authority": "operator",
+          "confidence": 1.0
+        },
+        {
+          "id": "s1-05",
+          "op": "claim",
+          "scope": "project:1",
+          "subject": "Sorbec hive",
+          "predicate": "apiary",
+          "value": "Dornhale yard",
+          "authority": "operator",
+          "confidence": 1.0
+        },
+        {
+          "id": "s1-06",
+          "op": "claim",
+          "scope": "project:1",
+          "subject": "Vantrey fair",
+          "predicate": "daybook",
+          "value": "Ilbury roll",
+          "authority": "operator",
+          "confidence": 1.0
+        },
+        {
+          "id": "s1-07",
+          "op": "claim",
+          "scope": "project:1",
+          "subject": "Ashperry estate",
+          "predicate": "carrier",
+          "value": "Naverly wagon",
+          "authority": "operator",
+          "confidence": 1.0
+        },
+        {
+          "id": "s1-08",
+          "op": "claim",
+          "scope": "project:1",
+          "subject": "Quillet hive",
+          "predicate": "combcount",
+          "value": "48",
+          "authority": "operator",
+          "confidence": 1.0
+        },
+        {
+          "id": "s1-09",
+          "op": "claim",
+          "scope": "project:1",
+          "subject": "Havermast estate",
+          "predicate": "market",
+          "value": "Oxbend fair",
+          "authority": "operator",
+          "confidence": 1.0
+        },
+        {
+          "id": "s1-10",
+          "op": "claim",
+          "scope": "project:1",
+          "subject": "Oxbend fair",
+          "predicate": "overseer",
+          "value": "Tibbeck bailiff",
+          "authority": "operator",
+          "confidence": 1.0
+        }
+      ],
+      "expected_counts": {
+        "claims": 10,
+        "tombstones": 0
+      }
+    },
+    {
+      "id": "scope",
+      "projects": [
+        1,
+        2
+      ],
+      "padding_claims": 0,
+      "records": [
+        {
+          "id": "s2-01",
+          "op": "claim",
+          "scope": "project:1",
+          "subject": "Immerly hive",
+          "predicate": "apiary",
+          "value": "Pellamy yard",
+          "authority": "operator",
+          "confidence": 1.0
+        },
+        {
+          "id": "s2-02",
+          "op": "claim",
+          "scope": "project:1",
+          "subject": "Pellamy yard",
+          "predicate": "holding",
+          "value": "Ostrey estate",
+          "authority": "operator",
+          "confidence": 1.0
+        },
+        {
+          "id": "s2-03",
+          "op": "claim",
+          "scope": "project:2",
+          "subject": "Immerly hive",
+          "predicate": "apiary",
+          "value": "Wexholt yard",
+          "authority": "operator",
+          "confidence": 1.0
+        },
+        {
+          "id": "s2-04",
+          "op": "claim",
+          "scope": "project:2",
+          "subject": "Wexholt yard",
+          "predicate": "holding",
+          "value": "Yarrowmede estate",
+          "authority": "operator",
+          "confidence": 1.0
+        },
+        {
+          "id": "s2-05",
+          "op": "claim",
+          "scope": "global",
+          "subject": "Pellamy yard",
+          "predicate": "market",
+          "value": "Threnly fair",
+          "authority": "learned",
+          "confidence": 0.8
+        },
+        {
+          "id": "s2-06",
+          "op": "claim",
+          "scope": "global",
+          "subject": "Ostrey estate",
+          "predicate": "market",
+          "value": "Odderly fair",
+          "authority": "learned",
+          "confidence": 0.8
+        },
+        {
+          "id": "s2-07",
+          "op": "claim",
+          "scope": "project:1",
+          "subject": "Ostrey estate",
+          "predicate": "market",
+          "value": "Cranbeck fair",
+          "authority": "operator",
+          "confidence": 1.0
+        },
+        {
+          "id": "s2-08",
+          "op": "claim",
+          "scope": "project:2",
+          "subject": "Yarrowmede estate",
+          "predicate": "market",
+          "value": "Ilbury fair",
+          "authority": "operator",
+          "confidence": 1.0
+        },
+        {
+          "id": "s2-09",
+          "op": "claim",
+          "scope": "global",
+          "subject": "Sorbec yard",
+          "predicate": "holding",
+          "value": "Naverly estate",
+          "authority": "external",
+          "confidence": 0.7
+        },
+        {
+          "id": "s2-10",
+          "op": "claim",
+          "scope": "project:1",
+          "subject": "Sorbec yard",
+          "predicate": "holding",
+          "value": "Havermast estate",
+          "authority": "operator",
+          "confidence": 1.0
+        }
+      ],
+      "expected_counts": {
+        "claims": 10,
+        "tombstones": 0
+      }
+    },
+    {
+      "id": "lookalike",
+      "projects": [
+        1
+      ],
+      "padding_claims": 0,
+      "records": [
+        {
+          "id": "s3-01",
+          "op": "claim",
+          "scope": "project:1",
+          "subject": "Quillet hive",
+          "predicate": "apiary",
+          "value": "Dornhale yard",
+          "authority": "operator",
+          "confidence": 1.0
+        },
+        {
+          "id": "s3-02",
+          "op": "claim",
+          "scope": "project:1",
+          "subject": "Quillet hive 2",
+          "predicate": "apiary",
+          "value": "Sorbec yard",
+          "authority": "operator",
+          "confidence": 1.0
+        },
+        {
+          "id": "s3-03",
+          "op": "claim",
+          "scope": "project:1",
+          "subject": "Quillethive",
+          "predicate": "apiary",
+          "value": "Havermast yard",
+          "authority": "operator",
+          "confidence": 1.0
+        },
+        {
+          "id": "s3-04",
+          "op": "claim",
+          "scope": "project:1",
+          "subject": "Dornhale yard",
+          "predicate": "holding",
+          "value": "Ashperry estate",
+          "authority": "operator",
+          "confidence": 1.0
+        },
+        {
+          "id": "s3-05",
+          "op": "claim",
+          "scope": "project:1",
+          "subject": "Sorbec yard",
+          "predicate": "holding",
+          "value": "Oxbend estate",
+          "authority": "operator",
+          "confidence": 1.0
+        },
+        {
+          "id": "s3-06",
+          "op": "claim",
+          "scope": "project:1",
+          "subject": "Havermast yard",
+          "predicate": "holding",
+          "value": "Ilbury estate",
+          "authority": "operator",
+          "confidence": 1.0
+        },
+        {
+          "id": "s3-07",
+          "op": "claim",
+          "scope": "project:1",
+          "subject": "Ashperry estate",
+          "predicate": "market",
+          "value": "Vantrey fair",
+          "authority": "operator",
+          "confidence": 1.0
+        },
+        {
+          "id": "s3-08",
+          "op": "claim",
+          "scope": "global",
+          "subject": {
+            "spelling": "nfkc_confusable",
+            "base": "Quillet hive"
+          },
+          "predicate": "season",
+          "value": "Linden gold",
+          "authority": "learned",
+          "confidence": 0.8,
+          "screened_expectation": "clear"
+        },
+        {
+          "id": "s3-09",
+          "op": "claim",
+          "scope": "global",
+          "subject": {
+            "spelling": "homoglyph",
+            "base": "Quillet hive"
+          },
+          "predicate": "season",
+          "value": "Hawkbit dark",
+          "authority": "learned",
+          "confidence": 0.8,
+          "screened_expectation": "clear"
+        }
+      ],
+      "expected_counts": {
+        "claims": 9,
+        "tombstones": 0
+      }
+    },
+    {
+      "id": "alias",
+      "projects": [
+        1
+      ],
+      "padding_claims": 0,
+      "records": [
+        {
+          "id": "s4-01",
+          "op": "claim",
+          "scope": "project:1",
+          "subject": "Perrivale hillmost crock",
+          "predicate": "apiary",
+          "value": "Ostrey yard",
+          "authority": "operator",
+          "confidence": 1.0
+        },
+        {
+          "id": "s4-02",
+          "op": "claim",
+          "scope": "project:1",
+          "subject": "Ostrey yard",
+          "predicate": "holding",
+          "value": "Immerly estate",
+          "authority": "operator",
+          "confidence": 1.0
+        },
+        {
+          "id": "s4-03",
+          "op": "claim",
+          "scope": "project:1",
+          "subject": "Immerly estate",
+          "predicate": "market",
+          "value": "Pellamy fair",
+          "authority": "operator",
+          "confidence": 1.0
+        },
+        {
+          "id": "s4-04",
+          "op": "claim",
+          "scope": "project:1",
+          "subject": "Naverly Comb4",
+          "predicate": "apiary",
+          "value": "Bracklow yard",
+          "authority": "operator",
+          "confidence": 1.0
+        },
+        {
+          "id": "s4-05",
+          "op": "claim",
+          "scope": "project:1",
+          "subject": "Bracklow yard",
+          "predicate": "holding",
+          "value": "Cranbeck estate",
+          "authority": "operator",
+          "confidence": 1.0
+        },
+        {
+          "id": "s4-06",
+          "op": "claim",
+          "scope": "project:1",
+          "subject": "Grendish southmost yard",
+          "predicate": "holding",
+          "value": "Cranbeck estate",
+          "authority": "operator",
+          "confidence": 1.0
+        },
+        {
+          "id": "s4-07",
+          "op": "claim",
+          "scope": "project:1",
+          "subject": "Grendish southmost fair",
+          "predicate": "overseer",
+          "value": "Wexholt bailiff",
+          "authority": "operator",
+          "confidence": 1.0
+        },
+        {
+          "id": "s4-08",
+          "op": "claim",
+          "scope": "project:1",
+          "subject": "Tibbeck Hank9",
+          "predicate": "apiary",
+          "value": "Bracklow yard",
+          "authority": "operator",
+          "confidence": 1.0
+        },
+        {
+          "id": "s4-09",
+          "op": "claim",
+          "scope": "project:1",
+          "subject": "Ulvern Hank9",
+          "predicate": "apiary",
+          "value": "Ostrey yard",
+          "authority": "operator",
+          "confidence": 1.0
+        },
+        {
+          "id": "s4-10",
+          "op": "claim",
+          "scope": "project:1",
+          "subject": "Threnly hive",
+          "predicate": "apiary",
+          "value": "Ostrey yard",
+          "authority": "operator",
+          "confidence": 1.0
+        }
+      ],
+      "expected_counts": {
+        "claims": 10,
+        "tombstones": 0
+      }
+    },
+    {
+      "id": "hubs",
+      "projects": [
+        1
+      ],
+      "padding_claims": 0,
+      "records": [
+        {
+          "id": "s5-a01",
+          "op": "claim",
+          "scope": "project:1",
+          "subject": "Hubyard01 yard",
+          "predicate": "holding",
+          "value": "Ilbury estate",
+          "authority": "operator",
+          "confidence": 1.0
+        },
+        {
+          "id": "s5-a02",
+          "op": "claim",
+          "scope": "project:1",
+          "subject": "Hubyard02 yard",
+          "predicate": "holding",
+          "value": "Ilbury estate",
+          "authority": "operator",
+          "confidence": 1.0
+        },
+        {
+          "id": "s5-a03",
+          "op": "claim",
+          "scope": "project:1",
+          "subject": "Hubyard03 yard",
+          "predicate": "holding",
+          "value": "Ilbury estate",
+          "authority": "operator",
+          "confidence": 1.0
+        },
+        {
+          "id": "s5-a04",
+          "op": "claim",
+          "scope": "project:1",
+          "subject": "Hubyard04 yard",
+          "predicate": "holding",
+          "value": "Ilbury estate",
+          "authority": "operator",
+          "confidence": 1.0
+        },
+        {
+          "id": "s5-a05",
+          "op": "claim",
+          "scope": "project:1",
+          "subject": "Hubyard05 yard",
+          "predicate": "holding",
+          "value": "Ilbury estate",
+          "authority": "operator",
+          "confidence": 1.0
+        },
+        {
+          "id": "s5-a06",
+          "op": "claim",
+          "scope": "project:1",
+          "subject": "Hubyard06 yard",
+          "predicate": "holding",
+          "value": "Ilbury estate",
+          "authority": "operator",
+          "confidence": 1.0
+        },
+        {
+          "id": "s5-a07",
+          "op": "claim",
+          "scope": "project:1",
+          "subject": "Hubyard07 yard",
+          "predicate": "holding",
+          "value": "Ilbury estate",
+          "authority": "operator",
+          "confidence": 1.0
+        },
+        {
+          "id": "s5-a08",
+          "op": "claim",
+          "scope": "project:1",
+          "subject": "Hubyard08 yard",
+          "predicate": "holding",
+          "value": "Ilbury estate",
+          "authority": "operator",
+          "confidence": 1.0
+        },
+        {
+          "id": "s5-a09",
+          "op": "claim",
+          "scope": "project:1",
+          "subject": "Hubyard09 yard",
+          "predicate": "holding",
+          "value": "Ilbury estate",
+          "authority": "operator",
+          "confidence": 1.0
+        },
+        {
+          "id": "s5-b01",
+          "op": "claim",
+          "scope": "project:1",
+          "subject": "Hubest01 estate",
+          "predicate": "market",
+          "value": "Oxbend fair",
+          "authority": "operator",
+          "confidence": 1.0
+        },
+        {
+          "id": "s5-b02",
+          "op": "claim",
+          "scope": "project:1",
+          "subject": "Hubest02 estate",
+          "predicate": "market",
+          "value": "Oxbend fair",
+          "authority": "operator",
+          "confidence": 1.0
+        },
+        {
+          "id": "s5-b03",
+          "op": "claim",
+          "scope": "project:1",
+          "subject": "Hubest03 estate",
+          "predicate": "market",
+          "value": "Oxbend fair",
+          "authority": "operator",
+          "confidence": 1.0
+        },
+        {
+          "id": "s5-b04",
+          "op": "claim",
+          "scope": "project:1",
+          "subject": "Hubest04 estate",
+          "predicate": "market",
+          "value": "Oxbend fair",
+          "authority": "operator",
+          "confidence": 1.0
+        },
+        {
+          "id": "s5-b05",
+          "op": "claim",
+          "scope": "project:1",
+          "subject": "Hubest05 estate",
+          "predicate": "market",
+          "value": "Oxbend fair",
+          "authority": "operator",
+          "confidence": 1.0
+        },
+        {
+          "id": "s5-b06",
+          "op": "claim",
+          "scope": "project:1",
+          "subject": "Hubest06 estate",
+          "predicate": "market",
+          "value": "Oxbend fair",
+          "authority": "operator",
+          "confidence": 1.0
+        },
+        {
+          "id": "s5-b07",
+          "op": "claim",
+          "scope": "project:1",
+          "subject": "Hubest07 estate",
+          "predicate": "market",
+          "value": "Oxbend fair",
+          "authority": "operator",
+          "confidence": 1.0
+        },
+        {
+          "id": "s5-b08",
+          "op": "claim",
+          "scope": "project:1",
+          "subject": "Hubest08 estate",
+          "predicate": "market",
+          "value": "Oxbend fair",
+          "authority": "operator",
+          "confidence": 1.0
+        },
+        {
+          "id": "s5-b09",
+          "op": "claim",
+          "scope": "project:1",
+          "subject": "Hubest09 estate",
+          "predicate": "market",
+          "value": "Oxbend fair",
+          "authority": "operator",
+          "confidence": 1.0
+        },
+        {
+          "id": "s5-b10",
+          "op": "claim",
+          "scope": "project:1",
+          "subject": "Hubest10 estate",
+          "predicate": "market",
+          "value": "Oxbend fair",
+          "authority": "operator",
+          "confidence": 1.0
+        },
+        {
+          "id": "s5-b11",
+          "op": "claim",
+          "scope": "project:1",
+          "subject": "Hubest11 estate",
+          "predicate": "market",
+          "value": "Oxbend fair",
+          "authority": "operator",
+          "confidence": 1.0
+        },
+        {
+          "id": "s5-b12",
+          "op": "claim",
+          "scope": "project:1",
+          "subject": "Hubest12 estate",
+          "predicate": "market",
+          "value": "Oxbend fair",
+          "authority": "operator",
+          "confidence": 1.0
+        },
+        {
+          "id": "s5-b13",
+          "op": "claim",
+          "scope": "project:1",
+          "subject": "Hubest13 estate",
+          "predicate": "market",
+          "value": "Oxbend fair",
+          "authority": "operator",
+          "confidence": 1.0
+        },
+        {
+          "id": "s5-b14",
+          "op": "claim",
+          "scope": "project:1",
+          "subject": "Hubest14 estate",
+          "predicate": "market",
+          "value": "Oxbend fair",
+          "authority": "operator",
+          "confidence": 1.0
+        },
+        {
+          "id": "s5-b15",
+          "op": "claim",
+          "scope": "project:1",
+          "subject": "Hubest15 estate",
+          "predicate": "market",
+          "value": "Oxbend fair",
+          "authority": "operator",
+          "confidence": 1.0
+        },
+        {
+          "id": "s5-b16",
+          "op": "claim",
+          "scope": "project:1",
+          "subject": "Hubest16 estate",
+          "predicate": "market",
+          "value": "Oxbend fair",
+          "authority": "operator",
+          "confidence": 1.0
+        },
+        {
+          "id": "s5-b17",
+          "op": "claim",
+          "scope": "project:1",
+          "subject": "Hubest17 estate",
+          "predicate": "market",
+          "value": "Oxbend fair",
+          "authority": "operator",
+          "confidence": 1.0
+        },
+        {
+          "id": "s5-c01",
+          "op": "claim",
+          "scope": "project:1",
+          "subject": "Hubfair01 fair",
+          "predicate": "overseer",
+          "value": "Pellamy bailiff",
+          "authority": "operator",
+          "confidence": 1.0
+        },
+        {
+          "id": "s5-c02",
+          "op": "claim",
+          "scope": "project:1",
+          "subject": "Hubfair02 fair",
+          "predicate": "overseer",
+          "value": "Pellamy bailiff",
+          "authority": "operator",
+          "confidence": 1.0
+        },
+        {
+          "id": "s5-c03",
+          "op": "claim",
+          "scope": "project:1",
+          "subject": "Hubfair03 fair",
+          "predicate": "overseer",
+          "value": "Pellamy bailiff",
+          "authority": "operator",
+          "confidence": 1.0
+        },
+        {
+          "id": "s5-c04",
+          "op": "claim",
+          "scope": "project:1",
+          "subject": "Hubfair04 fair",
+          "predicate": "overseer",
+          "value": "Pellamy bailiff",
+          "authority": "operator",
+          "confidence": 1.0
+        },
+        {
+          "id": "s5-c05",
+          "op": "claim",
+          "scope": "project:1",
+          "subject": "Hubfair05 fair",
+          "predicate": "overseer",
+          "value": "Pellamy bailiff",
+          "authority": "operator",
+          "confidence": 1.0
+        },
+        {
+          "id": "s5-c06",
+          "op": "claim",
+          "scope": "project:1",
+          "subject": "Hubfair06 fair",
+          "predicate": "overseer",
+          "value": "Pellamy bailiff",
+          "authority": "operator",
+          "confidence": 1.0
+        },
+        {
+          "id": "s5-c07",
+          "op": "claim",
+          "scope": "project:1",
+          "subject": "Hubfair07 fair",
+          "predicate": "overseer",
+          "value": "Pellamy bailiff",
+          "authority": "operator",
+          "confidence": 1.0
+        },
+        {
+          "id": "s5-c08",
+          "op": "claim",
+          "scope": "project:1",
+          "subject": "Hubfair08 fair",
+          "predicate": "overseer",
+          "value": "Pellamy bailiff",
+          "authority": "operator",
+          "confidence": 1.0
+        },
+        {
+          "id": "s5-c09",
+          "op": "claim",
+          "scope": "project:1",
+          "subject": "Hubfair09 fair",
+          "predicate": "overseer",
+          "value": "Pellamy bailiff",
+          "authority": "operator",
+          "confidence": 1.0
+        },
+        {
+          "id": "s5-c10",
+          "op": "claim",
+          "scope": "project:1",
+          "subject": "Hubfair10 fair",
+          "predicate": "overseer",
+          "value": "Pellamy bailiff",
+          "authority": "operator",
+          "confidence": 1.0
+        },
+        {
+          "id": "s5-c11",
+          "op": "claim",
+          "scope": "project:1",
+          "subject": "Hubfair11 fair",
+          "predicate": "overseer",
+          "value": "Pellamy bailiff",
+          "authority": "operator",
+          "confidence": 1.0
+        },
+        {
+          "id": "s5-c12",
+          "op": "claim",
+          "scope": "project:1",
+          "subject": "Hubfair12 fair",
+          "predicate": "overseer",
+          "value": "Pellamy bailiff",
+          "authority": "operator",
+          "confidence": 1.0
+        },
+        {
+          "id": "s5-c13",
+          "op": "claim",
+          "scope": "project:1",
+          "subject": "Hubfair13 fair",
+          "predicate": "overseer",
+          "value": "Pellamy bailiff",
+          "authority": "operator",
+          "confidence": 1.0
+        },
+        {
+          "id": "s5-c14",
+          "op": "claim",
+          "scope": "project:1",
+          "subject": "Hubfair14 fair",
+          "predicate": "overseer",
+          "value": "Pellamy bailiff",
+          "authority": "operator",
+          "confidence": 1.0
+        },
+        {
+          "id": "s5-c15",
+          "op": "claim",
+          "scope": "project:1",
+          "subject": "Hubfair15 fair",
+          "predicate": "overseer",
+          "value": "Pellamy bailiff",
+          "authority": "operator",
+          "confidence": 1.0
+        },
+        {
+          "id": "s5-c16",
+          "op": "claim",
+          "scope": "project:1",
+          "subject": "Hubfair16 fair",
+          "predicate": "overseer",
+          "value": "Pellamy bailiff",
+          "authority": "operator",
+          "confidence": 1.0
+        },
+        {
+          "id": "s5-c17",
+          "op": "claim",
+          "scope": "project:1",
+          "subject": "Hubfair17 fair",
+          "predicate": "overseer",
+          "value": "Pellamy bailiff",
+          "authority": "operator",
+          "confidence": 1.0
+        },
+        {
+          "id": "s5-c18",
+          "op": "claim",
+          "scope": "project:1",
+          "subject": "Hubfair18 fair",
+          "predicate": "overseer",
+          "value": "Pellamy bailiff",
+          "authority": "operator",
+          "confidence": 1.0
+        },
+        {
+          "id": "s5-c19",
+          "op": "claim",
+          "scope": "project:1",
+          "subject": "Hubfair19 fair",
+          "predicate": "overseer",
+          "value": "Pellamy bailiff",
+          "authority": "operator",
+          "confidence": 1.0
+        },
+        {
+          "id": "s5-c20",
+          "op": "claim",
+          "scope": "project:1",
+          "subject": "Hubfair20 fair",
+          "predicate": "overseer",
+          "value": "Pellamy bailiff",
+          "authority": "operator",
+          "confidence": 1.0
+        },
+        {
+          "id": "s5-c21",
+          "op": "claim",
+          "scope": "project:1",
+          "subject": "Hubfair21 fair",
+          "predicate": "overseer",
+          "value": "Pellamy bailiff",
+          "authority": "operator",
+          "confidence": 1.0
+        },
+        {
+          "id": "s5-c22",
+          "op": "claim",
+          "scope": "project:1",
+          "subject": "Hubfair22 fair",
+          "predicate": "overseer",
+          "value": "Pellamy bailiff",
+          "authority": "operator",
+          "confidence": 1.0
+        },
+        {
+          "id": "s5-c23",
+          "op": "claim",
+          "scope": "project:1",
+          "subject": "Hubfair23 fair",
+          "predicate": "overseer",
+          "value": "Pellamy bailiff",
+          "authority": "operator",
+          "confidence": 1.0
+        },
+        {
+          "id": "s5-c24",
+          "op": "claim",
+          "scope": "project:1",
+          "subject": "Hubfair24 fair",
+          "predicate": "overseer",
+          "value": "Pellamy bailiff",
+          "authority": "operator",
+          "confidence": 1.0
+        },
+        {
+          "id": "s5-c25",
+          "op": "claim",
+          "scope": "project:1",
+          "subject": "Hubfair25 fair",
+          "predicate": "overseer",
+          "value": "Pellamy bailiff",
+          "authority": "operator",
+          "confidence": 1.0
+        },
+        {
+          "id": "s5-c26",
+          "op": "claim",
+          "scope": "project:1",
+          "subject": "Hubfair26 fair",
+          "predicate": "overseer",
+          "value": "Pellamy bailiff",
+          "authority": "operator",
+          "confidence": 1.0
+        },
+        {
+          "id": "s5-c27",
+          "op": "claim",
+          "scope": "project:1",
+          "subject": "Hubfair27 fair",
+          "predicate": "overseer",
+          "value": "Pellamy bailiff",
+          "authority": "operator",
+          "confidence": 1.0
+        },
+        {
+          "id": "s5-c28",
+          "op": "claim",
+          "scope": "project:1",
+          "subject": "Hubfair28 fair",
+          "predicate": "overseer",
+          "value": "Pellamy bailiff",
+          "authority": "operator",
+          "confidence": 1.0
+        },
+        {
+          "id": "s5-c29",
+          "op": "claim",
+          "scope": "project:1",
+          "subject": "Hubfair29 fair",
+          "predicate": "overseer",
+          "value": "Pellamy bailiff",
+          "authority": "operator",
+          "confidence": 1.0
+        },
+        {
+          "id": "s5-c30",
+          "op": "claim",
+          "scope": "project:1",
+          "subject": "Hubfair30 fair",
+          "predicate": "overseer",
+          "value": "Pellamy bailiff",
+          "authority": "operator",
+          "confidence": 1.0
+        },
+        {
+          "id": "s5-c31",
+          "op": "claim",
+          "scope": "project:1",
+          "subject": "Hubfair31 fair",
+          "predicate": "overseer",
+          "value": "Pellamy bailiff",
+          "authority": "operator",
+          "confidence": 1.0
+        },
+        {
+          "id": "s5-c32",
+          "op": "claim",
+          "scope": "project:1",
+          "subject": "Hubfair32 fair",
+          "predicate": "overseer",
+          "value": "Pellamy bailiff",
+          "authority": "operator",
+          "confidence": 1.0
+        },
+        {
+          "id": "s5-c33",
+          "op": "claim",
+          "scope": "project:1",
+          "subject": "Hubfair33 fair",
+          "predicate": "overseer",
+          "value": "Pellamy bailiff",
+          "authority": "operator",
+          "confidence": 1.0
+        },
+        {
+          "id": "s5-c34",
+          "op": "claim",
+          "scope": "project:1",
+          "subject": "Hubfair34 fair",
+          "predicate": "overseer",
+          "value": "Pellamy bailiff",
+          "authority": "operator",
+          "confidence": 1.0
+        },
+        {
+          "id": "s5-c35",
+          "op": "claim",
+          "scope": "project:1",
+          "subject": "Hubfair35 fair",
+          "predicate": "overseer",
+          "value": "Pellamy bailiff",
+          "authority": "operator",
+          "confidence": 1.0
+        },
+        {
+          "id": "s5-c36",
+          "op": "claim",
+          "scope": "project:1",
+          "subject": "Hubfair36 fair",
+          "predicate": "overseer",
+          "value": "Pellamy bailiff",
+          "authority": "operator",
+          "confidence": 1.0
+        },
+        {
+          "id": "s5-c37",
+          "op": "claim",
+          "scope": "project:1",
+          "subject": "Hubfair37 fair",
+          "predicate": "overseer",
+          "value": "Pellamy bailiff",
+          "authority": "operator",
+          "confidence": 1.0
+        },
+        {
+          "id": "s5-c38",
+          "op": "claim",
+          "scope": "project:1",
+          "subject": "Hubfair38 fair",
+          "predicate": "overseer",
+          "value": "Pellamy bailiff",
+          "authority": "operator",
+          "confidence": 1.0
+        },
+        {
+          "id": "s5-r1",
+          "op": "claim",
+          "scope": "project:1",
+          "subject": "Sorbec fair",
+          "predicate": "overseer",
+          "value": "Pellamy bailiff",
+          "authority": "operator",
+          "confidence": 1.0
+        },
+        {
+          "id": "s5-r2",
+          "op": "claim",
+          "scope": "project:1",
+          "subject": "Cranbeck hive",
+          "predicate": "apiary",
+          "value": "Sorbec fair",
+          "authority": "operator",
+          "confidence": 1.0
+        },
+        {
+          "id": "s5-o1",
+          "op": "claim",
+          "scope": "project:1",
+          "subject": "Odderly fair",
+          "predicate": "overseer",
+          "value": "Pellamy bailiff",
+          "authority": "operator",
+          "confidence": 1.0
+        }
+      ],
+      "expected_counts": {
+        "claims": 67,
+        "tombstones": 0
+      }
+    },
+    {
+      "id": "temporal",
+      "projects": [
+        1
+      ],
+      "padding_claims": 0,
+      "records": [
+        {
+          "id": "s6-01",
+          "op": "claim",
+          "scope": "project:1",
+          "subject": "Wexholt hive",
+          "predicate": "apiary",
+          "value": "Dornhale yard",
+          "authority": "operator",
+          "confidence": 1.0
+        },
+        {
+          "id": "s6-02",
+          "op": "claim",
+          "scope": "project:1",
+          "subject": "Dornhale yard",
+          "predicate": "holding",
+          "value": "Ashperry estate",
+          "authority": "operator",
+          "confidence": 1.0
+        },
+        {
+          "op": "clock",
+          "advance_seconds": 300
+        },
+        {
+          "id": "s6-03",
+          "op": "claim",
+          "scope": "project:1",
+          "subject": "Wexholt hive",
+          "predicate": "apiary",
+          "value": "Sorbec yard",
+          "authority": "operator",
+          "confidence": 1.0
+        },
+        {
+          "id": "s6-04",
+          "op": "claim",
+          "scope": "project:1",
+          "subject": "Sorbec yard",
+          "predicate": "holding",
+          "value": "Oxbend estate",
+          "authority": "operator",
+          "confidence": 1.0
+        },
+        {
+          "id": "s6-05",
+          "op": "claim",
+          "scope": "project:1",
+          "subject": "Ilbury hive",
+          "predicate": "apiary",
+          "value": "Havermast yard",
+          "authority": "operator",
+          "confidence": 1.0
+        },
+        {
+          "id": "s6-06",
+          "op": "claim",
+          "scope": "project:1",
+          "subject": "Havermast yard",
+          "predicate": "holding",
+          "value": "Ilbury estate",
+          "authority": "operator",
+          "confidence": 1.0
+        },
+        {
+          "id": "s6-f1",
+          "op": "forget",
+          "scope": "project:1",
+          "subject": "Ilbury hive",
+          "predicate": "apiary"
+        },
+        {
+          "id": "s6-07",
+          "op": "claim",
+          "scope": "project:1",
+          "subject": "Ostrey hive",
+          "predicate": "apiary",
+          "value": "Naverly yard",
+          "authority": "operator",
+          "confidence": 1.0
+        },
+        {
+          "id": "s6-08",
+          "op": "claim",
+          "scope": "project:1",
+          "subject": "Naverly yard",
+          "predicate": "holding",
+          "value": "Threnly estate",
+          "authority": "operator",
+          "confidence": 1.0
+        },
+        {
+          "id": "s6-e1",
+          "op": "erase",
+          "scope": "project:1",
+          "subject": "Naverly yard",
+          "predicate": "holding"
+        },
+        {
+          "id": "s6-09",
+          "op": "claim",
+          "scope": "project:1",
+          "subject": "Cranbeck hive",
+          "predicate": "apiary",
+          "value": "Bracklow yard",
+          "authority": "operator",
+          "confidence": 1.0
+        },
+        {
+          "id": "s6-10",
+          "op": "claim",
+          "scope": "project:1",
+          "subject": "Bracklow yard",
+          "predicate": "holding",
+          "value": "Immerly estate",
+          "authority": "operator",
+          "confidence": 1.0
+        },
+        {
+          "id": "s6-11",
+          "op": "claim",
+          "scope": "project:1",
+          "subject": "Immerly estate",
+          "predicate": "market",
+          "value": "Pellamy fair",
+          "authority": "operator",
+          "confidence": 1.0
+        },
+        {
+          "id": "s6-e2",
+          "op": "erase",
+          "scope": "project:1",
+          "subject": "Immerly estate",
+          "predicate": "market"
+        },
+        {
+          "id": "s6-g01a",
+          "op": "claim",
+          "scope": "project:1",
+          "subject": "Fillard01 hive",
+          "predicate": "grade",
+          "value": "Amber01 lot",
+          "authority": "operator",
+          "confidence": 1.0
+        },
+        {
+          "id": "s6-g01b",
+          "op": "claim",
+          "scope": "project:1",
+          "subject": "Fillard01 hive",
+          "predicate": "grade",
+          "value": "Umber01 lot",
+          "authority": "operator",
+          "confidence": 1.0
+        },
+        {
+          "id": "s6-g02a",
+          "op": "claim",
+          "scope": "project:1",
+          "subject": "Fillard02 hive",
+          "predicate": "grade",
+          "value": "Amber02 lot",
+          "authority": "operator",
+          "confidence": 1.0
+        },
+        {
+          "id": "s6-g02b",
+          "op": "claim",
+          "scope": "project:1",
+          "subject": "Fillard02 hive",
+          "predicate": "grade",
+          "value": "Umber02 lot",
+          "authority": "operator",
+          "confidence": 1.0
+        },
+        {
+          "id": "s6-g03a",
+          "op": "claim",
+          "scope": "project:1",
+          "subject": "Fillard03 hive",
+          "predicate": "grade",
+          "value": "Amber03 lot",
+          "authority": "operator",
+          "confidence": 1.0
+        },
+        {
+          "id": "s6-g03b",
+          "op": "claim",
+          "scope": "project:1",
+          "subject": "Fillard03 hive",
+          "predicate": "grade",
+          "value": "Umber03 lot",
+          "authority": "operator",
+          "confidence": 1.0
+        },
+        {
+          "id": "s6-g04a",
+          "op": "claim",
+          "scope": "project:1",
+          "subject": "Fillard04 hive",
+          "predicate": "grade",
+          "value": "Amber04 lot",
+          "authority": "operator",
+          "confidence": 1.0
+        },
+        {
+          "id": "s6-g04b",
+          "op": "claim",
+          "scope": "project:1",
+          "subject": "Fillard04 hive",
+          "predicate": "grade",
+          "value": "Umber04 lot",
+          "authority": "operator",
+          "confidence": 1.0
+        },
+        {
+          "id": "s6-g05a",
+          "op": "claim",
+          "scope": "project:1",
+          "subject": "Fillard05 hive",
+          "predicate": "grade",
+          "value": "Amber05 lot",
+          "authority": "operator",
+          "confidence": 1.0
+        },
+        {
+          "id": "s6-g05b",
+          "op": "claim",
+          "scope": "project:1",
+          "subject": "Fillard05 hive",
+          "predicate": "grade",
+          "value": "Umber05 lot",
+          "authority": "operator",
+          "confidence": 1.0
+        },
+        {
+          "id": "s6-g06a",
+          "op": "claim",
+          "scope": "project:1",
+          "subject": "Fillard06 hive",
+          "predicate": "grade",
+          "value": "Amber06 lot",
+          "authority": "operator",
+          "confidence": 1.0
+        },
+        {
+          "id": "s6-g06b",
+          "op": "claim",
+          "scope": "project:1",
+          "subject": "Fillard06 hive",
+          "predicate": "grade",
+          "value": "Umber06 lot",
+          "authority": "operator",
+          "confidence": 1.0
+        },
+        {
+          "id": "s6-g07a",
+          "op": "claim",
+          "scope": "project:1",
+          "subject": "Fillard07 hive",
+          "predicate": "grade",
+          "value": "Amber07 lot",
+          "authority": "operator",
+          "confidence": 1.0
+        },
+        {
+          "id": "s6-g07b",
+          "op": "claim",
+          "scope": "project:1",
+          "subject": "Fillard07 hive",
+          "predicate": "grade",
+          "value": "Umber07 lot",
+          "authority": "operator",
+          "confidence": 1.0
+        },
+        {
+          "id": "s6-g08a",
+          "op": "claim",
+          "scope": "project:1",
+          "subject": "Fillard08 hive",
+          "predicate": "grade",
+          "value": "Amber08 lot",
+          "authority": "operator",
+          "confidence": 1.0
+        },
+        {
+          "id": "s6-g08b",
+          "op": "claim",
+          "scope": "project:1",
+          "subject": "Fillard08 hive",
+          "predicate": "grade",
+          "value": "Umber08 lot",
+          "authority": "operator",
+          "confidence": 1.0
+        },
+        {
+          "id": "s6-g09a",
+          "op": "claim",
+          "scope": "project:1",
+          "subject": "Fillard09 hive",
+          "predicate": "grade",
+          "value": "Amber09 lot",
+          "authority": "operator",
+          "confidence": 1.0
+        },
+        {
+          "id": "s6-g09b",
+          "op": "claim",
+          "scope": "project:1",
+          "subject": "Fillard09 hive",
+          "predicate": "grade",
+          "value": "Umber09 lot",
+          "authority": "operator",
+          "confidence": 1.0
+        },
+        {
+          "id": "s6-g10a",
+          "op": "claim",
+          "scope": "project:1",
+          "subject": "Fillard10 hive",
+          "predicate": "grade",
+          "value": "Amber10 lot",
+          "authority": "operator",
+          "confidence": 1.0
+        },
+        {
+          "id": "s6-g10b",
+          "op": "claim",
+          "scope": "project:1",
+          "subject": "Fillard10 hive",
+          "predicate": "grade",
+          "value": "Umber10 lot",
+          "authority": "operator",
+          "confidence": 1.0
+        },
+        {
+          "id": "s6-g11a",
+          "op": "claim",
+          "scope": "project:1",
+          "subject": "Fillard11 hive",
+          "predicate": "grade",
+          "value": "Amber11 lot",
+          "authority": "operator",
+          "confidence": 1.0
+        },
+        {
+          "id": "s6-g11b",
+          "op": "claim",
+          "scope": "project:1",
+          "subject": "Fillard11 hive",
+          "predicate": "grade",
+          "value": "Umber11 lot",
+          "authority": "operator",
+          "confidence": 1.0
+        },
+        {
+          "id": "s6-g12a",
+          "op": "claim",
+          "scope": "project:1",
+          "subject": "Fillard12 hive",
+          "predicate": "grade",
+          "value": "Amber12 lot",
+          "authority": "operator",
+          "confidence": 1.0
+        },
+        {
+          "id": "s6-g12b",
+          "op": "claim",
+          "scope": "project:1",
+          "subject": "Fillard12 hive",
+          "predicate": "grade",
+          "value": "Umber12 lot",
+          "authority": "operator",
+          "confidence": 1.0
+        },
+        {
+          "id": "s6-g13a",
+          "op": "claim",
+          "scope": "project:1",
+          "subject": "Fillard13 hive",
+          "predicate": "grade",
+          "value": "Amber13 lot",
+          "authority": "operator",
+          "confidence": 1.0
+        },
+        {
+          "id": "s6-g13b",
+          "op": "claim",
+          "scope": "project:1",
+          "subject": "Fillard13 hive",
+          "predicate": "grade",
+          "value": "Umber13 lot",
+          "authority": "operator",
+          "confidence": 1.0
+        },
+        {
+          "id": "s6-g14a",
+          "op": "claim",
+          "scope": "project:1",
+          "subject": "Fillard14 hive",
+          "predicate": "grade",
+          "value": "Amber14 lot",
+          "authority": "operator",
+          "confidence": 1.0
+        },
+        {
+          "id": "s6-g14b",
+          "op": "claim",
+          "scope": "project:1",
+          "subject": "Fillard14 hive",
+          "predicate": "grade",
+          "value": "Umber14 lot",
+          "authority": "operator",
+          "confidence": 1.0
+        },
+        {
+          "id": "s6-g15a",
+          "op": "claim",
+          "scope": "project:1",
+          "subject": "Fillard15 hive",
+          "predicate": "grade",
+          "value": "Amber15 lot",
+          "authority": "operator",
+          "confidence": 1.0
+        },
+        {
+          "id": "s6-g15b",
+          "op": "claim",
+          "scope": "project:1",
+          "subject": "Fillard15 hive",
+          "predicate": "grade",
+          "value": "Umber15 lot",
+          "authority": "operator",
+          "confidence": 1.0
+        },
+        {
+          "id": "s6-g16a",
+          "op": "claim",
+          "scope": "project:1",
+          "subject": "Fillard16 hive",
+          "predicate": "grade",
+          "value": "Amber16 lot",
+          "authority": "operator",
+          "confidence": 1.0
+        },
+        {
+          "id": "s6-g16b",
+          "op": "claim",
+          "scope": "project:1",
+          "subject": "Fillard16 hive",
+          "predicate": "grade",
+          "value": "Umber16 lot",
+          "authority": "operator",
+          "confidence": 1.0
+        },
+        {
+          "id": "s6-g17a",
+          "op": "claim",
+          "scope": "project:1",
+          "subject": "Fillard17 hive",
+          "predicate": "grade",
+          "value": "Amber17 lot",
+          "authority": "operator",
+          "confidence": 1.0
+        },
+        {
+          "id": "s6-g17b",
+          "op": "claim",
+          "scope": "project:1",
+          "subject": "Fillard17 hive",
+          "predicate": "grade",
+          "value": "Umber17 lot",
+          "authority": "operator",
+          "confidence": 1.0
+        },
+        {
+          "id": "s6-g18a",
+          "op": "claim",
+          "scope": "project:1",
+          "subject": "Fillard18 hive",
+          "predicate": "grade",
+          "value": "Amber18 lot",
+          "authority": "operator",
+          "confidence": 1.0
+        },
+        {
+          "id": "s6-g18b",
+          "op": "claim",
+          "scope": "project:1",
+          "subject": "Fillard18 hive",
+          "predicate": "grade",
+          "value": "Umber18 lot",
+          "authority": "operator",
+          "confidence": 1.0
+        },
+        {
+          "id": "s6-g19a",
+          "op": "claim",
+          "scope": "project:1",
+          "subject": "Fillard19 hive",
+          "predicate": "grade",
+          "value": "Amber19 lot",
+          "authority": "operator",
+          "confidence": 1.0
+        },
+        {
+          "id": "s6-g19b",
+          "op": "claim",
+          "scope": "project:1",
+          "subject": "Fillard19 hive",
+          "predicate": "grade",
+          "value": "Umber19 lot",
+          "authority": "operator",
+          "confidence": 1.0
+        },
+        {
+          "id": "s6-g20a",
+          "op": "claim",
+          "scope": "project:1",
+          "subject": "Fillard20 hive",
+          "predicate": "grade",
+          "value": "Amber20 lot",
+          "authority": "operator",
+          "confidence": 1.0
+        },
+        {
+          "id": "s6-g20b",
+          "op": "claim",
+          "scope": "project:1",
+          "subject": "Fillard20 hive",
+          "predicate": "grade",
+          "value": "Umber20 lot",
+          "authority": "operator",
+          "confidence": 1.0
+        },
+        {
+          "id": "s6-g21a",
+          "op": "claim",
+          "scope": "project:1",
+          "subject": "Fillard21 hive",
+          "predicate": "grade",
+          "value": "Amber21 lot",
+          "authority": "operator",
+          "confidence": 1.0
+        },
+        {
+          "id": "s6-g21b",
+          "op": "claim",
+          "scope": "project:1",
+          "subject": "Fillard21 hive",
+          "predicate": "grade",
+          "value": "Umber21 lot",
+          "authority": "operator",
+          "confidence": 1.0
+        },
+        {
+          "id": "s6-g22a",
+          "op": "claim",
+          "scope": "project:1",
+          "subject": "Fillard22 hive",
+          "predicate": "grade",
+          "value": "Amber22 lot",
+          "authority": "operator",
+          "confidence": 1.0
+        },
+        {
+          "id": "s6-g22b",
+          "op": "claim",
+          "scope": "project:1",
+          "subject": "Fillard22 hive",
+          "predicate": "grade",
+          "value": "Umber22 lot",
+          "authority": "operator",
+          "confidence": 1.0
+        },
+        {
+          "id": "s6-g23a",
+          "op": "claim",
+          "scope": "project:1",
+          "subject": "Fillard23 hive",
+          "predicate": "grade",
+          "value": "Amber23 lot",
+          "authority": "operator",
+          "confidence": 1.0
+        },
+        {
+          "id": "s6-g23b",
+          "op": "claim",
+          "scope": "project:1",
+          "subject": "Fillard23 hive",
+          "predicate": "grade",
+          "value": "Umber23 lot",
+          "authority": "operator",
+          "confidence": 1.0
+        },
+        {
+          "id": "s6-g24a",
+          "op": "claim",
+          "scope": "project:1",
+          "subject": "Fillard24 hive",
+          "predicate": "grade",
+          "value": "Amber24 lot",
+          "authority": "operator",
+          "confidence": 1.0
+        },
+        {
+          "id": "s6-g24b",
+          "op": "claim",
+          "scope": "project:1",
+          "subject": "Fillard24 hive",
+          "predicate": "grade",
+          "value": "Umber24 lot",
+          "authority": "operator",
+          "confidence": 1.0
+        },
+        {
+          "id": "s6-g25a",
+          "op": "claim",
+          "scope": "project:1",
+          "subject": "Fillard25 hive",
+          "predicate": "grade",
+          "value": "Amber25 lot",
+          "authority": "operator",
+          "confidence": 1.0
+        },
+        {
+          "id": "s6-g25b",
+          "op": "claim",
+          "scope": "project:1",
+          "subject": "Fillard25 hive",
+          "predicate": "grade",
+          "value": "Umber25 lot",
+          "authority": "operator",
+          "confidence": 1.0
+        },
+        {
+          "id": "s6-g26a",
+          "op": "claim",
+          "scope": "project:1",
+          "subject": "Fillard26 hive",
+          "predicate": "grade",
+          "value": "Amber26 lot",
+          "authority": "operator",
+          "confidence": 1.0
+        },
+        {
+          "id": "s6-g26b",
+          "op": "claim",
+          "scope": "project:1",
+          "subject": "Fillard26 hive",
+          "predicate": "grade",
+          "value": "Umber26 lot",
+          "authority": "operator",
+          "confidence": 1.0
+        },
+        {
+          "id": "s6-g27a",
+          "op": "claim",
+          "scope": "project:1",
+          "subject": "Fillard27 hive",
+          "predicate": "grade",
+          "value": "Amber27 lot",
+          "authority": "operator",
+          "confidence": 1.0
+        },
+        {
+          "id": "s6-g27b",
+          "op": "claim",
+          "scope": "project:1",
+          "subject": "Fillard27 hive",
+          "predicate": "grade",
+          "value": "Umber27 lot",
+          "authority": "operator",
+          "confidence": 1.0
+        },
+        {
+          "id": "s6-g28a",
+          "op": "claim",
+          "scope": "project:1",
+          "subject": "Fillard28 hive",
+          "predicate": "grade",
+          "value": "Amber28 lot",
+          "authority": "operator",
+          "confidence": 1.0
+        },
+        {
+          "id": "s6-g28b",
+          "op": "claim",
+          "scope": "project:1",
+          "subject": "Fillard28 hive",
+          "predicate": "grade",
+          "value": "Umber28 lot",
+          "authority": "operator",
+          "confidence": 1.0
+        },
+        {
+          "id": "s6-g29a",
+          "op": "claim",
+          "scope": "project:1",
+          "subject": "Fillard29 hive",
+          "predicate": "grade",
+          "value": "Amber29 lot",
+          "authority": "operator",
+          "confidence": 1.0
+        },
+        {
+          "id": "s6-g29b",
+          "op": "claim",
+          "scope": "project:1",
+          "subject": "Fillard29 hive",
+          "predicate": "grade",
+          "value": "Umber29 lot",
+          "authority": "operator",
+          "confidence": 1.0
+        },
+        {
+          "id": "s6-g30a",
+          "op": "claim",
+          "scope": "project:1",
+          "subject": "Fillard30 hive",
+          "predicate": "grade",
+          "value": "Amber30 lot",
+          "authority": "operator",
+          "confidence": 1.0
+        },
+        {
+          "id": "s6-g30b",
+          "op": "claim",
+          "scope": "project:1",
+          "subject": "Fillard30 hive",
+          "predicate": "grade",
+          "value": "Umber30 lot",
+          "authority": "operator",
+          "confidence": 1.0
+        },
+        {
+          "id": "s6-g31a",
+          "op": "claim",
+          "scope": "project:1",
+          "subject": "Fillard31 hive",
+          "predicate": "grade",
+          "value": "Amber31 lot",
+          "authority": "operator",
+          "confidence": 1.0
+        },
+        {
+          "id": "s6-g31b",
+          "op": "claim",
+          "scope": "project:1",
+          "subject": "Fillard31 hive",
+          "predicate": "grade",
+          "value": "Umber31 lot",
+          "authority": "operator",
+          "confidence": 1.0
+        },
+        {
+          "id": "s6-g32a",
+          "op": "claim",
+          "scope": "project:1",
+          "subject": "Fillard32 hive",
+          "predicate": "grade",
+          "value": "Amber32 lot",
+          "authority": "operator",
+          "confidence": 1.0
+        },
+        {
+          "id": "s6-g32b",
+          "op": "claim",
+          "scope": "project:1",
+          "subject": "Fillard32 hive",
+          "predicate": "grade",
+          "value": "Umber32 lot",
+          "authority": "operator",
+          "confidence": 1.0
+        },
+        {
+          "id": "s6-g33a",
+          "op": "claim",
+          "scope": "project:1",
+          "subject": "Fillard33 hive",
+          "predicate": "grade",
+          "value": "Amber33 lot",
+          "authority": "operator",
+          "confidence": 1.0
+        },
+        {
+          "id": "s6-g33b",
+          "op": "claim",
+          "scope": "project:1",
+          "subject": "Fillard33 hive",
+          "predicate": "grade",
+          "value": "Umber33 lot",
+          "authority": "operator",
+          "confidence": 1.0
+        },
+        {
+          "id": "s6-g34a",
+          "op": "claim",
+          "scope": "project:1",
+          "subject": "Fillard34 hive",
+          "predicate": "grade",
+          "value": "Amber34 lot",
+          "authority": "operator",
+          "confidence": 1.0
+        },
+        {
+          "id": "s6-g34b",
+          "op": "claim",
+          "scope": "project:1",
+          "subject": "Fillard34 hive",
+          "predicate": "grade",
+          "value": "Umber34 lot",
+          "authority": "operator",
+          "confidence": 1.0
+        },
+        {
+          "id": "s6-g35a",
+          "op": "claim",
+          "scope": "project:1",
+          "subject": "Fillard35 hive",
+          "predicate": "grade",
+          "value": "Amber35 lot",
+          "authority": "operator",
+          "confidence": 1.0
+        },
+        {
+          "id": "s6-g35b",
+          "op": "claim",
+          "scope": "project:1",
+          "subject": "Fillard35 hive",
+          "predicate": "grade",
+          "value": "Umber35 lot",
+          "authority": "operator",
+          "confidence": 1.0
+        },
+        {
+          "id": "s6-g36a",
+          "op": "claim",
+          "scope": "project:1",
+          "subject": "Fillard36 hive",
+          "predicate": "grade",
+          "value": "Amber36 lot",
+          "authority": "operator",
+          "confidence": 1.0
+        },
+        {
+          "id": "s6-g36b",
+          "op": "claim",
+          "scope": "project:1",
+          "subject": "Fillard36 hive",
+          "predicate": "grade",
+          "value": "Umber36 lot",
+          "authority": "operator",
+          "confidence": 1.0
+        },
+        {
+          "id": "s6-g37a",
+          "op": "claim",
+          "scope": "project:1",
+          "subject": "Fillard37 hive",
+          "predicate": "grade",
+          "value": "Amber37 lot",
+          "authority": "operator",
+          "confidence": 1.0
+        },
+        {
+          "id": "s6-g37b",
+          "op": "claim",
+          "scope": "project:1",
+          "subject": "Fillard37 hive",
+          "predicate": "grade",
+          "value": "Umber37 lot",
+          "authority": "operator",
+          "confidence": 1.0
+        },
+        {
+          "id": "s6-g38a",
+          "op": "claim",
+          "scope": "project:1",
+          "subject": "Fillard38 hive",
+          "predicate": "grade",
+          "value": "Amber38 lot",
+          "authority": "operator",
+          "confidence": 1.0
+        },
+        {
+          "id": "s6-g38b",
+          "op": "claim",
+          "scope": "project:1",
+          "subject": "Fillard38 hive",
+          "predicate": "grade",
+          "value": "Umber38 lot",
+          "authority": "operator",
+          "confidence": 1.0
+        },
+        {
+          "id": "s6-g39a",
+          "op": "claim",
+          "scope": "project:1",
+          "subject": "Fillard39 hive",
+          "predicate": "grade",
+          "value": "Amber39 lot",
+          "authority": "operator",
+          "confidence": 1.0
+        },
+        {
+          "id": "s6-g39b",
+          "op": "claim",
+          "scope": "project:1",
+          "subject": "Fillard39 hive",
+          "predicate": "grade",
+          "value": "Umber39 lot",
+          "authority": "operator",
+          "confidence": 1.0
+        },
+        {
+          "id": "s6-g40a",
+          "op": "claim",
+          "scope": "project:1",
+          "subject": "Fillard40 hive",
+          "predicate": "grade",
+          "value": "Amber40 lot",
+          "authority": "operator",
+          "confidence": 1.0
+        },
+        {
+          "id": "s6-g40b",
+          "op": "claim",
+          "scope": "project:1",
+          "subject": "Fillard40 hive",
+          "predicate": "grade",
+          "value": "Umber40 lot",
+          "authority": "operator",
+          "confidence": 1.0
+        },
+        {
+          "id": "s6-s01",
+          "op": "claim",
+          "scope": "project:1",
+          "subject": "Fillard01 hive",
+          "predicate": "season",
+          "value": "Heath01 tier",
+          "authority": "operator",
+          "confidence": 1.0
+        },
+        {
+          "id": "s6-sf01",
+          "op": "forget",
+          "scope": "project:1",
+          "subject": "Fillard01 hive",
+          "predicate": "season"
+        },
+        {
+          "id": "s6-s02",
+          "op": "claim",
+          "scope": "project:1",
+          "subject": "Fillard02 hive",
+          "predicate": "season",
+          "value": "Heath02 tier",
+          "authority": "operator",
+          "confidence": 1.0
+        },
+        {
+          "id": "s6-sf02",
+          "op": "forget",
+          "scope": "project:1",
+          "subject": "Fillard02 hive",
+          "predicate": "season"
+        },
+        {
+          "id": "s6-s03",
+          "op": "claim",
+          "scope": "project:1",
+          "subject": "Fillard03 hive",
+          "predicate": "season",
+          "value": "Heath03 tier",
+          "authority": "operator",
+          "confidence": 1.0
+        },
+        {
+          "id": "s6-sf03",
+          "op": "forget",
+          "scope": "project:1",
+          "subject": "Fillard03 hive",
+          "predicate": "season"
+        },
+        {
+          "id": "s6-s04",
+          "op": "claim",
+          "scope": "project:1",
+          "subject": "Fillard04 hive",
+          "predicate": "season",
+          "value": "Heath04 tier",
+          "authority": "operator",
+          "confidence": 1.0
+        },
+        {
+          "id": "s6-sf04",
+          "op": "forget",
+          "scope": "project:1",
+          "subject": "Fillard04 hive",
+          "predicate": "season"
+        },
+        {
+          "id": "s6-s05",
+          "op": "claim",
+          "scope": "project:1",
+          "subject": "Fillard05 hive",
+          "predicate": "season",
+          "value": "Heath05 tier",
+          "authority": "operator",
+          "confidence": 1.0
+        },
+        {
+          "id": "s6-sf05",
+          "op": "forget",
+          "scope": "project:1",
+          "subject": "Fillard05 hive",
+          "predicate": "season"
+        },
+        {
+          "id": "s6-s06",
+          "op": "claim",
+          "scope": "project:1",
+          "subject": "Fillard06 hive",
+          "predicate": "season",
+          "value": "Heath06 tier",
+          "authority": "operator",
+          "confidence": 1.0
+        },
+        {
+          "id": "s6-sf06",
+          "op": "forget",
+          "scope": "project:1",
+          "subject": "Fillard06 hive",
+          "predicate": "season"
+        },
+        {
+          "id": "s6-s07",
+          "op": "claim",
+          "scope": "project:1",
+          "subject": "Fillard07 hive",
+          "predicate": "season",
+          "value": "Heath07 tier",
+          "authority": "operator",
+          "confidence": 1.0
+        },
+        {
+          "id": "s6-sf07",
+          "op": "forget",
+          "scope": "project:1",
+          "subject": "Fillard07 hive",
+          "predicate": "season"
+        },
+        {
+          "id": "s6-s08",
+          "op": "claim",
+          "scope": "project:1",
+          "subject": "Fillard08 hive",
+          "predicate": "season",
+          "value": "Heath08 tier",
+          "authority": "operator",
+          "confidence": 1.0
+        },
+        {
+          "id": "s6-sf08",
+          "op": "forget",
+          "scope": "project:1",
+          "subject": "Fillard08 hive",
+          "predicate": "season"
+        },
+        {
+          "id": "s6-s09",
+          "op": "claim",
+          "scope": "project:1",
+          "subject": "Fillard09 hive",
+          "predicate": "season",
+          "value": "Heath09 tier",
+          "authority": "operator",
+          "confidence": 1.0
+        },
+        {
+          "id": "s6-sf09",
+          "op": "forget",
+          "scope": "project:1",
+          "subject": "Fillard09 hive",
+          "predicate": "season"
+        },
+        {
+          "id": "s6-s10",
+          "op": "claim",
+          "scope": "project:1",
+          "subject": "Fillard10 hive",
+          "predicate": "season",
+          "value": "Heath10 tier",
+          "authority": "operator",
+          "confidence": 1.0
+        },
+        {
+          "id": "s6-sf10",
+          "op": "forget",
+          "scope": "project:1",
+          "subject": "Fillard10 hive",
+          "predicate": "season"
+        },
+        {
+          "id": "s6-x11",
+          "op": "claim",
+          "scope": "project:1",
+          "subject": "Fillard11 hive",
+          "predicate": "berth",
+          "value": "Stall11 nook",
+          "authority": "operator",
+          "confidence": 1.0
+        },
+        {
+          "id": "s6-xe11",
+          "op": "erase",
+          "scope": "project:1",
+          "subject": "Fillard11 hive",
+          "predicate": "berth"
+        },
+        {
+          "id": "s6-x12",
+          "op": "claim",
+          "scope": "project:1",
+          "subject": "Fillard12 hive",
+          "predicate": "berth",
+          "value": "Stall12 nook",
+          "authority": "operator",
+          "confidence": 1.0
+        },
+        {
+          "id": "s6-xe12",
+          "op": "erase",
+          "scope": "project:1",
+          "subject": "Fillard12 hive",
+          "predicate": "berth"
+        },
+        {
+          "id": "s6-x13",
+          "op": "claim",
+          "scope": "project:1",
+          "subject": "Fillard13 hive",
+          "predicate": "berth",
+          "value": "Stall13 nook",
+          "authority": "operator",
+          "confidence": 1.0
+        },
+        {
+          "id": "s6-xe13",
+          "op": "erase",
+          "scope": "project:1",
+          "subject": "Fillard13 hive",
+          "predicate": "berth"
+        },
+        {
+          "id": "s6-x14",
+          "op": "claim",
+          "scope": "project:1",
+          "subject": "Fillard14 hive",
+          "predicate": "berth",
+          "value": "Stall14 nook",
+          "authority": "operator",
+          "confidence": 1.0
+        },
+        {
+          "id": "s6-xe14",
+          "op": "erase",
+          "scope": "project:1",
+          "subject": "Fillard14 hive",
+          "predicate": "berth"
+        },
+        {
+          "id": "s6-x15",
+          "op": "claim",
+          "scope": "project:1",
+          "subject": "Fillard15 hive",
+          "predicate": "berth",
+          "value": "Stall15 nook",
+          "authority": "operator",
+          "confidence": 1.0
+        },
+        {
+          "id": "s6-xe15",
+          "op": "erase",
+          "scope": "project:1",
+          "subject": "Fillard15 hive",
+          "predicate": "berth"
+        }
+      ],
+      "expected_counts": {
+        "claims": 99,
+        "tombstones": 7
+      }
+    },
+    {
+      "id": "screens",
+      "projects": [
+        1
+      ],
+      "padding_claims": 0,
+      "records": [
+        {
+          "id": "s7-01",
+          "op": "claim",
+          "scope": "project:1",
+          "subject": "Immerly fair",
+          "predicate": "overseer",
+          "value": "Sorbec bailiff",
+          "authority": "operator",
+          "confidence": 1.0
+        },
+        {
+          "id": "s7-02",
+          "op": "claim",
+          "scope": "global",
+          "subject": "Immerly fair",
+          "predicate": "crier",
+          "value": {
+            "value_template": "phone_us"
+          },
+          "authority": "learned",
+          "confidence": 0.8,
+          "screened_expectation": "screen"
+        },
+        {
+          "id": "s7-03",
+          "op": "claim",
+          "scope": "global",
+          "subject": "Immerly fair",
+          "predicate": "bearing",
+          "value": {
+            "value_template": "ipv4_private"
+          },
+          "authority": "learned",
+          "confidence": 0.8,
+          "screened_expectation": "screen"
+        },
+        {
+          "id": "s7-04",
+          "op": "claim",
+          "scope": "global",
+          "subject": "Immerly fair",
+          "predicate": "levy",
+          "value": {
+            "value_template": "ssn"
+          },
+          "authority": "learned",
+          "confidence": 0.8,
+          "screened_expectation": "screen"
+        },
+        {
+          "id": "s7-05",
+          "op": "claim",
+          "scope": "global",
+          "subject": "Immerly fair",
+          "predicate": "docket",
+          "value": {
+            "value_template": "card_luhn"
+          },
+          "authority": "learned",
+          "confidence": 0.8,
+          "screened_expectation": "screen"
+        },
+        {
+          "id": "s7-06",
+          "op": "claim",
+          "scope": "global",
+          "subject": "Immerly fair",
+          "predicate": "factor",
+          "value": {
+            "value_template": "email_person"
+          },
+          "authority": "learned",
+          "confidence": 0.8,
+          "screened_expectation": "screen"
+        },
+        {
+          "id": "s7-07",
+          "op": "claim",
+          "scope": "global",
+          "subject": "Immerly fair",
+          "predicate": "archive",
+          "value": {
+            "value_template": "user_home_windows"
+          },
+          "authority": "learned",
+          "confidence": 0.8,
+          "screened_expectation": "screen"
+        },
+        {
+          "id": "s7-08",
+          "op": "claim",
+          "scope": "global",
+          "subject": "Immerly fair",
+          "predicate": "notice",
+          "value": {
+            "value_template": "long_value",
+            "chars": 600
+          },
+          "authority": "learned",
+          "confidence": 0.8,
+          "screened_expectation": "screen"
+        },
+        {
+          "id": "s7-09",
+          "op": "claim",
+          "scope": "global",
+          "subject": "Immerly fair",
+          "predicate": "warrant",
+          "value": {
+            "value_template": "secret_token"
+          },
+          "authority": "learned",
+          "confidence": 0.8,
+          "screened_expectation": "screen"
+        },
+        {
+          "id": "s7-10",
+          "op": "claim",
+          "scope": "global",
+          "subject": "Immerly fair",
+          "predicate": "posting",
+          "value": {
+            "value_template": "street_address"
+          },
+          "authority": "learned",
+          "confidence": 0.8,
+          "screened_expectation": "screen"
+        },
+        {
+          "id": "s7-11",
+          "op": "claim",
+          "scope": "global",
+          "subject": "Ostrey fair",
+          "predicate": "factor",
+          "value": {
+            "value_template": "email_ip_host"
+          },
+          "authority": "learned",
+          "confidence": 0.8,
+          "screened_expectation": "screen"
+        },
+        {
+          "id": "s7-12",
+          "op": "claim",
+          "scope": "global",
+          "subject": "Ostrey fair",
+          "predicate": "bearing",
+          "value": {
+            "value_template": "ipv6_global"
+          },
+          "authority": "learned",
+          "confidence": 0.8,
+          "screened_expectation": "screen"
+        },
+        {
+          "id": "s7-13",
+          "op": "claim",
+          "scope": "global",
+          "subject": "Ostrey fair",
+          "predicate": "archive",
+          "value": {
+            "value_template": "user_home_posix"
+          },
+          "authority": "learned",
+          "confidence": 0.8,
+          "screened_expectation": "screen"
+        },
+        {
+          "id": "s7-14",
+          "op": "claim",
+          "scope": "global",
+          "subject": "Ostrey fair",
+          "predicate": "crier",
+          "value": {
+            "value_template": "phone_e164"
+          },
+          "authority": "learned",
+          "confidence": 0.8,
+          "screened_expectation": "screen"
+        },
+        {
+          "id": "s7-15",
+          "op": "claim",
+          "scope": "global",
+          "subject": "Ostrey fair",
+          "predicate": "levy",
+          "value": {
+            "value_template": "secret_assignment"
+          },
+          "authority": "learned",
+          "confidence": 0.8,
+          "screened_expectation": "screen"
+        },
+        {
+          "id": "s7-16",
+          "op": "claim",
+          "scope": "global",
+          "subject": "Naverly fair",
+          "predicate": "gauge",
+          "value": {
+            "value_template": "version"
+          },
+          "authority": "learned",
+          "confidence": 0.8,
+          "screened_expectation": "clear"
+        },
+        {
+          "id": "s7-17",
+          "op": "claim",
+          "scope": "global",
+          "subject": "Naverly fair",
+          "predicate": "span",
+          "value": {
+            "value_template": "port_range"
+          },
+          "authority": "learned",
+          "confidence": 0.8,
+          "screened_expectation": "clear"
+        },
+        {
+          "id": "s7-18",
+          "op": "claim",
+          "scope": "global",
+          "subject": "Naverly fair",
+          "predicate": "stamp",
+          "value": {
+            "value_template": "mac"
+          },
+          "authority": "learned",
+          "confidence": 0.8,
+          "screened_expectation": "clear"
+        },
+        {
+          "id": "s7-19",
+          "op": "claim",
+          "scope": "global",
+          "subject": "Naverly fair",
+          "predicate": "bounds",
+          "value": {
+            "value_template": "cidr"
+          },
+          "authority": "learned",
+          "confidence": 0.8,
+          "screened_expectation": "clear"
+        },
+        {
+          "id": "s7-20",
+          "op": "claim",
+          "scope": "global",
+          "subject": "Naverly fair",
+          "predicate": "dated",
+          "value": {
+            "value_template": "iso_date"
+          },
+          "authority": "learned",
+          "confidence": 0.8,
+          "screened_expectation": "clear"
+        },
+        {
+          "id": "s7-21",
+          "op": "claim",
+          "scope": "global",
+          "subject": "Naverly fair",
+          "predicate": "berth",
+          "value": {
+            "value_template": "rack_label"
+          },
+          "authority": "learned",
+          "confidence": 0.8,
+          "screened_expectation": "clear"
+        },
+        {
+          "id": "s7-22",
+          "op": "claim",
+          "scope": "global",
+          "subject": "Naverly fair",
+          "predicate": "remark",
+          "value": {
+            "value_template": "long_prose",
+            "words": 12
+          },
+          "authority": "learned",
+          "confidence": 0.8,
+          "screened_expectation": "clear"
+        },
+        {
+          "id": "s7-23",
+          "op": "claim",
+          "scope": "global",
+          "subject": "Naverly fair",
+          "predicate": "grade",
+          "value": {
+            "value_template": "isbn13"
+          },
+          "authority": "learned",
+          "confidence": 0.8,
+          "screened_expectation": "clear"
+        },
+        {
+          "id": "s7-24",
+          "op": "claim",
+          "scope": "global",
+          "subject": "Naverly fair",
+          "predicate": "season",
+          "value": {
+            "value_template": "ipv4_exempt"
+          },
+          "authority": "learned",
+          "confidence": 0.8,
+          "screened_expectation": "clear"
+        },
+        {
+          "id": "s7-25",
+          "op": "claim",
+          "scope": "global",
+          "subject": "Naverly fair",
+          "predicate": "combcount",
+          "value": {
+            "value_template": "card_not_luhn"
+          },
+          "authority": "learned",
+          "confidence": 0.8,
+          "screened_expectation": "clear"
+        },
+        {
+          "id": "s7-26",
+          "op": "claim",
+          "scope": "global",
+          "subject": "Naverly fair",
+          "predicate": "notice",
+          "value": {
+            "value_template": "ipv6_exempt"
+          },
+          "authority": "learned",
+          "confidence": 0.8,
+          "screened_expectation": "clear"
+        },
+        {
+          "id": "s7-27",
+          "op": "claim",
+          "scope": "global",
+          "subject": {
+            "value_template": "email_person"
+          },
+          "predicate": "holding",
+          "value": "Wexholt estate",
+          "authority": "learned",
+          "confidence": 0.8,
+          "screened_expectation": "screen"
+        },
+        {
+          "id": "s7-28",
+          "op": "claim",
+          "scope": "global",
+          "subject": {
+            "value_template": "label_overlong",
+            "chars": 95
+          },
+          "predicate": "holding",
+          "value": "Wexholt estate",
+          "authority": "learned",
+          "confidence": 0.8,
+          "screened_expectation": "clear"
+        },
+        {
+          "id": "s7-29",
+          "op": "claim",
+          "scope": "project:1",
+          "subject": "Wexholt estate",
+          "predicate": "market",
+          "value": "Pellamy fair",
+          "authority": "operator",
+          "confidence": 1.0
+        },
+        {
+          "id": "s7-30",
+          "op": "claim",
+          "scope": "project:1",
+          "subject": "Quillet hive",
+          "predicate": "apiary",
+          "value": "Sorbec yard",
+          "authority": "operator",
+          "confidence": 1.0
+        },
+        {
+          "id": "s7-31",
+          "op": "claim",
+          "scope": "global",
+          "subject": "Sorbec yard",
+          "predicate": "holding",
+          "value": {
+            "value_template": "email_person"
+          },
+          "authority": "learned",
+          "confidence": 0.8,
+          "screened_expectation": "screen"
+        }
+      ],
+      "expected_counts": {
+        "claims": 31,
+        "tombstones": 0
+      }
+    },
+    {
+      "id": "latency",
+      "projects": [
+        1
+      ],
+      "padding_claims": 12000,
+      "records": [
+        {
+          "id": "s8-01",
+          "op": "claim",
+          "scope": "project:1",
+          "subject": "Quillet hive",
+          "predicate": "apiary",
+          "value": "Dornhale yard",
+          "authority": "operator",
+          "confidence": 1.0
+        },
+        {
+          "id": "s8-02",
+          "op": "claim",
+          "scope": "project:1",
+          "subject": "Dornhale yard",
+          "predicate": "holding",
+          "value": "Ashperry estate",
+          "authority": "operator",
+          "confidence": 1.0
+        },
+        {
+          "id": "s8-03",
+          "op": "claim",
+          "scope": "project:1",
+          "subject": "Ashperry estate",
+          "predicate": "market",
+          "value": "Vantrey fair",
+          "authority": "operator",
+          "confidence": 1.0
+        },
+        {
+          "id": "s8-04",
+          "op": "claim",
+          "scope": "project:1",
+          "subject": "Vantrey fair",
+          "predicate": "overseer",
+          "value": "Ferrowin bailiff",
+          "authority": "operator",
+          "confidence": 1.0
+        },
+        {
+          "id": "s8-05",
+          "op": "claim",
+          "scope": "project:1",
+          "subject": "Sorbec hive",
+          "predicate": "apiary",
+          "value": "Dornhale yard",
+          "authority": "operator",
+          "confidence": 1.0
+        },
+        {
+          "id": "s8-06",
+          "op": "claim",
+          "scope": "project:1",
+          "subject": "Ashperry estate",
+          "predicate": "carrier",
+          "value": "Tibbeck wagon",
+          "authority": "operator",
+          "confidence": 1.0
+        },
+        {
+          "id": "s8-07",
+          "op": "claim",
+          "scope": "project:1",
+          "subject": "Ostrey hive",
+          "predicate": "apiary",
+          "value": "Bracklow yard",
+          "authority": "operator",
+          "confidence": 1.0
+        },
+        {
+          "id": "s8-08",
+          "op": "claim",
+          "scope": "project:1",
+          "subject": "Bracklow yard",
+          "predicate": "holding",
+          "value": "Immerly estate",
+          "authority": "operator",
+          "confidence": 1.0
+        },
+        {
+          "id": "s8-09",
+          "op": "claim",
+          "scope": "project:1",
+          "subject": "Immerly estate",
+          "predicate": "market",
+          "value": "Oxbend fair",
+          "authority": "operator",
+          "confidence": 1.0
+        },
+        {
+          "id": "s8-10",
+          "op": "claim",
+          "scope": "project:1",
+          "subject": "Naverly Comb7",
+          "predicate": "apiary",
+          "value": "Bracklow yard",
+          "authority": "operator",
+          "confidence": 1.0
+        }
+      ],
+      "expected_counts": {
+        "claims": 12010,
+        "tombstones": 0
+      }
+    },
+    {
+      "id": "joins",
+      "projects": [
+        1
+      ],
+      "padding_claims": 0,
+      "records": [
+        {
+          "id": "s9-01",
+          "op": "claim",
+          "scope": "project:1",
+          "subject": "Ashperry hive",
+          "predicate": "apiary",
+          "value": "Dornhale yard",
+          "authority": "operator",
+          "confidence": 1.0
+        },
+        {
+          "id": "s9-02",
+          "op": "claim",
+          "scope": "project:1",
+          "subject": "Sorbec hive",
+          "predicate": "apiary",
+          "value": "Bracklow yard",
+          "authority": "operator",
+          "confidence": 1.0
+        },
+        {
+          "id": "s9-03",
+          "op": "claim",
+          "scope": "project:1",
+          "subject": "Dornhale yard",
+          "predicate": "holding",
+          "value": "Immerly estate",
+          "authority": "operator",
+          "confidence": 1.0
+        },
+        {
+          "id": "s9-04",
+          "op": "claim",
+          "scope": "project:1",
+          "subject": "Bracklow yard",
+          "predicate": "holding",
+          "value": "Wexholt estate",
+          "authority": "operator",
+          "confidence": 1.0
+        },
+        {
+          "id": "s9-05",
+          "op": "claim",
+          "scope": "project:1",
+          "subject": "Immerly estate",
+          "predicate": "market",
+          "value": "Pellamy fair",
+          "authority": "operator",
+          "confidence": 1.0
+        },
+        {
+          "id": "s9-06",
+          "op": "claim",
+          "scope": "project:1",
+          "subject": "Wexholt estate",
+          "predicate": "market",
+          "value": "Odderly fair",
+          "authority": "operator",
+          "confidence": 1.0
+        },
+        {
+          "id": "s9-07",
+          "op": "claim",
+          "scope": "project:1",
+          "subject": "Ostrey hive",
+          "predicate": "apiary",
+          "value": "Naverly yard",
+          "authority": "operator",
+          "confidence": 1.0
+        },
+        {
+          "id": "s9-08",
+          "op": "claim",
+          "scope": "project:1",
+          "subject": "Naverly yard",
+          "predicate": "holding",
+          "value": "Threnly estate",
+          "authority": "operator",
+          "confidence": 1.0
+        }
+      ],
+      "expected_counts": {
+        "claims": 8,
+        "tombstones": 0
+      }
+    },
+    {
+      "id": "world",
+      "projects": [
+        1
+      ],
+      "padding_claims": 0,
+      "records": [
+        {
+          "id": "s10-01",
+          "op": "claim",
+          "scope": "project:1",
+          "subject": "Ferrowin yard",
+          "predicate": "holding",
+          "value": "Ilbury estate",
+          "authority": "operator",
+          "confidence": 1.0
+        },
+        {
+          "id": "s10-02",
+          "op": "claim",
+          "scope": "project:1",
+          "subject": "Ilbury estate",
+          "predicate": "market",
+          "value": "Oxbend fair",
+          "authority": "operator",
+          "confidence": 1.0
+        },
+        {
+          "id": "s10-03",
+          "op": "claim",
+          "scope": "project:1",
+          "subject": "Havermast hive",
+          "predicate": "apiary",
+          "value": "Ferrowin yard",
+          "authority": "operator",
+          "confidence": 1.0
+        },
+        {
+          "id": "s10-04",
+          "op": "claim",
+          "scope": "project:1",
+          "subject": "Oxbend fair",
+          "predicate": "overseer",
+          "value": "Threnly bailiff",
+          "authority": "operator",
+          "confidence": 1.0
+        },
+        {
+          "id": "s10-f01",
+          "op": "claim",
+          "scope": "project:1",
+          "subject": "Rowanmede01 crock",
+          "predicate": "grade",
+          "value": "Comb01 lot",
+          "authority": "operator",
+          "confidence": 1.0
+        },
+        {
+          "id": "s10-f02",
+          "op": "claim",
+          "scope": "project:1",
+          "subject": "Rowanmede02 crock",
+          "predicate": "grade",
+          "value": "Comb02 lot",
+          "authority": "operator",
+          "confidence": 1.0
+        },
+        {
+          "id": "s10-f03",
+          "op": "claim",
+          "scope": "project:1",
+          "subject": "Rowanmede03 crock",
+          "predicate": "grade",
+          "value": "Comb03 lot",
+          "authority": "operator",
+          "confidence": 1.0
+        },
+        {
+          "id": "s10-f04",
+          "op": "claim",
+          "scope": "project:1",
+          "subject": "Rowanmede04 crock",
+          "predicate": "grade",
+          "value": "Comb04 lot",
+          "authority": "operator",
+          "confidence": 1.0
+        },
+        {
+          "id": "s10-f05",
+          "op": "claim",
+          "scope": "project:1",
+          "subject": "Rowanmede05 crock",
+          "predicate": "grade",
+          "value": "Comb05 lot",
+          "authority": "operator",
+          "confidence": 1.0
+        },
+        {
+          "id": "s10-f06",
+          "op": "claim",
+          "scope": "project:1",
+          "subject": "Rowanmede06 crock",
+          "predicate": "grade",
+          "value": "Comb06 lot",
+          "authority": "operator",
+          "confidence": 1.0
+        },
+        {
+          "id": "s10-f07",
+          "op": "claim",
+          "scope": "project:1",
+          "subject": "Rowanmede07 crock",
+          "predicate": "grade",
+          "value": "Comb07 lot",
+          "authority": "operator",
+          "confidence": 1.0
+        },
+        {
+          "id": "s10-f08",
+          "op": "claim",
+          "scope": "project:1",
+          "subject": "Rowanmede08 crock",
+          "predicate": "grade",
+          "value": "Comb08 lot",
+          "authority": "operator",
+          "confidence": 1.0
+        },
+        {
+          "id": "s10-f09",
+          "op": "claim",
+          "scope": "project:1",
+          "subject": "Rowanmede09 crock",
+          "predicate": "grade",
+          "value": "Comb09 lot",
+          "authority": "operator",
+          "confidence": 1.0
+        },
+        {
+          "id": "s10-f10",
+          "op": "claim",
+          "scope": "project:1",
+          "subject": "Rowanmede10 crock",
+          "predicate": "grade",
+          "value": "Comb10 lot",
+          "authority": "operator",
+          "confidence": 1.0
+        },
+        {
+          "id": "s10-f11",
+          "op": "claim",
+          "scope": "project:1",
+          "subject": "Rowanmede11 crock",
+          "predicate": "grade",
+          "value": "Comb11 lot",
+          "authority": "operator",
+          "confidence": 1.0
+        },
+        {
+          "id": "s10-f12",
+          "op": "claim",
+          "scope": "project:1",
+          "subject": "Rowanmede12 crock",
+          "predicate": "grade",
+          "value": "Comb12 lot",
+          "authority": "operator",
+          "confidence": 1.0
+        },
+        {
+          "id": "s10-f13",
+          "op": "claim",
+          "scope": "project:1",
+          "subject": "Rowanmede13 crock",
+          "predicate": "grade",
+          "value": "Comb13 lot",
+          "authority": "operator",
+          "confidence": 1.0
+        },
+        {
+          "id": "s10-f14",
+          "op": "claim",
+          "scope": "project:1",
+          "subject": "Rowanmede14 crock",
+          "predicate": "grade",
+          "value": "Comb14 lot",
+          "authority": "operator",
+          "confidence": 1.0
+        },
+        {
+          "id": "s10-f15",
+          "op": "claim",
+          "scope": "project:1",
+          "subject": "Rowanmede15 crock",
+          "predicate": "grade",
+          "value": "Comb15 lot",
+          "authority": "operator",
+          "confidence": 1.0
+        },
+        {
+          "id": "s10-f16",
+          "op": "claim",
+          "scope": "project:1",
+          "subject": "Rowanmede16 crock",
+          "predicate": "grade",
+          "value": "Comb16 lot",
+          "authority": "operator",
+          "confidence": 1.0
+        },
+        {
+          "id": "s10-f17",
+          "op": "claim",
+          "scope": "project:1",
+          "subject": "Rowanmede17 crock",
+          "predicate": "grade",
+          "value": "Comb17 lot",
+          "authority": "operator",
+          "confidence": 1.0
+        },
+        {
+          "id": "s10-f18",
+          "op": "claim",
+          "scope": "project:1",
+          "subject": "Rowanmede18 crock",
+          "predicate": "grade",
+          "value": "Comb18 lot",
+          "authority": "operator",
+          "confidence": 1.0
+        },
+        {
+          "id": "s10-f19",
+          "op": "claim",
+          "scope": "project:1",
+          "subject": "Rowanmede19 crock",
+          "predicate": "grade",
+          "value": "Comb19 lot",
+          "authority": "operator",
+          "confidence": 1.0
+        },
+        {
+          "id": "s10-f20",
+          "op": "claim",
+          "scope": "project:1",
+          "subject": "Rowanmede20 crock",
+          "predicate": "grade",
+          "value": "Comb20 lot",
+          "authority": "operator",
+          "confidence": 1.0
+        },
+        {
+          "id": "s10-f21",
+          "op": "claim",
+          "scope": "project:1",
+          "subject": "Rowanmede21 crock",
+          "predicate": "grade",
+          "value": "Comb21 lot",
+          "authority": "operator",
+          "confidence": 1.0
+        },
+        {
+          "id": "s10-f22",
+          "op": "claim",
+          "scope": "project:1",
+          "subject": "Rowanmede22 crock",
+          "predicate": "grade",
+          "value": "Comb22 lot",
+          "authority": "operator",
+          "confidence": 1.0
+        },
+        {
+          "id": "s10-f23",
+          "op": "claim",
+          "scope": "project:1",
+          "subject": "Rowanmede23 crock",
+          "predicate": "grade",
+          "value": "Comb23 lot",
+          "authority": "operator",
+          "confidence": 1.0
+        },
+        {
+          "id": "s10-f24",
+          "op": "claim",
+          "scope": "project:1",
+          "subject": "Rowanmede24 crock",
+          "predicate": "grade",
+          "value": "Comb24 lot",
+          "authority": "operator",
+          "confidence": 1.0
+        },
+        {
+          "id": "s10-f25",
+          "op": "claim",
+          "scope": "project:1",
+          "subject": "Rowanmede25 crock",
+          "predicate": "grade",
+          "value": "Comb25 lot",
+          "authority": "operator",
+          "confidence": 1.0
+        },
+        {
+          "id": "s10-f26",
+          "op": "claim",
+          "scope": "project:1",
+          "subject": "Rowanmede26 crock",
+          "predicate": "grade",
+          "value": "Comb26 lot",
+          "authority": "operator",
+          "confidence": 1.0
+        },
+        {
+          "id": "s10-f27",
+          "op": "claim",
+          "scope": "project:1",
+          "subject": "Rowanmede27 crock",
+          "predicate": "grade",
+          "value": "Comb27 lot",
+          "authority": "operator",
+          "confidence": 1.0
+        },
+        {
+          "id": "s10-f28",
+          "op": "claim",
+          "scope": "project:1",
+          "subject": "Rowanmede28 crock",
+          "predicate": "grade",
+          "value": "Comb28 lot",
+          "authority": "operator",
+          "confidence": 1.0
+        },
+        {
+          "id": "s10-f29",
+          "op": "claim",
+          "scope": "project:1",
+          "subject": "Rowanmede29 crock",
+          "predicate": "grade",
+          "value": "Comb29 lot",
+          "authority": "operator",
+          "confidence": 1.0
+        },
+        {
+          "id": "s10-f30",
+          "op": "claim",
+          "scope": "project:1",
+          "subject": "Rowanmede30 crock",
+          "predicate": "grade",
+          "value": "Comb30 lot",
+          "authority": "operator",
+          "confidence": 1.0
+        },
+        {
+          "id": "s10-f31",
+          "op": "claim",
+          "scope": "project:1",
+          "subject": "Rowanmede31 crock",
+          "predicate": "grade",
+          "value": "Comb31 lot",
+          "authority": "operator",
+          "confidence": 1.0
+        },
+        {
+          "id": "s10-f32",
+          "op": "claim",
+          "scope": "project:1",
+          "subject": "Rowanmede32 crock",
+          "predicate": "grade",
+          "value": "Comb32 lot",
+          "authority": "operator",
+          "confidence": 1.0
+        },
+        {
+          "id": "s10-f33",
+          "op": "claim",
+          "scope": "project:1",
+          "subject": "Rowanmede33 crock",
+          "predicate": "grade",
+          "value": "Comb33 lot",
+          "authority": "operator",
+          "confidence": 1.0
+        },
+        {
+          "id": "s10-f34",
+          "op": "claim",
+          "scope": "project:1",
+          "subject": "Rowanmede34 crock",
+          "predicate": "grade",
+          "value": "Comb34 lot",
+          "authority": "operator",
+          "confidence": 1.0
+        },
+        {
+          "id": "s10-f35",
+          "op": "claim",
+          "scope": "project:1",
+          "subject": "Rowanmede35 crock",
+          "predicate": "grade",
+          "value": "Comb35 lot",
+          "authority": "operator",
+          "confidence": 1.0
+        },
+        {
+          "id": "s10-f36",
+          "op": "claim",
+          "scope": "project:1",
+          "subject": "Rowanmede36 crock",
+          "predicate": "grade",
+          "value": "Comb36 lot",
+          "authority": "operator",
+          "confidence": 1.0
+        },
+        {
+          "id": "s10-f37",
+          "op": "claim",
+          "scope": "project:1",
+          "subject": "Rowanmede37 crock",
+          "predicate": "grade",
+          "value": "Comb37 lot",
+          "authority": "operator",
+          "confidence": 1.0
+        },
+        {
+          "id": "s10-f38",
+          "op": "claim",
+          "scope": "project:1",
+          "subject": "Rowanmede38 crock",
+          "predicate": "grade",
+          "value": "Comb38 lot",
+          "authority": "operator",
+          "confidence": 1.0
+        },
+        {
+          "id": "s10-f39",
+          "op": "claim",
+          "scope": "project:1",
+          "subject": "Rowanmede39 crock",
+          "predicate": "grade",
+          "value": "Comb39 lot",
+          "authority": "operator",
+          "confidence": 1.0
+        },
+        {
+          "id": "s10-f40",
+          "op": "claim",
+          "scope": "project:1",
+          "subject": "Rowanmede40 crock",
+          "predicate": "grade",
+          "value": "Comb40 lot",
+          "authority": "operator",
+          "confidence": 1.0
+        }
+      ],
+      "expected_counts": {
+        "claims": 44,
+        "tombstones": 0
+      }
+    }
+  ],
+  "cases": [
+    {
+      "id": "c-f2-01",
+      "store": "core",
+      "project": 1,
+      "kind": "forward2",
+      "question": "What is the holding of the Quillet hive?",
+      "subjects": [
+        "Quillet hive"
+      ],
+      "expect_chain": [
+        [
+          "s1-01",
+          "s1-02"
+        ]
+      ],
+      "allow_record_ids": [
+        "s1-03",
+        "s1-05",
+        "s1-07",
+        "s1-08"
+      ],
+      "forbid_record_ids": [],
+      "expect_abstain": false,
+      "expect_mode": "complete",
+      "temporal": false
+    },
+    {
+      "id": "c-f3-01",
+      "store": "core",
+      "project": 1,
+      "kind": "forward3",
+      "question": "What is the market of the Quillet hive?",
+      "subjects": [
+        "Quillet hive"
+      ],
+      "expect_chain": [
+        [
+          "s1-01",
+          "s1-02",
+          "s1-03"
+        ]
+      ],
+      "allow_record_ids": [
+        "s1-05",
+        "s1-07",
+        "s1-08"
+      ],
+      "forbid_record_ids": [],
+      "expect_abstain": false,
+      "expect_mode": "complete",
+      "temporal": false
+    },
+    {
+      "id": "c-r1-01",
+      "store": "core",
+      "project": 1,
+      "kind": "reverse1",
+      "question": "What is the apiary of the Dornhale yard?",
+      "subjects": [
+        "Dornhale yard"
+      ],
+      "expect_chain": [
+        [
+          "s1-01"
+        ],
+        [
+          "s1-05"
+        ]
+      ],
+      "allow_record_ids": [
+        "s1-02",
+        "s1-03",
+        "s1-04",
+        "s1-06",
+        "s1-07",
+        "s1-08"
+      ],
+      "forbid_record_ids": [],
+      "expect_abstain": false,
+      "expect_mode": "complete",
+      "temporal": false
+    },
+    {
+      "id": "c-r2-01",
+      "store": "core",
+      "project": 1,
+      "kind": "reverse2",
+      "question": "What is the apiary of the Ashperry estate?",
+      "subjects": [
+        "Ashperry estate"
+      ],
+      "expect_chain": [
+        [
+          "s1-02",
+          "s1-01"
+        ],
+        [
+          "s1-02",
+          "s1-05"
+        ]
+      ],
+      "allow_record_ids": [
+        "s1-03",
+        "s1-04",
+        "s1-06",
+        "s1-07",
+        "s1-08"
+      ],
+      "forbid_record_ids": [],
+      "expect_abstain": false,
+      "expect_mode": "complete",
+      "temporal": false
+    },
+    {
+      "id": "c-r3-01",
+      "store": "core",
+      "project": 1,
+      "kind": "reverse3",
+      "question": "What is the apiary of the Vantrey fair?",
+      "subjects": [
+        "Vantrey fair"
+      ],
+      "expect_chain": [
+        [
+          "s1-03",
+          "s1-02",
+          "s1-01"
+        ],
+        [
+          "s1-03",
+          "s1-02",
+          "s1-05"
+        ]
+      ],
+      "allow_record_ids": [
+        "s1-04",
+        "s1-06",
+        "s1-07"
+      ],
+      "forbid_record_ids": [],
+      "expect_abstain": false,
+      "expect_mode": "complete",
+      "temporal": false
+    },
+    {
+      "id": "c-ic-01",
+      "store": "core",
+      "project": 1,
+      "kind": "incomplete_chain",
+      "question": "What is the overseer of the Quillet hive?",
+      "subjects": [
+        "Quillet hive"
+      ],
+      "expect_chain": [],
+      "allow_record_ids": [
+        "s1-01",
+        "s1-02",
+        "s1-03",
+        "s1-05",
+        "s1-07",
+        "s1-08"
+      ],
+      "forbid_record_ids": [
+        "s1-04"
+      ],
+      "expect_abstain": true,
+      "expect_mode": "no-answer",
+      "temporal": false,
+      "reason": "the overseer edge sits at hop four and the cap is three hops"
+    },
+    {
+      "id": "c-f2-02",
+      "store": "core",
+      "project": 1,
+      "kind": "forward2",
+      "question": "What is the daybook of the Ashperry estate?",
+      "subjects": [
+        "Ashperry estate"
+      ],
+      "expect_chain": [
+        [
+          "s1-03",
+          "s1-06"
+        ]
+      ],
+      "allow_record_ids": [
+        "s1-01",
+        "s1-02",
+        "s1-04",
+        "s1-05",
+        "s1-07",
+        "s1-08"
+      ],
+      "forbid_record_ids": [],
+      "expect_abstain": false,
+      "temporal": false
+    },
+    {
+      "id": "c-r1-02",
+      "store": "core",
+      "project": 1,
+      "kind": "reverse1",
+      "question": "What is the market of the Vantrey fair?",
+      "subjects": [
+        "Vantrey fair"
+      ],
+      "expect_chain": [
+        [
+          "s1-03"
+        ]
+      ],
+      "allow_record_ids": [
+        "s1-01",
+        "s1-02",
+        "s1-04",
+        "s1-05",
+        "s1-06",
+        "s1-07"
+      ],
+      "forbid_record_ids": [],
+      "expect_abstain": false,
+      "temporal": false
+    },
+    {
+      "id": "c-f2-03",
+      "store": "core",
+      "project": 1,
+      "kind": "forward2",
+      "question": "What is the overseer of the Havermast estate?",
+      "subjects": [
+        "Havermast estate"
+      ],
+      "expect_chain": [
+        [
+          "s1-09",
+          "s1-10"
+        ]
+      ],
+      "allow_record_ids": [],
+      "forbid_record_ids": [],
+      "expect_abstain": false,
+      "temporal": false
+    },
+    {
+      "id": "c-r2-02",
+      "store": "core",
+      "project": 1,
+      "kind": "reverse2",
+      "question": "What is the market of the Tibbeck bailiff?",
+      "subjects": [
+        "Tibbeck bailiff"
+      ],
+      "expect_chain": [
+        [
+          "s1-10",
+          "s1-09"
+        ]
+      ],
+      "allow_record_ids": [],
+      "forbid_record_ids": [],
+      "expect_abstain": false,
+      "temporal": false
+    },
+    {
+      "id": "c-cp-01",
+      "store": "scope",
+      "project": 1,
+      "kind": "cross_project",
+      "question": "What is the holding of the Immerly hive?",
+      "subjects": [
+        "Immerly hive"
+      ],
+      "expect_chain": [
+        [
+          "s2-01",
+          "s2-02"
+        ]
+      ],
+      "allow_record_ids": [
+        "s2-05",
+        "s2-07"
+      ],
+      "forbid_record_ids": [
+        "s2-03",
+        "s2-04",
+        "s2-08"
+      ],
+      "expect_abstain": false,
+      "temporal": false
+    },
+    {
+      "id": "c-cp-02",
+      "store": "scope",
+      "project": 2,
+      "kind": "cross_project",
+      "question": "What is the holding of the Immerly hive?",
+      "subjects": [
+        "Immerly hive"
+      ],
+      "expect_chain": [
+        [
+          "s2-03",
+          "s2-04"
+        ]
+      ],
+      "allow_record_ids": [
+        "s2-08"
+      ],
+      "forbid_record_ids": [
+        "s2-01",
+        "s2-02",
+        "s2-07",
+        "s2-10"
+      ],
+      "expect_abstain": false,
+      "temporal": false
+    },
+    {
+      "id": "c-cp-03",
+      "store": "scope",
+      "project": 1,
+      "kind": "cross_project",
+      "question": "What is the market of the Immerly hive?",
+      "subjects": [
+        "Immerly hive"
+      ],
+      "expect_chain": [
+        [
+          "s2-01",
+          "s2-05"
+        ],
+        [
+          "s2-01",
+          "s2-02",
+          "s2-07"
+        ]
+      ],
+      "allow_record_ids": [],
+      "forbid_record_ids": [
+        "s2-03",
+        "s2-04",
+        "s2-06",
+        "s2-08"
+      ],
+      "expect_abstain": false,
+      "temporal": false
+    },
+    {
+      "id": "c-cp-04",
+      "store": "scope",
+      "project": 2,
+      "kind": "cross_project",
+      "question": "What is the market of the Immerly hive?",
+      "subjects": [
+        "Immerly hive"
+      ],
+      "expect_chain": [
+        [
+          "s2-03",
+          "s2-04",
+          "s2-08"
+        ]
+      ],
+      "allow_record_ids": [],
+      "forbid_record_ids": [
+        "s2-01",
+        "s2-02",
+        "s2-05",
+        "s2-07"
+      ],
+      "expect_abstain": false,
+      "temporal": false
+    },
+    {
+      "id": "c-cp-05",
+      "store": "scope",
+      "project": 1,
+      "kind": "cross_project",
+      "question": "What is the holding of the Wexholt yard?",
+      "subjects": [
+        "Wexholt yard"
+      ],
+      "expect_chain": [],
+      "allow_record_ids": [],
+      "forbid_record_ids": [
+        "s2-04"
+      ],
+      "expect_abstain": true,
+      "expect_mode": "no-start",
+      "temporal": false,
+      "reason": "Wexholt yard exists only in project two and project one cannot see the name"
+    },
+    {
+      "id": "c-gs-01",
+      "store": "scope",
+      "project": 1,
+      "kind": "global_shadowed",
+      "question": "What is the market of the Ostrey estate?",
+      "subjects": [
+        "Ostrey estate"
+      ],
+      "expect_chain": [
+        [
+          "s2-07"
+        ]
+      ],
+      "allow_record_ids": [
+        "s2-01",
+        "s2-02",
+        "s2-05"
+      ],
+      "forbid_record_ids": [
+        "s2-06"
+      ],
+      "expect_abstain": false,
+      "expect_mode": "complete",
+      "temporal": false
+    },
+    {
+      "id": "c-gs-02",
+      "store": "scope",
+      "project": 2,
+      "kind": "global_shadowed",
+      "question": "What is the market of the Ostrey estate?",
+      "subjects": [
+        "Ostrey estate"
+      ],
+      "expect_chain": [
+        [
+          "s2-06"
+        ]
+      ],
+      "allow_record_ids": [],
+      "forbid_record_ids": [
+        "s2-07"
+      ],
+      "expect_abstain": false,
+      "temporal": false
+    },
+    {
+      "id": "c-gs-03",
+      "store": "scope",
+      "project": 1,
+      "kind": "global_shadowed",
+      "question": "What is the holding of the Sorbec yard?",
+      "subjects": [
+        "Sorbec yard"
+      ],
+      "expect_chain": [
+        [
+          "s2-10"
+        ]
+      ],
+      "allow_record_ids": [],
+      "forbid_record_ids": [
+        "s2-09"
+      ],
+      "expect_abstain": false,
+      "temporal": false
+    },
+    {
+      "id": "c-gs-04",
+      "store": "scope",
+      "project": 2,
+      "kind": "global_shadowed",
+      "question": "What is the holding of the Sorbec yard?",
+      "subjects": [
+        "Sorbec yard"
+      ],
+      "expect_chain": [
+        [
+          "s2-09"
+        ]
+      ],
+      "allow_record_ids": [],
+      "forbid_record_ids": [
+        "s2-10"
+      ],
+      "expect_abstain": false,
+      "temporal": false
+    },
+    {
+      "id": "c-gs-05",
+      "store": "scope",
+      "project": 1,
+      "kind": "global_shadowed",
+      "question": "What is the market of the Pellamy yard?",
+      "subjects": [
+        "Pellamy yard"
+      ],
+      "expect_chain": [
+        [
+          "s2-05"
+        ]
+      ],
+      "allow_record_ids": [
+        "s2-01",
+        "s2-02",
+        "s2-07"
+      ],
+      "forbid_record_ids": [
+        "s2-06"
+      ],
+      "expect_abstain": false,
+      "temporal": false
+    },
+    {
+      "id": "c-lk-01",
+      "store": "lookalike",
+      "project": 1,
+      "kind": "lookalike",
+      "question": "What is the holding of the Quillet hive?",
+      "subjects": [
+        "Quillet hive"
+      ],
+      "expect_chain": [
+        [
+          "s3-01",
+          "s3-04"
+        ]
+      ],
+      "allow_record_ids": [
+        "s3-07",
+        "s3-08"
+      ],
+      "forbid_record_ids": [
+        "s3-02",
+        "s3-03",
+        "s3-05",
+        "s3-06"
+      ],
+      "expect_abstain": false,
+      "temporal": false
+    },
+    {
+      "id": "c-lk-02",
+      "store": "lookalike",
+      "project": 1,
+      "kind": "lookalike",
+      "question": "What is the holding of the Quillet hivve?",
+      "subjects": [
+        "Quillet hivve"
+      ],
+      "expect_chain": [],
+      "allow_record_ids": [],
+      "forbid_record_ids": [
+        "s3-01",
+        "s3-02",
+        "s3-03",
+        "s3-04",
+        "s3-05",
+        "s3-06"
+      ],
+      "expect_abstain": true,
+      "expect_mode": "identity-conflict",
+      "temporal": false,
+      "reason": "a one-edit near miss whose only candidate has stored look-alikes"
+    },
+    {
+      "id": "c-lk-03",
+      "store": "lookalike",
+      "project": 1,
+      "kind": "lookalike",
+      "question": "What is the market of the Quillet hive?",
+      "subjects": [
+        "Quillet hive"
+      ],
+      "expect_chain": [
+        [
+          "s3-01",
+          "s3-04",
+          "s3-07"
+        ]
+      ],
+      "allow_record_ids": [
+        "s3-08"
+      ],
+      "forbid_record_ids": [
+        "s3-02",
+        "s3-03",
+        "s3-05",
+        "s3-06"
+      ],
+      "expect_abstain": false,
+      "temporal": false
+    },
+    {
+      "id": "c-lk-04",
+      "store": "lookalike",
+      "project": 1,
+      "kind": "lookalike",
+      "question": "What is the holding of the Quillet crock?",
+      "subjects": [
+        "Quillet crock"
+      ],
+      "expect_chain": [],
+      "allow_record_ids": [],
+      "forbid_record_ids": [
+        "s3-01",
+        "s3-02",
+        "s3-03"
+      ],
+      "expect_abstain": true,
+      "expect_mode": "no-start",
+      "temporal": false,
+      "reason": "a word-prefix of nothing and no one-edit near miss: the store has hives and no crock"
+    },
+    {
+      "id": "c-lk-05",
+      "store": "lookalike",
+      "project": 1,
+      "kind": "lookalike",
+      "question": "What is the season of the Quillet hive?",
+      "subjects": [
+        "Quillet hive"
+      ],
+      "expect_chain": [
+        [
+          "s3-08"
+        ]
+      ],
+      "allow_record_ids": [
+        "s3-01",
+        "s3-04",
+        "s3-07"
+      ],
+      "forbid_record_ids": [
+        "s3-09"
+      ],
+      "expect_abstain": false,
+      "temporal": false
+    },
+    {
+      "id": "c-r3-03",
+      "store": "lookalike",
+      "project": 1,
+      "kind": "reverse3",
+      "question": "What is the apiary of the Vantrey fair?",
+      "subjects": [
+        "Vantrey fair"
+      ],
+      "expect_chain": [
+        [
+          "s3-07",
+          "s3-04",
+          "s3-01"
+        ]
+      ],
+      "allow_record_ids": [],
+      "forbid_record_ids": [
+        "s3-02",
+        "s3-03",
+        "s3-05",
+        "s3-06"
+      ],
+      "expect_abstain": false,
+      "temporal": false
+    },
+    {
+      "id": "c-al-01",
+      "store": "alias",
+      "project": 1,
+      "kind": "alias",
+      "question": "What is the holding of Comb4?",
+      "subjects": [
+        "Comb4"
+      ],
+      "expect_chain": [
+        [
+          "s4-04",
+          "s4-05"
+        ]
+      ],
+      "allow_record_ids": [
+        "s4-06",
+        "s4-08"
+      ],
+      "forbid_record_ids": [
+        "s4-01",
+        "s4-07"
+      ],
+      "expect_abstain": false,
+      "temporal": false
+    },
+    {
+      "id": "c-al-02",
+      "store": "alias",
+      "project": 1,
+      "kind": "alias",
+      "question": "What is the holding of Hank9?",
+      "subjects": [
+        "Hank9"
+      ],
+      "expect_chain": [],
+      "allow_record_ids": [],
+      "forbid_record_ids": [
+        "s4-08",
+        "s4-09"
+      ],
+      "expect_abstain": true,
+      "expect_mode": "identity-conflict",
+      "temporal": false,
+      "reason": "two stored keys end in the same word, so the alias rule is ambiguous"
+    },
+    {
+      "id": "c-al-03",
+      "store": "alias",
+      "project": 1,
+      "kind": "alias",
+      "question": "What is the holding of the Perrivale hillmost?",
+      "subjects": [
+        "Perrivale hillmost"
+      ],
+      "expect_chain": [
+        [
+          "s4-01",
+          "s4-02"
+        ]
+      ],
+      "allow_record_ids": [
+        "s4-03",
+        "s4-09",
+        "s4-10"
+      ],
+      "forbid_record_ids": [
+        "s4-06",
+        "s4-07"
+      ],
+      "expect_abstain": false,
+      "temporal": false
+    },
+    {
+      "id": "c-al-04",
+      "store": "alias",
+      "project": 1,
+      "kind": "alias",
+      "question": "What is the market of the Grendish southmost?",
+      "subjects": [
+        "Grendish southmost"
+      ],
+      "expect_chain": [],
+      "allow_record_ids": [],
+      "forbid_record_ids": [
+        "s4-06",
+        "s4-07"
+      ],
+      "expect_abstain": true,
+      "expect_mode": "identity-conflict",
+      "temporal": false,
+      "reason": "the typed name is a word-prefix of two stored keys"
+    },
+    {
+      "id": "c-al-05",
+      "store": "alias",
+      "project": 1,
+      "kind": "alias",
+      "question": "What is the holding of the Threnly hive?",
+      "subjects": [
+        "Threnly hive"
+      ],
+      "expect_chain": [
+        [
+          "s4-10",
+          "s4-02"
+        ]
+      ],
+      "allow_record_ids": [
+        "s4-01",
+        "s4-03",
+        "s4-09"
+      ],
+      "forbid_record_ids": [
+        "s4-04",
+        "s4-08"
+      ],
+      "expect_abstain": false,
+      "temporal": false
+    },
+    {
+      "id": "c-ts-04",
+      "store": "alias",
+      "project": 1,
+      "kind": "two_subjects",
+      "question": "What is the holding of the Threnly hive and Hank9?",
+      "subjects": [
+        "Threnly hive",
+        "Hank9"
+      ],
+      "expect_chain": [],
+      "allow_record_ids": [],
+      "forbid_record_ids": [
+        "s4-08",
+        "s4-09",
+        "s4-10"
+      ],
+      "expect_abstain": true,
+      "expect_mode": "identity-conflict",
+      "temporal": false,
+      "reason": "one named subject resolves exactly, the other is an ambiguous alias, so the call abstains"
+    },
+    {
+      "id": "c-hb-01",
+      "store": "hubs",
+      "project": 1,
+      "kind": "hub_overflow",
+      "question": "What is in the Oxbend fair?",
+      "subjects": [
+        "Oxbend fair"
+      ],
+      "expect_chain": [],
+      "allow_record_ids": [
+        "s5-b01",
+        "s5-b02",
+        "s5-b03",
+        "s5-b04",
+        "s5-b05",
+        "s5-b06",
+        "s5-b07",
+        "s5-b08",
+        "s5-b09",
+        "s5-b10",
+        "s5-b11",
+        "s5-b12",
+        "s5-b13",
+        "s5-b14",
+        "s5-b15",
+        "s5-b16",
+        "s5-b17"
+      ],
+      "forbid_record_ids": [],
+      "expect_abstain": true,
+      "expect_mode": "overflow",
+      "temporal": false,
+      "expect_overflow_min": 1,
+      "reason": "seventeen in-edges at the start entity with an open question exceed the fan-out cap"
+    },
+    {
+      "id": "c-hb-02",
+      "store": "hubs",
+      "project": 1,
+      "kind": "hub_overflow",
+      "question": "What is the market of the Oxbend fair?",
+      "subjects": [
+        "Oxbend fair"
+      ],
+      "expect_chain": [
+        [
+          [
+            "s5-b01",
+            "s5-b02",
+            "s5-b03",
+            "s5-b04",
+            "s5-b05",
+            "s5-b06",
+            "s5-b07",
+            "s5-b08",
+            "s5-b09",
+            "s5-b10",
+            "s5-b11",
+            "s5-b12",
+            "s5-b13",
+            "s5-b14",
+            "s5-b15",
+            "s5-b16",
+            "s5-b17"
+          ]
+        ]
+      ],
+      "allow_record_ids": [],
+      "forbid_record_ids": [],
+      "expect_abstain": false,
+      "temporal": false,
+      "expect_incomplete": true,
+      "expect_overflow_min": 1,
+      "reason": "the asked predicate narrows the hub to seventeen, inside the filtered cap"
+    },
+    {
+      "id": "c-hb-03",
+      "store": "hubs",
+      "project": 1,
+      "kind": "hub_overflow",
+      "question": "What is in the Pellamy bailiff?",
+      "subjects": [
+        "Pellamy bailiff"
+      ],
+      "expect_chain": [],
+      "allow_record_ids": [
+        "s5-c01",
+        "s5-c02",
+        "s5-c03",
+        "s5-c04",
+        "s5-c05",
+        "s5-c06",
+        "s5-c07",
+        "s5-c08",
+        "s5-c09",
+        "s5-c10",
+        "s5-c11",
+        "s5-c12",
+        "s5-c13",
+        "s5-c14",
+        "s5-c15",
+        "s5-c16",
+        "s5-c17",
+        "s5-c18",
+        "s5-c19",
+        "s5-c20",
+        "s5-c21",
+        "s5-c22",
+        "s5-c23",
+        "s5-c24",
+        "s5-c25",
+        "s5-c26",
+        "s5-c27",
+        "s5-c28",
+        "s5-c29",
+        "s5-c30",
+        "s5-c31",
+        "s5-c32",
+        "s5-c33",
+        "s5-c34",
+        "s5-c35",
+        "s5-c36",
+        "s5-c37",
+        "s5-c38",
+        "s5-o1",
+        "s5-r1",
+        "s5-r2"
+      ],
+      "forbid_record_ids": [],
+      "expect_abstain": true,
+      "expect_mode": "overflow",
+      "temporal": false,
+      "expect_overflow_min": 1,
+      "reason": "forty in-edges at the start entity with an open question exceed both caps"
+    },
+    {
+      "id": "c-hb-04",
+      "store": "hubs",
+      "project": 1,
+      "kind": "hub_overflow",
+      "question": "What is the overseer of the Cranbeck hive?",
+      "subjects": [
+        "Cranbeck hive"
+      ],
+      "expect_chain": [
+        [
+          "s5-r2",
+          "s5-r1"
+        ],
+        [
+          "s5-r2",
+          "s5-r1",
+          [
+            "s5-c01",
+            "s5-c02",
+            "s5-c03",
+            "s5-c04",
+            "s5-c05",
+            "s5-c06",
+            "s5-c07",
+            "s5-c08",
+            "s5-c09",
+            "s5-c10",
+            "s5-c11",
+            "s5-c12",
+            "s5-c13",
+            "s5-c14",
+            "s5-c15",
+            "s5-c16",
+            "s5-c17",
+            "s5-c18",
+            "s5-c19",
+            "s5-c20",
+            "s5-c21",
+            "s5-c22",
+            "s5-c23",
+            "s5-c24",
+            "s5-c25",
+            "s5-c26",
+            "s5-c27",
+            "s5-c28",
+            "s5-c29",
+            "s5-c30",
+            "s5-c31",
+            "s5-c32",
+            "s5-c33",
+            "s5-c34",
+            "s5-c35",
+            "s5-c36",
+            "s5-c37",
+            "s5-c38",
+            "s5-r1",
+            "s5-o1"
+          ]
+        ]
+      ],
+      "allow_record_ids": [],
+      "forbid_record_ids": [],
+      "expect_abstain": false,
+      "temporal": false,
+      "expect_incomplete": true,
+      "expect_overflow_min": 1,
+      "reason": "the forty-in-edge hub sits at the terminal hop, so the terminal cap reads it"
+    },
+    {
+      "id": "c-hb-05",
+      "store": "hubs",
+      "project": 1,
+      "kind": "hub_overflow",
+      "question": "What is in the Ilbury estate?",
+      "subjects": [
+        "Ilbury estate"
+      ],
+      "expect_chain": [
+        [
+          [
+            "s5-a01",
+            "s5-a02",
+            "s5-a03",
+            "s5-a04",
+            "s5-a05",
+            "s5-a06",
+            "s5-a07",
+            "s5-a08",
+            "s5-a09"
+          ]
+        ]
+      ],
+      "allow_record_ids": [],
+      "forbid_record_ids": [],
+      "expect_abstain": false,
+      "temporal": false,
+      "reason": "nine in-edges are inside the fan-out cap"
+    },
+    {
+      "id": "c-ic-02",
+      "store": "hubs",
+      "project": 1,
+      "kind": "incomplete_chain",
+      "question": "What is in the Odderly fair?",
+      "subjects": [
+        "Odderly fair"
+      ],
+      "expect_chain": [
+        [
+          "s5-o1"
+        ]
+      ],
+      "allow_record_ids": [
+        "s5-c01",
+        "s5-c02",
+        "s5-c03",
+        "s5-c04",
+        "s5-c05",
+        "s5-c06",
+        "s5-c07",
+        "s5-c08",
+        "s5-c09",
+        "s5-c10",
+        "s5-c11",
+        "s5-c12",
+        "s5-c13",
+        "s5-c14",
+        "s5-c15",
+        "s5-c16",
+        "s5-c17",
+        "s5-c18",
+        "s5-c19",
+        "s5-c20",
+        "s5-c21",
+        "s5-c22",
+        "s5-c23",
+        "s5-c24",
+        "s5-c25",
+        "s5-c26",
+        "s5-c27",
+        "s5-c28",
+        "s5-c29",
+        "s5-c30",
+        "s5-c31",
+        "s5-c32",
+        "s5-c33",
+        "s5-c34",
+        "s5-c35",
+        "s5-c36",
+        "s5-c37",
+        "s5-c38",
+        "s5-r1",
+        "s5-r2"
+      ],
+      "forbid_record_ids": [],
+      "expect_abstain": false,
+      "temporal": false,
+      "expect_incomplete": true,
+      "expect_overflow_min": 1,
+      "reason": "the chain ends at a node whose expansion overflowed, so it is incomplete"
+    },
+    {
+      "id": "c-as-01",
+      "store": "temporal",
+      "project": 1,
+      "kind": "asof_superseded",
+      "question": "What is the apiary of the Wexholt hive?",
+      "subjects": [
+        "Wexholt hive"
+      ],
+      "expect_chain": [
+        [
+          "s6-03"
+        ],
+        [
+          "s6-01"
+        ]
+      ],
+      "allow_record_ids": [
+        "s6-02",
+        "s6-04"
+      ],
+      "forbid_record_ids": [],
+      "expect_abstain": false,
+      "temporal": true
+    },
+    {
+      "id": "c-as-02",
+      "store": "temporal",
+      "project": 1,
+      "kind": "asof_superseded",
+      "question": "What is the apiary of the Wexholt hive?",
+      "subjects": [
+        "Wexholt hive"
+      ],
+      "expect_chain": [
+        [
+          "s6-01"
+        ]
+      ],
+      "allow_record_ids": [],
+      "forbid_record_ids": [
+        "s6-03"
+      ],
+      "expect_abstain": false,
+      "temporal": false,
+      "as_of": {
+        "record": "s6-01",
+        "offset_seconds": 1
+      }
+    },
+    {
+      "id": "c-as-03",
+      "store": "temporal",
+      "project": 1,
+      "kind": "asof_superseded",
+      "question": "What is the holding of the Wexholt hive?",
+      "subjects": [
+        "Wexholt hive"
+      ],
+      "expect_chain": [
+        [
+          "s6-01",
+          "s6-02"
+        ]
+      ],
+      "allow_record_ids": [],
+      "forbid_record_ids": [
+        "s6-03",
+        "s6-04"
+      ],
+      "expect_abstain": false,
+      "temporal": false,
+      "as_of": {
+        "record": "s6-02",
+        "offset_seconds": 1
+      }
+    },
+    {
+      "id": "c-as-04",
+      "store": "temporal",
+      "project": 1,
+      "kind": "asof_superseded",
+      "question": "What is the holding of the Wexholt hive?",
+      "subjects": [
+        "Wexholt hive"
+      ],
+      "expect_chain": [
+        [
+          "s6-03",
+          "s6-04"
+        ]
+      ],
+      "allow_record_ids": [],
+      "forbid_record_ids": [
+        "s6-01",
+        "s6-02"
+      ],
+      "expect_abstain": false,
+      "expect_mode": "complete",
+      "temporal": false
+    },
+    {
+      "id": "c-as-05",
+      "store": "temporal",
+      "project": 1,
+      "kind": "asof_superseded",
+      "question": "What is the holding of the Wexholt hive?",
+      "subjects": [
+        "Wexholt hive"
+      ],
+      "expect_chain": [
+        [
+          "s6-03",
+          "s6-04"
+        ],
+        [
+          "s6-01",
+          "s6-02"
+        ]
+      ],
+      "allow_record_ids": [],
+      "forbid_record_ids": [],
+      "expect_abstain": false,
+      "temporal": true
+    },
+    {
+      "id": "c-af-01",
+      "store": "temporal",
+      "project": 1,
+      "kind": "after_forget",
+      "question": "What is the apiary of the Ilbury hive?",
+      "subjects": [
+        "Ilbury hive"
+      ],
+      "expect_chain": [],
+      "allow_record_ids": [],
+      "forbid_record_ids": [
+        "s6-05"
+      ],
+      "expect_abstain": true,
+      "expect_mode": "no-answer",
+      "temporal": false,
+      "reason": "the only apiary edge was retracted, so nothing is current"
+    },
+    {
+      "id": "c-af-02",
+      "store": "temporal",
+      "project": 1,
+      "kind": "after_forget",
+      "question": "What is the apiary of the Ilbury hive?",
+      "subjects": [
+        "Ilbury hive"
+      ],
+      "expect_chain": [
+        [
+          "s6-05"
+        ]
+      ],
+      "allow_record_ids": [
+        "s6-06"
+      ],
+      "forbid_record_ids": [],
+      "expect_abstain": false,
+      "temporal": true
+    },
+    {
+      "id": "c-af-03",
+      "store": "temporal",
+      "project": 1,
+      "kind": "after_forget",
+      "question": "What is the holding of the Ilbury hive?",
+      "subjects": [
+        "Ilbury hive"
+      ],
+      "expect_chain": [],
+      "allow_record_ids": [],
+      "forbid_record_ids": [
+        "s6-05",
+        "s6-06"
+      ],
+      "expect_abstain": true,
+      "expect_mode": "no-answer",
+      "temporal": false,
+      "reason": "the retracted first hop breaks the chain in the present tense"
+    },
+    {
+      "id": "c-af-04",
+      "store": "temporal",
+      "project": 1,
+      "kind": "after_forget",
+      "question": "What is the holding of the Ilbury hive?",
+      "subjects": [
+        "Ilbury hive"
+      ],
+      "expect_chain": [
+        [
+          "s6-05",
+          "s6-06"
+        ]
+      ],
+      "allow_record_ids": [],
+      "forbid_record_ids": [],
+      "expect_abstain": false,
+      "temporal": true
+    },
+    {
+      "id": "c-af-05",
+      "store": "temporal",
+      "project": 1,
+      "kind": "after_forget",
+      "question": "What is the apiary of the Havermast yard?",
+      "subjects": [
+        "Havermast yard"
+      ],
+      "expect_chain": [],
+      "allow_record_ids": [
+        "s6-06"
+      ],
+      "forbid_record_ids": [
+        "s6-05"
+      ],
+      "expect_abstain": true,
+      "expect_mode": "no-answer",
+      "temporal": false,
+      "reason": "the reverse hop is retracted too"
+    },
+    {
+      "id": "c-ae-01",
+      "store": "temporal",
+      "project": 1,
+      "kind": "after_erase",
+      "question": "What is the holding of the Ostrey hive?",
+      "subjects": [
+        "Ostrey hive"
+      ],
+      "expect_chain": [],
+      "allow_record_ids": [
+        "s6-07"
+      ],
+      "forbid_record_ids": [],
+      "expect_abstain": true,
+      "expect_mode": "no-answer",
+      "temporal": false,
+      "reason": "the holding edge was erased, so no chain reaches a holding"
+    },
+    {
+      "id": "c-ae-02",
+      "store": "temporal",
+      "project": 1,
+      "kind": "after_erase",
+      "question": "What is the holding of the Ostrey hive?",
+      "subjects": [
+        "Ostrey hive"
+      ],
+      "expect_chain": [],
+      "allow_record_ids": [
+        "s6-07"
+      ],
+      "forbid_record_ids": [],
+      "expect_abstain": true,
+      "expect_mode": "no-answer",
+      "temporal": true,
+      "reason": "erase removes the edge from temporal answers too, unlike forget"
+    },
+    {
+      "id": "c-ae-03",
+      "store": "temporal",
+      "project": 1,
+      "kind": "after_erase",
+      "question": "What is the market of the Immerly estate?",
+      "subjects": [
+        "Immerly estate"
+      ],
+      "expect_chain": [],
+      "allow_record_ids": [
+        "s6-09",
+        "s6-10"
+      ],
+      "forbid_record_ids": [],
+      "expect_abstain": true,
+      "expect_mode": "no-answer",
+      "temporal": false,
+      "reason": "the market edge was erased"
+    },
+    {
+      "id": "c-ae-04",
+      "store": "temporal",
+      "project": 1,
+      "kind": "after_erase",
+      "question": "What is the market of the Pellamy fair?",
+      "subjects": [
+        "Pellamy fair"
+      ],
+      "expect_chain": [],
+      "allow_record_ids": [],
+      "forbid_record_ids": [],
+      "expect_abstain": true,
+      "expect_mode": "no-start",
+      "temporal": false,
+      "reason": "the erase orphaned the value entity and the name no longer resolves"
+    },
+    {
+      "id": "c-ae-05",
+      "store": "temporal",
+      "project": 1,
+      "kind": "after_erase",
+      "question": "What is the apiary of the Naverly yard?",
+      "subjects": [
+        "Naverly yard"
+      ],
+      "expect_chain": [
+        [
+          "s6-07"
+        ]
+      ],
+      "allow_record_ids": [],
+      "forbid_record_ids": [],
+      "expect_abstain": false,
+      "temporal": false,
+      "reason": "erasing one key leaves the other edges of the same entity intact"
+    },
+    {
+      "id": "c-sc-01",
+      "store": "screens",
+      "project": 1,
+      "kind": "secret_in_chain",
+      "question": "What is the warrant of the Immerly fair?",
+      "subjects": [
+        "Immerly fair"
+      ],
+      "expect_chain": [],
+      "allow_record_ids": [
+        "s7-01"
+      ],
+      "forbid_record_ids": [
+        "s7-09"
+      ],
+      "expect_abstain": true,
+      "temporal": false,
+      "reason": "the asked value is a credential: the store redacted it and the graph must not emit the placeholder"
+    },
+    {
+      "id": "c-sc-02",
+      "store": "screens",
+      "project": 1,
+      "kind": "secret_in_chain",
+      "question": "What is the factor of the Immerly fair?",
+      "subjects": [
+        "Immerly fair"
+      ],
+      "expect_chain": [],
+      "allow_record_ids": [],
+      "forbid_record_ids": [
+        "s7-06"
+      ],
+      "expect_abstain": true,
+      "expect_mode": "screened",
+      "temporal": false,
+      "reason": "the asked fact is screened content, so the claims lane silenced the graph"
+    },
+    {
+      "id": "c-sc-03",
+      "store": "screens",
+      "project": 1,
+      "kind": "secret_in_chain",
+      "question": "What is the archive of the Immerly fair?",
+      "subjects": [
+        "Immerly fair"
+      ],
+      "expect_chain": [],
+      "allow_record_ids": [],
+      "forbid_record_ids": [
+        "s7-07"
+      ],
+      "expect_abstain": true,
+      "expect_mode": "screened",
+      "temporal": false,
+      "reason": "a user-home path in the asked fact silences the lane and the graph"
+    },
+    {
+      "id": "c-sc-04",
+      "store": "screens",
+      "project": 1,
+      "kind": "secret_in_chain",
+      "question": "What is the notice of the Immerly fair?",
+      "subjects": [
+        "Immerly fair"
+      ],
+      "expect_chain": [],
+      "allow_record_ids": [],
+      "forbid_record_ids": [
+        "s7-08"
+      ],
+      "expect_abstain": true,
+      "expect_mode": "screened",
+      "temporal": false,
+      "reason": "an over-long value in the asked fact silences the lane and the graph"
+    },
+    {
+      "id": "c-sc-05",
+      "store": "screens",
+      "project": 1,
+      "kind": "secret_in_chain",
+      "question": "What is the overseer of the Immerly fair?",
+      "subjects": [
+        "Immerly fair"
+      ],
+      "expect_chain": [
+        [
+          "s7-01"
+        ]
+      ],
+      "allow_record_ids": [],
+      "forbid_record_ids": [
+        "s7-02",
+        "s7-03",
+        "s7-04",
+        "s7-05",
+        "s7-06",
+        "s7-07",
+        "s7-08",
+        "s7-09",
+        "s7-10"
+      ],
+      "expect_abstain": false,
+      "temporal": false
+    },
+    {
+      "id": "c-sc-06",
+      "store": "screens",
+      "project": 1,
+      "kind": "secret_in_chain",
+      "question": "What is the holding of the Quillet hive?",
+      "subjects": [
+        "Quillet hive"
+      ],
+      "expect_chain": [],
+      "allow_record_ids": [
+        "s7-30"
+      ],
+      "forbid_record_ids": [
+        "s7-31"
+      ],
+      "expect_abstain": true,
+      "expect_mode": "screened-rows",
+      "temporal": false,
+      "reason": "the only chain that reaches a holding ends on screened content, so the row is dropped"
+    },
+    {
+      "id": "c-pv-01",
+      "store": "screens",
+      "project": 1,
+      "kind": "private_in_chain",
+      "question": "What is the crier of the Immerly fair?",
+      "subjects": [
+        "Immerly fair"
+      ],
+      "expect_chain": [],
+      "allow_record_ids": [
+        "s7-01"
+      ],
+      "forbid_record_ids": [
+        "s7-02"
+      ],
+      "expect_abstain": true,
+      "temporal": false,
+      "reason": "a telephone number never reaches the block"
+    },
+    {
+      "id": "c-pv-02",
+      "store": "screens",
+      "project": 1,
+      "kind": "private_in_chain",
+      "question": "What is the bearing of the Immerly fair?",
+      "subjects": [
+        "Immerly fair"
+      ],
+      "expect_chain": [],
+      "allow_record_ids": [
+        "s7-01"
+      ],
+      "forbid_record_ids": [
+        "s7-03"
+      ],
+      "expect_abstain": true,
+      "temporal": false,
+      "reason": "a private address never reaches the block"
+    },
+    {
+      "id": "c-pv-03",
+      "store": "screens",
+      "project": 1,
+      "kind": "private_in_chain",
+      "question": "What is the levy of the Immerly fair?",
+      "subjects": [
+        "Immerly fair"
+      ],
+      "expect_chain": [],
+      "allow_record_ids": [
+        "s7-01"
+      ],
+      "forbid_record_ids": [
+        "s7-04"
+      ],
+      "expect_abstain": true,
+      "temporal": false,
+      "reason": "an identifier of that shape never reaches the block"
+    },
+    {
+      "id": "c-pv-04",
+      "store": "screens",
+      "project": 1,
+      "kind": "private_in_chain",
+      "question": "What is the docket of the Immerly fair?",
+      "subjects": [
+        "Immerly fair"
+      ],
+      "expect_chain": [],
+      "allow_record_ids": [
+        "s7-01"
+      ],
+      "forbid_record_ids": [
+        "s7-05"
+      ],
+      "expect_abstain": true,
+      "temporal": false,
+      "reason": "a card-shaped number never reaches the block"
+    },
+    {
+      "id": "c-pv-05",
+      "store": "screens",
+      "project": 1,
+      "kind": "private_in_chain",
+      "question": "What is the gauge of the Naverly fair?",
+      "subjects": [
+        "Naverly fair"
+      ],
+      "expect_chain": [
+        [
+          "s7-16"
+        ]
+      ],
+      "allow_record_ids": [
+        "s7-17",
+        "s7-18",
+        "s7-19",
+        "s7-20",
+        "s7-21",
+        "s7-22",
+        "s7-23",
+        "s7-24",
+        "s7-25",
+        "s7-26"
+      ],
+      "forbid_record_ids": [],
+      "expect_abstain": false,
+      "temporal": false
+    },
+    {
+      "id": "c-pv-06",
+      "store": "screens",
+      "project": 1,
+      "kind": "private_in_chain",
+      "question": "What is the berth of the Naverly fair?",
+      "subjects": [
+        "Naverly fair"
+      ],
+      "expect_chain": [
+        [
+          "s7-21"
+        ]
+      ],
+      "allow_record_ids": [
+        "s7-16",
+        "s7-17",
+        "s7-18",
+        "s7-19",
+        "s7-20",
+        "s7-22",
+        "s7-23",
+        "s7-24",
+        "s7-25",
+        "s7-26"
+      ],
+      "forbid_record_ids": [],
+      "expect_abstain": false,
+      "temporal": false
+    },
+    {
+      "id": "c-pv-07",
+      "store": "screens",
+      "project": 1,
+      "kind": "private_in_chain",
+      "question": "What is in the Wexholt estate?",
+      "subjects": [
+        "Wexholt estate"
+      ],
+      "expect_chain": [
+        [
+          "s7-29"
+        ]
+      ],
+      "allow_record_ids": [],
+      "forbid_record_ids": [
+        "s7-27",
+        "s7-28"
+      ],
+      "expect_abstain": false,
+      "temporal": false
+    },
+    {
+      "id": "c-lt-01",
+      "store": "latency",
+      "project": 1,
+      "kind": "forward2",
+      "question": "What is the holding of the Quillet hive?",
+      "subjects": [
+        "Quillet hive"
+      ],
+      "expect_chain": [
+        [
+          "s8-01",
+          "s8-02"
+        ]
+      ],
+      "allow_record_ids": [
+        "s8-03",
+        "s8-05",
+        "s8-06"
+      ],
+      "forbid_record_ids": [],
+      "expect_abstain": false,
+      "temporal": false,
+      "latency": true
+    },
+    {
+      "id": "c-lt-02",
+      "store": "latency",
+      "project": 1,
+      "kind": "forward3",
+      "question": "What is the market of the Quillet hive?",
+      "subjects": [
+        "Quillet hive"
+      ],
+      "expect_chain": [
+        [
+          "s8-01",
+          "s8-02",
+          "s8-03"
+        ]
+      ],
+      "allow_record_ids": [
+        "s8-05",
+        "s8-06"
+      ],
+      "forbid_record_ids": [],
+      "expect_abstain": false,
+      "temporal": false,
+      "latency": true
+    },
+    {
+      "id": "c-lt-03",
+      "store": "latency",
+      "project": 1,
+      "kind": "reverse1",
+      "question": "What is the apiary of the Dornhale yard?",
+      "subjects": [
+        "Dornhale yard"
+      ],
+      "expect_chain": [
+        [
+          "s8-01"
+        ],
+        [
+          "s8-05"
+        ]
+      ],
+      "allow_record_ids": [
+        "s8-02",
+        "s8-03",
+        "s8-04",
+        "s8-06"
+      ],
+      "forbid_record_ids": [],
+      "expect_abstain": false,
+      "temporal": false,
+      "latency": true
+    },
+    {
+      "id": "c-lt-04",
+      "store": "latency",
+      "project": 1,
+      "kind": "reverse2",
+      "question": "What is the apiary of the Ashperry estate?",
+      "subjects": [
+        "Ashperry estate"
+      ],
+      "expect_chain": [
+        [
+          "s8-02",
+          "s8-01"
+        ],
+        [
+          "s8-02",
+          "s8-05"
+        ]
+      ],
+      "allow_record_ids": [
+        "s8-03",
+        "s8-04",
+        "s8-06"
+      ],
+      "forbid_record_ids": [],
+      "expect_abstain": false,
+      "temporal": false,
+      "latency": true
+    },
+    {
+      "id": "c-lt-05",
+      "store": "latency",
+      "project": 1,
+      "kind": "reverse3",
+      "question": "What is the apiary of the Vantrey fair?",
+      "subjects": [
+        "Vantrey fair"
+      ],
+      "expect_chain": [
+        [
+          "s8-03",
+          "s8-02",
+          "s8-01"
+        ],
+        [
+          "s8-03",
+          "s8-02",
+          "s8-05"
+        ]
+      ],
+      "allow_record_ids": [
+        "s8-04",
+        "s8-06"
+      ],
+      "forbid_record_ids": [],
+      "expect_abstain": false,
+      "temporal": false,
+      "latency": true
+    },
+    {
+      "id": "c-lt-06",
+      "store": "latency",
+      "project": 1,
+      "kind": "forward3",
+      "question": "What is the market of the Ostrey hive?",
+      "subjects": [
+        "Ostrey hive"
+      ],
+      "expect_chain": [
+        [
+          "s8-07",
+          "s8-08",
+          "s8-09"
+        ]
+      ],
+      "allow_record_ids": [
+        "s8-10"
+      ],
+      "forbid_record_ids": [],
+      "expect_abstain": false,
+      "temporal": false,
+      "latency": true
+    },
+    {
+      "id": "c-lt-07",
+      "store": "latency",
+      "project": 1,
+      "kind": "alias",
+      "question": "What is the holding of Comb7?",
+      "subjects": [
+        "Comb7"
+      ],
+      "expect_chain": [
+        [
+          "s8-10",
+          "s8-08"
+        ]
+      ],
+      "allow_record_ids": [
+        "s8-07",
+        "s8-09"
+      ],
+      "forbid_record_ids": [],
+      "expect_abstain": false,
+      "temporal": false,
+      "latency": true
+    },
+    {
+      "id": "c-lt-08",
+      "store": "latency",
+      "project": 1,
+      "kind": "incomplete_chain",
+      "question": "What is the overseer of the Ostrey hive?",
+      "subjects": [
+        "Ostrey hive"
+      ],
+      "expect_chain": [],
+      "allow_record_ids": [
+        "s8-07",
+        "s8-08",
+        "s8-09",
+        "s8-10"
+      ],
+      "forbid_record_ids": [],
+      "expect_abstain": true,
+      "expect_mode": "no-answer",
+      "temporal": false,
+      "latency": true,
+      "reason": "no overseer edge is inside three hops of that hive"
+    },
+    {
+      "id": "c-lt-09",
+      "store": "latency",
+      "project": 1,
+      "kind": "reverse1",
+      "question": "What is the market of the Vantrey fair?",
+      "subjects": [
+        "Vantrey fair"
+      ],
+      "expect_chain": [
+        [
+          "s8-03"
+        ]
+      ],
+      "allow_record_ids": [
+        "s8-01",
+        "s8-02",
+        "s8-04",
+        "s8-05",
+        "s8-06"
+      ],
+      "forbid_record_ids": [],
+      "expect_abstain": false,
+      "temporal": false,
+      "latency": true
+    },
+    {
+      "id": "c-lt-10",
+      "store": "latency",
+      "project": 1,
+      "kind": "incomplete_chain",
+      "question": "What is the overseer of the Quillet hive?",
+      "subjects": [
+        "Quillet hive"
+      ],
+      "expect_chain": [],
+      "allow_record_ids": [
+        "s8-01",
+        "s8-02",
+        "s8-03",
+        "s8-05",
+        "s8-06"
+      ],
+      "forbid_record_ids": [
+        "s8-04"
+      ],
+      "expect_abstain": true,
+      "expect_mode": "no-answer",
+      "temporal": false,
+      "latency": true,
+      "reason": "the overseer edge sits at hop four"
+    },
+    {
+      "id": "c-ts-01",
+      "store": "joins",
+      "project": 1,
+      "kind": "two_subjects",
+      "question": "What is the holding of the Ashperry hive and the Sorbec hive?",
+      "subjects": [
+        "Ashperry hive",
+        "Sorbec hive"
+      ],
+      "expect_chain": [
+        [
+          "s9-01",
+          "s9-03"
+        ],
+        [
+          "s9-02",
+          "s9-04"
+        ]
+      ],
+      "allow_record_ids": [
+        "s9-05",
+        "s9-06"
+      ],
+      "forbid_record_ids": [],
+      "expect_abstain": false,
+      "expect_mode": "complete",
+      "temporal": false
+    },
+    {
+      "id": "c-ts-02",
+      "store": "joins",
+      "project": 1,
+      "kind": "two_subjects",
+      "question": "What is the market of the Ashperry hive and the Sorbec hive?",
+      "subjects": [
+        "Ashperry hive",
+        "Sorbec hive"
+      ],
+      "expect_chain": [
+        [
+          "s9-01",
+          "s9-03",
+          "s9-05"
+        ],
+        [
+          "s9-02",
+          "s9-04",
+          "s9-06"
+        ]
+      ],
+      "allow_record_ids": [],
+      "forbid_record_ids": [],
+      "expect_abstain": false,
+      "temporal": false
+    },
+    {
+      "id": "c-ts-03",
+      "store": "joins",
+      "project": 1,
+      "kind": "two_subjects",
+      "question": "What is the holding of the Ashperry hive and the Pinvale hive?",
+      "subjects": [
+        "Ashperry hive",
+        "Pinvale hive"
+      ],
+      "expect_chain": [
+        [
+          "s9-01",
+          "s9-03"
+        ]
+      ],
+      "allow_record_ids": [
+        "s9-05"
+      ],
+      "forbid_record_ids": [],
+      "expect_abstain": false,
+      "temporal": false,
+      "expect_unresolved": [
+        "Pinvale hive"
+      ]
+    },
+    {
+      "id": "c-ts-05",
+      "store": "joins",
+      "project": 1,
+      "kind": "two_subjects",
+      "question": "What is the apiary of the Dornhale yard and the Bracklow yard?",
+      "subjects": [
+        "Dornhale yard",
+        "Bracklow yard"
+      ],
+      "expect_chain": [
+        [
+          "s9-01"
+        ],
+        [
+          "s9-02"
+        ]
+      ],
+      "allow_record_ids": [
+        "s9-03",
+        "s9-04",
+        "s9-05",
+        "s9-06"
+      ],
+      "forbid_record_ids": [],
+      "expect_abstain": false,
+      "temporal": false
+    },
+    {
+      "id": "c-f2-04",
+      "store": "joins",
+      "project": 1,
+      "kind": "forward2",
+      "question": "What is the holding of the Ostrey hive?",
+      "subjects": [
+        "Ostrey hive"
+      ],
+      "expect_chain": [
+        [
+          "s9-07",
+          "s9-08"
+        ]
+      ],
+      "allow_record_ids": [],
+      "forbid_record_ids": [],
+      "expect_abstain": false,
+      "temporal": false
+    },
+    {
+      "id": "c-r2-03",
+      "store": "joins",
+      "project": 1,
+      "kind": "reverse2",
+      "question": "What is the apiary of the Immerly estate?",
+      "subjects": [
+        "Immerly estate"
+      ],
+      "expect_chain": [
+        [
+          "s9-03",
+          "s9-01"
+        ]
+      ],
+      "allow_record_ids": [
+        "s9-05"
+      ],
+      "forbid_record_ids": [],
+      "expect_abstain": false,
+      "temporal": false
+    },
+    {
+      "id": "c-r3-02",
+      "store": "joins",
+      "project": 1,
+      "kind": "reverse3",
+      "question": "What is the apiary of the Pellamy fair?",
+      "subjects": [
+        "Pellamy fair"
+      ],
+      "expect_chain": [
+        [
+          "s9-05",
+          "s9-03",
+          "s9-01"
+        ]
+      ],
+      "allow_record_ids": [],
+      "forbid_record_ids": [],
+      "expect_abstain": false,
+      "temporal": false
+    },
+    {
+      "id": "c-wk-01",
+      "store": "world",
+      "project": 1,
+      "kind": "world_knowledge",
+      "question": "What is the boiling point of water?",
+      "subjects": [],
+      "expect_chain": [],
+      "allow_record_ids": [],
+      "forbid_record_ids": [],
+      "expect_abstain": true,
+      "temporal": false,
+      "reason": "general knowledge names no stored subject"
+    },
+    {
+      "id": "c-wk-02",
+      "store": "world",
+      "project": 1,
+      "kind": "world_knowledge",
+      "question": "Which ocean is the deepest?",
+      "subjects": [],
+      "expect_chain": [],
+      "allow_record_ids": [],
+      "forbid_record_ids": [],
+      "expect_abstain": true,
+      "temporal": false,
+      "reason": "general knowledge names no stored subject"
+    },
+    {
+      "id": "c-wk-03",
+      "store": "world",
+      "project": 1,
+      "kind": "world_knowledge",
+      "question": "What is the tallest mountain in the world?",
+      "subjects": [],
+      "expect_chain": [],
+      "allow_record_ids": [],
+      "forbid_record_ids": [],
+      "expect_abstain": true,
+      "temporal": false,
+      "reason": "general knowledge names no stored subject"
+    },
+    {
+      "id": "c-wk-04",
+      "store": "world",
+      "project": 1,
+      "kind": "world_knowledge",
+      "question": "Which planet is the largest?",
+      "subjects": [],
+      "expect_chain": [],
+      "allow_record_ids": [],
+      "forbid_record_ids": [],
+      "expect_abstain": true,
+      "temporal": false,
+      "reason": "general knowledge names no stored subject"
+    },
+    {
+      "id": "c-lk-06",
+      "store": "world",
+      "project": 1,
+      "kind": "lookalike",
+      "question": "What is the holding of the Ferrowin estate?",
+      "subjects": [
+        "Ferrowin estate"
+      ],
+      "expect_chain": [],
+      "allow_record_ids": [],
+      "forbid_record_ids": [
+        "s10-01",
+        "s10-02"
+      ],
+      "expect_abstain": true,
+      "expect_mode": "no-start",
+      "temporal": false,
+      "reason": "the lane hands over a look-alike seed row for a name the store cannot identify"
+    },
+    {
+      "id": "c-f3-02",
+      "store": "world",
+      "project": 1,
+      "kind": "forward3",
+      "question": "What is the market of the Havermast hive?",
+      "subjects": [
+        "Havermast hive"
+      ],
+      "expect_chain": [
+        [
+          "s10-03",
+          "s10-01",
+          "s10-02"
+        ]
+      ],
+      "allow_record_ids": [],
+      "forbid_record_ids": [],
+      "expect_abstain": false,
+      "temporal": false
+    },
+    {
+      "id": "c-r1-03",
+      "store": "world",
+      "project": 1,
+      "kind": "reverse1",
+      "question": "What is the apiary of the Ferrowin yard?",
+      "subjects": [
+        "Ferrowin yard"
+      ],
+      "expect_chain": [
+        [
+          "s10-03"
+        ]
+      ],
+      "allow_record_ids": [
+        "s10-01",
+        "s10-02",
+        "s10-04"
+      ],
+      "forbid_record_ids": [],
+      "expect_abstain": false,
+      "temporal": false
+    },
+    {
+      "id": "c-ic-03",
+      "store": "world",
+      "project": 1,
+      "kind": "incomplete_chain",
+      "question": "What is the overseer of the Havermast hive?",
+      "subjects": [
+        "Havermast hive"
+      ],
+      "expect_chain": [],
+      "allow_record_ids": [
+        "s10-01",
+        "s10-02",
+        "s10-03"
+      ],
+      "forbid_record_ids": [
+        "s10-04"
+      ],
+      "expect_abstain": true,
+      "expect_mode": "no-answer",
+      "temporal": false,
+      "reason": "the overseer edge sits at hop four from that hive"
+    }
+  ],
+  "expected_counts": {
+    "stores": 10,
+    "cases": 91,
+    "records": 323,
+    "claim_operations": 305,
+    "supersessions": 41,
+    "retractions": 11,
+    "erasures": 7,
+    "padding_claims": 12000,
+    "abstention_cases": 33,
+    "leakage_cases": 13,
+    "kinds": {
+      "forward2": 5,
+      "forward3": 4,
+      "reverse1": 5,
+      "reverse2": 4,
+      "reverse3": 4,
+      "incomplete_chain": 5,
+      "cross_project": 5,
+      "global_shadowed": 5,
+      "lookalike": 6,
+      "alias": 6,
+      "two_subjects": 5,
+      "hub_overflow": 5,
+      "asof_superseded": 5,
+      "after_forget": 5,
+      "after_erase": 5,
+      "secret_in_chain": 6,
+      "private_in_chain": 7,
+      "world_knowledge": 4
+    }
+  }
+}

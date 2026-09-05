@@ -1,0 +1,29 @@
+{
+  "_comment": [
+    "CC BY-NC 4.0. Measurements only: rows carry sample_id, question index,",
+    "category and scores, never text. ensure_dataset refuses to fetch or read",
+    "this dataset when JARVIS_BENCHMARK_COMMERCIAL_USE is set."
+  ],
+  "dataset": {
+    "sha256": null,
+    "licence_sha256": null
+  },
+  "n_cases": 300,
+  "sampling": {
+    "strategy": "stratified",
+    "key": "category",
+    "seed": 20260904
+  },
+  "runtime": {
+    "JARVIS_COMPACTION_ENABLED": false,
+    "JARVIS_MEMORY_EMBEDDINGS": "disabled",
+    "JARVIS_CONTEXT_LENGTH": 32768
+  },
+  "model": {
+    "answer": "claude-cli:claude-sonnet-4-5",
+    "judge": "claude-cli:claude-sonnet-4-5",
+    "allowed_model_prefixes": [
+      "claude-cli:claude-sonnet"
+    ]
+  }
+}

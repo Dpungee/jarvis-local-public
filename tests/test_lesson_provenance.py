@@ -7,6 +7,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from jarvis.memory import Memory, SCHEMA_VERSION, now_iso
+from tests.legacy_store_fixture import seed_legacy_memory_row, strip_spine
 
 
 class LessonProvenanceTests(unittest.TestCase):
@@ -130,14 +131,16 @@ class LessonProvenanceTests(unittest.TestCase):
                 improvements="",
                 tool_calls=0,
             )
-        cursor = memory.db.execute(
-            """INSERT INTO memories(
-                   created_at, kind, content, source, family,
-                   outcome_status, reflection_id
-               ) VALUES (?, 'lesson', ?, 'legacy import', ?, 'complete', ?)""",
-            (now_iso(), content, family, reflection_id),
+        # A legacy lesson row: lineage on the spine, no provenance row.
+        return seed_legacy_memory_row(
+            memory,
+            kind="lesson",
+            content=content,
+            source="legacy import",
+            family=family,
+            outcome_status="complete",
+            reflection_id=reflection_id,
         )
-        return int(cursor.lastrowid)
 
     def _deterministic_legacy_candidate(
         self,
@@ -528,6 +531,7 @@ class LessonProvenanceTests(unittest.TestCase):
                     (reflection_id,),
                 )
                 memory.db.execute("DROP INDEX idx_reflections_prediction")
+                strip_spine(memory.db)
                 memory.db.execute("PRAGMA user_version=29")
 
             with Memory(path) as migrated:
@@ -600,6 +604,7 @@ class LessonProvenanceTests(unittest.TestCase):
                     memory_ids.append(memory_id)
                 memory.db.execute("DROP INDEX idx_reflections_prediction")
                 memory.db.execute("DROP TABLE lesson_provenance")
+                strip_spine(memory.db)
                 memory.db.execute("PRAGMA user_version=29")
 
             with Memory(path) as migrated:
@@ -646,6 +651,7 @@ class LessonProvenanceTests(unittest.TestCase):
                     (reflection_id,),
                 )
                 memory.db.execute("DROP INDEX idx_reflections_prediction")
+                strip_spine(memory.db)
                 memory.db.execute("PRAGMA user_version=29")
 
             with Memory(path) as migrated:
@@ -691,6 +697,7 @@ class LessonProvenanceTests(unittest.TestCase):
                 memory.db.execute(
                     "ALTER TABLE lesson_provenance DROP COLUMN provenance_sha256"
                 )
+                strip_spine(memory.db)
                 memory.db.execute("PRAGMA user_version=30")
 
             with Memory(path) as upgraded:
@@ -743,6 +750,7 @@ class LessonProvenanceTests(unittest.TestCase):
                 legacy.execute(
                     "CREATE TABLE lesson_controls(memory_id INTEGER PRIMARY KEY)"
                 )
+                strip_spine(legacy)
                 legacy.execute("PRAGMA user_version=36")
                 legacy.commit()
             finally:
@@ -794,6 +802,7 @@ class LessonProvenanceTests(unittest.TestCase):
                     actual_steps=2,
                     evidence_ok=True,
                 ))
+                strip_spine(memory.db)
                 memory.db.execute("PRAGMA user_version=36")
 
             with Memory(path) as migrated:
@@ -854,6 +863,7 @@ class LessonProvenanceTests(unittest.TestCase):
                     ).fetchone()[0],
                     2,
                 )
+                strip_spine(memory.db)
                 memory.db.execute("PRAGMA user_version=36")
 
             with Memory(path) as migrated:
@@ -883,6 +893,7 @@ class LessonProvenanceTests(unittest.TestCase):
                        ) VALUES (?, ?, ?, 'code_fix', 1)""",
                     (future_stamp, prediction_id, lesson_id),
                 )
+                strip_spine(memory.db)
                 memory.db.execute("PRAGMA user_version=36")
 
             with Memory(path) as migrated:
@@ -935,6 +946,7 @@ class LessonProvenanceTests(unittest.TestCase):
                        ) VALUES (?, ?, ?, 'code_fix', 1, ?, 1)""",
                     (stamp, prediction_id, lesson_id, stamp),
                 )
+                strip_spine(memory.db)
                 memory.db.execute("PRAGMA user_version=36")
 
             with Memory(path) as migrated:
@@ -976,6 +988,7 @@ class LessonProvenanceTests(unittest.TestCase):
                 )
 
                 self.assertEqual(memory.lesson_effectiveness("code_fix"), [])
+                strip_spine(memory.db)
                 memory.db.execute("PRAGMA user_version=36")
 
             with Memory(path) as migrated:
@@ -1013,6 +1026,7 @@ class LessonProvenanceTests(unittest.TestCase):
                        WHERE prediction_id=? AND memory_id=?""",
                     (malformed, prediction_id, lesson_id),
                 )
+                strip_spine(memory.db)
                 memory.db.execute("PRAGMA user_version=36")
 
             with Memory(path) as migrated:
@@ -1066,6 +1080,7 @@ class LessonProvenanceTests(unittest.TestCase):
                        ) VALUES (?, ?, ?, 'code_fix', 1)""",
                     (now_iso(), active_prediction, int(lesson["id"])),
                 )
+                strip_spine(memory.db)
                 memory.db.execute("PRAGMA user_version=36")
 
             with Memory(path) as migrated:
@@ -1104,6 +1119,7 @@ class LessonProvenanceTests(unittest.TestCase):
                        ) VALUES (?, ?, ?, 'code_fix', 1)""",
                     (now_iso(), practice_prediction, lesson_id),
                 )
+                strip_spine(memory.db)
                 memory.db.execute("PRAGMA user_version=36")
 
             with Memory(path) as migrated:
@@ -1164,6 +1180,7 @@ class LessonProvenanceTests(unittest.TestCase):
                         memory_id,
                     ),
                 )
+                strip_spine(memory.db)
                 memory.db.execute("PRAGMA user_version=36")
 
             with Memory(path) as migrated:
@@ -1224,6 +1241,7 @@ class LessonProvenanceTests(unittest.TestCase):
                    VALUES (?, 'fact', 'sparse legacy value', 'operator')""",
                 (now_iso(),),
             )
+            strip_spine(legacy)
             legacy.execute("PRAGMA user_version=29")
             legacy.commit()
             legacy.close()

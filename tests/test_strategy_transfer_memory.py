@@ -12,6 +12,7 @@ from jarvis.strategy_transfer import (
     select_strategy_transfer,
     strategy_target_from_runtime,
 )
+from tests.legacy_store_fixture import strip_spine
 
 
 class StrategyTransferMemoryTests(unittest.TestCase):
@@ -122,8 +123,8 @@ class StrategyTransferMemoryTests(unittest.TestCase):
 
     def test_v39_schema_and_selector_candidates_are_metadata_only(self) -> None:
         with Memory(Path(":memory:")) as memory:
-            self.assertEqual(SCHEMA_VERSION, 44)
-            self.assertEqual(memory.db.execute("PRAGMA user_version").fetchone()[0], 44)
+            self.assertEqual(SCHEMA_VERSION, 50)
+            self.assertEqual(memory.db.execute("PRAGMA user_version").fetchone()[0], SCHEMA_VERSION)
             for table in (
                 "task_strategy_observations", "strategy_transfer_applications",
                 "strategy_transfer_attestations",
@@ -652,7 +653,7 @@ class StrategyTransferMemoryTests(unittest.TestCase):
                     len(reopened.strategy_transfer_effectiveness("code_test")), 2
                 )
         finally:
-            for suffix in ("", "-wal", "-shm"):
+            for suffix in ("", "-wal", "-shm", ".memory-spine.key"):
                 Path(f"{database_path}{suffix}").unlink(missing_ok=True)
 
     def test_v39_partial_tables_and_interrupted_migration_do_not_wedge_reopen(
@@ -682,6 +683,7 @@ class StrategyTransferMemoryTests(unittest.TestCase):
                 connection.execute(
                     "CREATE TABLE task_strategy_observations(stale TEXT)"
                 )
+                strip_spine(connection)
                 connection.execute("PRAGMA user_version=37")
             finally:
                 connection.close()
@@ -701,7 +703,7 @@ class StrategyTransferMemoryTests(unittest.TestCase):
                 self.assertIn("artifact_sha256", columns)
                 self.assertNotIn("stale", columns)
         finally:
-            for suffix in ("", "-wal", "-shm"):
+            for suffix in ("", "-wal", "-shm", ".memory-spine.key"):
                 Path(f"{database_path}{suffix}").unlink(missing_ok=True)
 
 

@@ -103,6 +103,14 @@ _TEXT_FIELDS = frozenset(
         "initial_model",
         "initial_profile",
         "initial_provider",
+        # The learning channel's per-turn diagnostic (VTMF M4 design 5.4, M-4).
+        # Two closed-vocabulary strings only -- the merged mode and its reason
+        # sub-code.  Never a lesson, a document, a digest, an epoch number or
+        # a confirmation code: those are operator surfaces, and a run metric is
+        # not one.  sanitize_run_metrics RAISES on an unlisted key, so this is
+        # what makes the pair recordable at all rather than a silent drop.
+        "learning_channel_mode",
+        "learning_channel_reason",
         "model",
         "profile",
         "provider",

@@ -1,0 +1,26 @@
+{
+  "_comment": [
+    "Self-generated: no dataset, no network, no external corpus. Lengths are",
+    "approximate tokens (characters / 4); no tokenizer is shipped. Run both",
+    "arms or the number means nothing.",
+    "The control arm has its own window: a 32K-token haystack cannot be delivered into a 32K context, and raising the agent's window to fit the grid would change what the jarvis arm measures. Left null, the runner sizes it to twice the largest grid length and records the value it used."
+  ],
+  "sampling": {
+    "strategy": "grid",
+    "key": "task",
+    "seed": 20260904
+  },
+  "runtime": {
+    "JARVIS_COMPACTION_ENABLED": false,
+    "JARVIS_MEMORY_EMBEDDINGS": "disabled",
+    "JARVIS_CONTEXT_LENGTH": 32768,
+    "JARVIS_DIRECT_CONTEXT_LENGTH": null
+  },
+  "model": {
+    "answer": "claude-cli:claude-sonnet-4-5",
+    "judge": null,
+    "allowed_model_prefixes": [
+      "claude-cli:claude-sonnet"
+    ]
+  }
+}

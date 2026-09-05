@@ -13,6 +13,7 @@ from jarvis.memory_eval import (
     load_retrieval_fixture,
     retrieval_fixture_sha256,
 )
+from tests.legacy_store_fixture import seed_legacy_memory_row
 from jarvis.vault import Vault
 
 
@@ -82,20 +83,22 @@ class MemoryRetrievalEvaluationTests(unittest.TestCase):
         return int(lesson["id"])
 
     def _seed_unproven_legacy_lesson(self, record: dict) -> int:
-        """Reproduce a legacy row without using the guarded provenance API."""
-        cursor = self.memory.db.execute(
-            """INSERT INTO memories(
-                   created_at, kind, content, source, family,
-                   outcome_status, reflection_id
-               ) VALUES (?, 'lesson', ?, 'legacy unproven import', ?, ?, NULL)""",
-            (
-                now_iso(),
-                str(record["content"]),
-                str(record["family"]),
-                str(record["outcome_status"]),
-            ),
+        """Reproduce a legacy row without using the guarded provenance API.
+
+        The row still has no ``lesson_provenance`` record (that is what the
+        evaluation exercises); it only carries the spine lineage every
+        ``memories`` row must have at schema 47.
+        """
+        return seed_legacy_memory_row(
+            self.memory,
+            kind="lesson",
+            content=str(record["content"]),
+            source="legacy unproven import",
+            family=str(record["family"]),
+            outcome_status=str(record["outcome_status"]),
+            reflection_id=None,
+            created_at=now_iso(),
         )
-        return int(cursor.lastrowid)
 
     def _seed_fixture(self) -> None:
         for record in self.fixture["corpus"]:

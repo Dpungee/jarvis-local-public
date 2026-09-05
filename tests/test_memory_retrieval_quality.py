@@ -6,7 +6,8 @@ import unittest
 from pathlib import Path
 
 from jarvis import memory_retrieval
-from jarvis.memory import Memory
+from jarvis.memory import Memory, SCHEMA_VERSION
+from tests.legacy_store_fixture import strip_spine
 
 
 class MemoryRetrievalQualityTests(unittest.TestCase):
@@ -940,6 +941,7 @@ class MemoryRetrievalQualityTests(unittest.TestCase):
                                  '2026-09-01T00:00:00+00:00')""",
                     (blog_id, content_sha256),
                 )
+                strip_spine(raw)
                 raw.execute("PRAGMA user_version=43")
                 raw.commit()
             finally:
@@ -956,7 +958,7 @@ class MemoryRetrievalQualityTests(unittest.TestCase):
                 )
                 self.assertEqual(
                     migrated.db.execute("PRAGMA user_version").fetchone()[0],
-                    44,
+                    SCHEMA_VERSION,
                 )
                 self.assertEqual(
                     migrated.db.execute(

@@ -1,0 +1,28 @@
+{
+  "_comment": [
+    "The control arm. Same questions, evidence sessions only, same day, same",
+    "model. degradation = score(oracle) - score(s), both measured by us."
+  ],
+  "dataset": {
+    "sha256": null,
+    "licence_sha256": null
+  },
+  "n_cases": 150,
+  "sampling": {
+    "strategy": "stratified",
+    "key": "question_type",
+    "seed": 20260904
+  },
+  "runtime": {
+    "JARVIS_COMPACTION_ENABLED": false,
+    "JARVIS_MEMORY_EMBEDDINGS": "disabled",
+    "JARVIS_CONTEXT_LENGTH": 32768
+  },
+  "model": {
+    "answer": "claude-cli:claude-sonnet-4-5",
+    "judge": "claude-cli:claude-sonnet-4-5",
+    "allowed_model_prefixes": [
+      "claude-cli:claude-sonnet"
+    ]
+  }
+}

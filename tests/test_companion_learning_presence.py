@@ -23,6 +23,7 @@ from jarvis.screen_companion import (
     COMPANION_SUGGESTION_TTL_SECONDS,
     ScreenObservation,
 )
+from tests.legacy_store_fixture import strip_spine
 
 
 class CompanionLearningPresenceTests(unittest.TestCase):
@@ -431,6 +432,7 @@ class CompanionLearningPresenceTests(unittest.TestCase):
             connection = sqlite3.connect(database)
             try:
                 connection.execute("DROP TABLE screen_companion_conversations")
+                strip_spine(connection)
                 connection.execute("PRAGMA user_version=35")
                 connection.commit()
             finally:
@@ -517,6 +519,7 @@ class CompanionLearningPresenceTests(unittest.TestCase):
             connection = sqlite3.connect(database)
             try:
                 connection.execute("DROP TABLE screen_companion_conversations")
+                strip_spine(connection)
                 connection.execute("PRAGMA user_version=34")
                 connection.commit()
             finally:

@@ -60,6 +60,10 @@ _DOTENV_KEYS = frozenset({
     "JARVIS_ANTHROPIC_API_ENABLED",
     "JARVIS_CODEX_CLI_ENABLED",
     "JARVIS_CLAUDE_CLI_ENABLED",
+    "JARVIS_COUNCIL_CHAIR_MODEL",
+    "JARVIS_COUNCIL_MEMBER_MODEL",
+    "JARVIS_COUNCIL_CHAIR_EFFORT",
+    "JARVIS_COUNCIL_MEMBER_EFFORT",
     "JARVIS_MAX_STEPS",
     "JARVIS_CONTEXT_LENGTH",
     "JARVIS_FAST_CONTEXT_LENGTH",
@@ -102,6 +106,8 @@ _DOTENV_KEYS = frozenset({
     "JARVIS_MEMORY_EMBEDDING_DIMENSIONS",
     "JARVIS_MEMORY_CLAIM_CLOCK",
     "JARVIS_MEMORY_CLAIM_STALE_THRESHOLD",
+    "JARVIS_MEMORY_PROPOSER",
+    "JARVIS_STRATEGY_TRANSFER",
     "JARVIS_APPROVAL_TTL_HOURS",
     "JARVIS_SELF_INSPECT",
     "JARVIS_SELF_REPAIR",
@@ -519,6 +525,12 @@ class Config:
     memory_embedding_dimensions: int = 512
     memory_claim_clock: str = "shadow"
     memory_claim_stale_threshold: float = 0.70
+    # "rules": only the deterministic grammar proposes a project fact from an
+    # operator statement.  "assisted": when the grammar finds a licensed
+    # statement it cannot split, the local model proposes a triple grounded
+    # verbatim in the operator's words; the parser validates it and the
+    # operator still confirms.  Neither mode lets a model write memory.
+    memory_proposer: str = "assisted"
     vault_dir: Path | None = None
 
     @property
@@ -721,6 +733,9 @@ class Config:
             memory_claim_stale_threshold=_env_float(
                 "JARVIS_MEMORY_CLAIM_STALE_THRESHOLD", 0.70, 0.5, 0.99
             ),
+            memory_proposer=os.getenv(
+                "JARVIS_MEMORY_PROPOSER", "assisted"
+            ).strip().lower(),
             vault_dir=vault_dir,
             approval_ttl_hours=_env_int("JARVIS_APPROVAL_TTL_HOURS", 24, 1, 720),
             external_access=os.getenv("JARVIS_EXTERNAL_ACCESS", "disabled").strip().lower(),
@@ -872,6 +887,10 @@ class Config:
         if cfg.memory_claim_clock not in {"disabled", "shadow", "enforce"}:
             raise ValueError(
                 "JARVIS_MEMORY_CLAIM_CLOCK must be 'disabled', 'shadow', or 'enforce'"
+            )
+        if cfg.memory_proposer not in {"rules", "assisted"}:
+            raise ValueError(
+                "JARVIS_MEMORY_PROPOSER must be 'rules' or 'assisted'"
             )
         if (
             not cfg.memory_embedding_model

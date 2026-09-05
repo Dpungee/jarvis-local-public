@@ -1,9 +1,18 @@
+"""The skill-distillation module, after M4 removed its runtime call path.
+
+``distill_verified_skill`` is no longer reachable from any runtime module: it
+survives as the owner of ``_skill_content``, the template
+``learning_ladder.build_staged_document`` composes with, and as a seeding
+helper for these tests.  The Agent-driven tests that used to live here moved
+to ``tests/test_agent_learning_ladder.py`` (surface) when the agent-side
+distiller call was removed, and the file-tool probe moved to
+``tests/test_tools_hardening.py`` beside the live root's identical probe;
+design 8.1 records the split.
+"""
 from __future__ import annotations
 
 import io
 import tempfile
-import threading
-import time
 import unittest
 from contextlib import redirect_stdout
 from dataclasses import replace
@@ -12,31 +21,19 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from jarvis import cli
-from jarvis.agent import Agent, AgentResult
 from jarvis.config import Config
-from jarvis.memory import Memory
 from jarvis.skill_evolution import (
     auto_skill_name,
     distill_verified_skill,
     matching_auto_distilled_skills,
 )
-from jarvis.skill_library import (
-    create_learned_skill,
-    list_available_skills,
-    read_available_skill,
-)
-from jarvis.tools import ToolBox
-
-
-class _NoModelClient:
-    def models(self, refresh: bool = False):
-        del refresh
-        return ["qwen3.5:9b", "gpt-oss:20b", "qwen3-coder:30b"]
+from jarvis.skill_library import create_learned_skill, read_available_skill
 
 
 class SkillEvolutionTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temporary.cleanup)
         self.root = Path(self.temporary.name)
         self.workspace = self.root / "workspace"
         self.data = self.root / "data"
@@ -54,155 +51,6 @@ class SkillEvolutionTests(unittest.TestCase):
             ollama_preload=False,
             memory_embeddings="disabled",
         )
-        self.memory = Memory(self.data / "jarvis.db")
-        self.agent = Agent(
-            self.config,
-            self.memory,
-            client=_NoModelClient(),
-            coding_review=False,
-            coding_planning=False,
-        )
-
-    def tearDown(self) -> None:
-        self.memory.close()
-        self.temporary.cleanup()
-
-    def _seed_calibration(self, family: str, count: int = 19) -> None:
-        for _index in range(count):
-            prediction = self.memory.record_prediction(
-                family=family,
-                profile="coding",
-                model="test-model",
-                predicted_success=0.9,
-                predicted_steps=3,
-                predicted_verification="process_evidence",
-            )
-            self.memory.resolve_prediction(
-                prediction,
-                actual_status="complete",
-                actual_steps=2,
-                evidence_ok=True,
-            )
-
-    def _resolve_agent_outcome(
-        self,
-        family: str,
-        *,
-        verified: bool | None,
-    ) -> None:
-        prediction = self.memory.record_prediction(
-            family=family,
-            profile="coding",
-            model="test-model",
-            predicted_success=0.9,
-            predicted_steps=3,
-            predicted_verification=(
-                "not_applicable" if verified is None else "process_evidence"
-            ),
-        )
-        self.agent._active_prediction_id = prediction
-        self.agent._active_prediction_family = family
-        self.agent._active_prediction_origin = "interactive"
-        self.agent._active_prediction_verification = (
-            "not_applicable" if verified is None else "process_evidence"
-        )
-        self.agent._active_prediction_tools = (
-            {"read_file", "edit_file", "__verified_after_write__"}
-            if verified is True
-            else {"read_file", "edit_file"}
-        )
-        self.agent._resolve_active_prediction(
-            AgentResult("verified result", status="complete", tool_calls=3), None
-        )
-
-    def test_calibrated_verified_success_creates_then_refines_one_skill(self) -> None:
-        self._seed_calibration("code_fix")
-        self._resolve_agent_outcome("code_fix", verified=True)
-
-        first = read_available_skill("learned-code-fix", self.workspace)
-        self.assertTrue(first["auto_distilled"])
-        self.assertEqual(first["family"], "code_fix")
-        self.assertEqual(first["verified_outcomes"], 1)
-        self.assertIn("Verification oracles observed: process_evidence", first["content"])
-
-        self._resolve_agent_outcome("code_fix", verified=True)
-        second = read_available_skill("learned-code-fix", self.workspace)
-        self.assertEqual(second["verified_outcomes"], 2)
-        self.assertNotEqual(second["sha256"], first["sha256"])
-        catalog = [
-            item for item in list_available_skills(self.workspace)
-            if item.get("auto_distilled") is True and item.get("family") == "code_fix"
-        ]
-        self.assertEqual([item["name"] for item in catalog], ["learned-code-fix"])
-
-    def test_unverified_or_uncalibrated_outcomes_do_not_distill(self) -> None:
-        with self.subTest("unverified"):
-            self._seed_calibration("code_fix")
-            self._resolve_agent_outcome("code_fix", verified=False)
-            self.assertFalse((self.workspace / ".jarvis-skills").exists())
-
-        with self.subTest("evidence-not-applicable"):
-            self._resolve_agent_outcome("code_fix", verified=None)
-            self.assertFalse((self.workspace / ".jarvis-skills").exists())
-
-        other_workspace = self.root / "other-workspace"
-        other_workspace.mkdir()
-        other_memory = Memory(self.data / "other.db")
-        try:
-            other = Agent(
-                replace(self.config, workspace=other_workspace),
-                other_memory,
-                client=_NoModelClient(),
-                coding_review=False,
-                coding_planning=False,
-            )
-            prediction = other_memory.record_prediction(
-                family="code_build", profile="coding", model="m",
-                predicted_success=0.9, predicted_steps=2,
-                predicted_verification="process_evidence",
-            )
-            other._active_prediction_id = prediction
-            other._active_prediction_family = "code_build"
-            other._active_prediction_verification = "process_evidence"
-            other._active_prediction_tools = {
-                "write_file", "__verified_after_write__"
-            }
-            other._resolve_active_prediction(
-                AgentResult("done", status="complete", tool_calls=2), None
-            )
-            self.assertFalse((other_workspace / ".jarvis-skills").exists())
-        finally:
-            other_memory.close()
-
-    def test_distillation_failure_is_nonfatal(self) -> None:
-        self._seed_calibration("code_fix")
-        with patch(
-            "jarvis.agent.distill_verified_skill",
-            side_effect=RuntimeError("synthetic write failure"),
-        ):
-            self._resolve_agent_outcome("code_fix", verified=True)
-        row = self.memory.db.execute(
-            "SELECT actual_status, evidence_ok FROM task_predictions ORDER BY id DESC LIMIT 1"
-        ).fetchone()
-        self.assertEqual((row["actual_status"], row["evidence_ok"]), ("complete", 1))
-
-    def test_streaming_foreground_distillation_does_not_delay_result(self) -> None:
-        self._seed_calibration("code_fix")
-        entered = threading.Event()
-        release = threading.Event()
-
-        def slow_distillation(*_args, **_kwargs):
-            entered.set()
-            release.wait(timeout=2)
-
-        self.agent._active_defer_skill_distillation = True
-        with patch("jarvis.agent.distill_verified_skill", side_effect=slow_distillation):
-            started = time.perf_counter()
-            self._resolve_agent_outcome("code_fix", verified=True)
-            elapsed = time.perf_counter() - started
-            self.assertTrue(entered.wait(timeout=1))
-            self.assertLess(elapsed, 0.5)
-            release.set()
 
     def test_distilled_content_is_redacted_bounded_and_path_safe(self) -> None:
         secret = "sk-proj-" + "A" * 32
@@ -229,60 +77,83 @@ class SkillEvolutionTests(unittest.TestCase):
             )
         self.assertFalse((self.root / "escape").exists())
 
-    def test_generic_file_tools_cannot_bypass_skill_provenance(self) -> None:
+    def test_the_template_is_unchanged_when_no_staging_context_is_given(self) -> None:
+        """M4 added an optional ``staging`` argument; the old shape must not move."""
         created = distill_verified_skill(
             self.workspace,
-            family="file_ops",
-            successful_tools={"read_file", "write_file"},
+            family="code_fix",
+            successful_tools={"read_file", "run_tests"},
             verification="tool_success",
         )
-        path = f".jarvis-skills/{created['name']}/SKILL.md"
-        toolbox = ToolBox(self.config, self.memory)
-        operations = (
-            lambda: toolbox.read_file(path),
-            lambda: toolbox.write_file(path, "unverified replacement"),
-            lambda: toolbox.edit_file(
-                path,
-                "Verified outcomes incorporated: 1",
-                "Verified outcomes incorporated: 999",
-                created["sha256"],
-            ),
-        )
-        for operation in operations:
-            with self.assertRaises(PermissionError):
-                operation()
-        verified = toolbox.skill_read(created["name"])
-        self.assertEqual(verified["sha256"], created["sha256"])
+        self.assertIn("Tools observed: read_file, run_tests", created["content"])
+        self.assertIn("Verified outcomes incorporated: 1", created["content"])
+        self.assertNotIn("Tools sampled from", created["content"])
+        self.assertNotIn("Ledger at staging", created["content"])
+        self.assertNotIn("Calibration at staging", created["content"])
 
-    def test_same_family_skill_enters_context_only_after_calibration(self) -> None:
+    def test_refinement_still_merges_observed_tools_in_place(self) -> None:
         distill_verified_skill(
-            self.workspace,
-            family="code_fix",
-            successful_tools={"read_file", "edit_file", "run_process"},
-            verification="process_evidence",
+            self.workspace, family="code_fix",
+            successful_tools={"read_file"}, verification="tool_success",
         )
-        self._seed_calibration("code_fix", count=20)
-        active = self.memory.record_prediction(
-            family="code_fix", profile="coding", model="m",
-            predicted_success=0.9, predicted_steps=2,
-            predicted_verification="process_evidence",
+        refined = distill_verified_skill(
+            self.workspace, family="code_fix",
+            successful_tools={"run_tests"}, verification="process_evidence",
         )
-        self.agent._active_prediction_id = active
-        self.agent._active_project_id = 1
-        prompt = self.agent.system_prompt("Fix the parser", task_family="code_fix")
-        self.assertIn("<matched_learned_skills>", prompt)
-        self.assertIn("learned-code-fix", prompt)
+        self.assertEqual(refined["verified_outcomes"], 2)
+        self.assertIn("Tools observed: read_file, run_tests", refined["content"])
+        self.assertIn(
+            "Verification oracles observed: process_evidence, tool_success",
+            refined["content"],
+        )
 
-        blocked = self.agent.system_prompt(
-            "Build a parser", task_family="code_build"
+    def test_matching_auto_distilled_skills_is_bounded_and_family_scoped(self) -> None:
+        distill_verified_skill(
+            self.workspace, family="code_fix",
+            successful_tools={"read_file"}, verification="tool_success",
         )
-        self.assertNotIn("learned-code-fix", blocked)
+        distill_verified_skill(
+            self.workspace, family="file_ops",
+            successful_tools={"read_file"}, verification="tool_success",
+        )
+        create_learned_skill(
+            self.workspace, "hand-written", "Operator guidance.", "Body text.",
+        )
+        matches = matching_auto_distilled_skills(self.workspace, "code_fix")
+        self.assertEqual([item["name"] for item in matches], ["learned-code-fix"])
         self.assertEqual(
-            [item["name"] for item in matching_auto_distilled_skills(
-                self.workspace, "code_fix"
-            )],
-            ["learned-code-fix"],
+            matching_auto_distilled_skills(self.workspace, "code_fix", limit=0), []
         )
+        self.assertEqual(
+            matching_auto_distilled_skills(self.workspace, "security_analysis"), []
+        )
+        with self.assertRaises(ValueError):
+            matching_auto_distilled_skills(self.workspace, "Not A Family")
+        self.assertTrue(
+            read_available_skill("hand-written", self.workspace)["auto_distilled"]
+            is False
+        )
+
+    def test_no_runtime_module_calls_the_distiller(self) -> None:
+        """Design 7.12: after M4 the only promotion path is the ladder's.
+
+        Skips, loudly, while surface has yet to remove the agent-side call
+        (design 8.1 day 2); it can never pass with an unexpected caller.
+        """
+        package = Path(__file__).resolve().parent.parent / "jarvis"
+        allowed = {"skill_evolution.py", "learning_ladder.py"}
+        callers = sorted(
+            path.name
+            for path in package.glob("*.py")
+            if path.name not in allowed
+            and "distill_verified_skill" in path.read_text(encoding="utf-8")
+        )
+        if callers == ["agent.py"]:
+            self.skipTest(
+                "surface has not yet removed the agent-side distiller call "
+                "(design 8.1 day 2, H-2)"
+            )
+        self.assertEqual(callers, [])
 
     def test_cli_lists_shows_and_forgets_only_learned_skill(self) -> None:
         distill_verified_skill(

@@ -16,6 +16,7 @@ from jarvis.memory import (
     _recall_timestamp_valid,
     now_iso,
 )
+from tests.legacy_store_fixture import strip_spine
 
 
 class MemoryTests(unittest.TestCase):
@@ -1285,6 +1286,7 @@ class MemoryTests(unittest.TestCase):
                     1,
                 )
                 memory.db.execute("DROP TABLE ordinary_memory_provenance")
+                strip_spine(memory.db)
                 memory.db.execute("PRAGMA user_version=31")
 
             with Memory(path) as migrated:
@@ -3000,6 +3002,7 @@ class MemoryTests(unittest.TestCase):
                 memory.db.execute("DELETE FROM memory_claim_events")
                 memory.db.execute("DELETE FROM memory_claims")
                 memory.db.execute("DELETE FROM memories WHERE kind='claim'")
+                strip_spine(memory.db)
                 memory.db.execute("PRAGMA user_version=13")
             with Memory(path) as migrated:
                 claims = migrated.current_claims("editor")

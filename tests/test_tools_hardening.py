@@ -85,6 +85,7 @@ class ToolCapabilityHardeningTests(unittest.TestCase):
             ".aws/credentials",
             ".jarvis-runtime/home/file.txt",
             ".jarvis-skills/learned-code-fix/SKILL.md",
+            ".jarvis-skills-staging/learned-code-fix/SKILL.md",
             "data/codex-cli-home/state.json",
             ".kube/config",
             ".npmrc",
@@ -103,6 +104,200 @@ class ToolCapabilityHardeningTests(unittest.TestCase):
                     toolbox.run_process("python", ["--version"], cwd=path)
                 result = json.loads(toolbox.execute("read_file", {"path": path}))
                 self.assertFalse(result["ok"])
+
+    def test_the_learning_ladder_staging_root_is_as_unreachable_as_the_live_one(self):
+        """VTMF M4 design 1.3 invariant 1, 3.4 (H-3) and 7.6, behaviourally.
+
+        A staged skill document is one no operator has approved.  It is
+        unreachable two ways: the skill catalog never walks the staging root,
+        and the model's file tools refuse it here.  Before this fix the
+        staging root was *less* protected than the live root -- the model
+        could read it and, worse, write it, which would have let a model
+        author the document an operator is later asked to approve.
+
+        The file is written on disk first on purpose: a refusal that only
+        happens because the path does not exist proves nothing.
+        """
+        from jarvis import skill_library, tools as tools_module
+
+        # Pinned constant assertion: BOTH roots are protected, and the
+        # protection is keyed to the directory names skill_library actually
+        # uses.  tools.py spells the components out rather than importing
+        # them, so a rename there fails here instead of silently moving the
+        # protection off the directory that still holds the files.
+        self.assertIn(
+            skill_library.LEARNED_SKILL_DIRECTORY,
+            tools_module._PROTECTED_PATH_COMPONENTS,
+        )
+        self.assertIn(
+            getattr(skill_library, "STAGED_SKILL_DIRECTORY", ".jarvis-skills-staging"),
+            tools_module._PROTECTED_PATH_COMPONENTS,
+        )
+        self.assertEqual(
+            getattr(skill_library, "STAGED_SKILL_DIRECTORY", ".jarvis-skills-staging"),
+            ".jarvis-skills-staging",
+        )
+
+        workspace = Path(self.config.workspace)
+        staged_dir = workspace / ".jarvis-skills-staging" / "learned-code-fix"
+        staged_dir.mkdir(parents=True)
+        staged = staged_dir / "SKILL.md"
+        staged.write_bytes(b"---\nname: learned-code-fix\n---\nstaged body\n")
+        self.assertTrue(staged.is_file())
+
+        relative = ".jarvis-skills-staging/learned-code-fix/SKILL.md"
+        toolbox = ToolBox(self.config, self.memory)
+        for label, operation in (
+            ("read", lambda: toolbox.read_file(relative)),
+            ("write", lambda: toolbox.write_file(relative, "model replacement")),
+            ("list", lambda: toolbox.list_files(".jarvis-skills-staging")),
+            ("list_deep", lambda: toolbox.list_files(relative)),
+            ("search", lambda: toolbox.search_files("staged", ".jarvis-skills-staging")),
+            (
+                "shell_cwd",
+                lambda: toolbox.run_process(
+                    "python", ["--version"], cwd=".jarvis-skills-staging"
+                ),
+            ),
+            (
+                "edit",
+                lambda: toolbox.edit_file(
+                    relative,
+                    "staged body",
+                    "approved body",
+                    hashlib.sha256(staged.read_bytes()).hexdigest(),
+                ),
+            ),
+        ):
+            with self.subTest(operation=label):
+                with self.assertRaises(PermissionError):
+                    operation()
+
+        # The dispatcher chokepoint refuses it too, not only the direct call.
+        result = json.loads(toolbox.execute("read_file", {"path": relative}))
+        self.assertFalse(result["ok"])
+
+        # _safe_target is the single place the refusal comes from, and it
+        # refuses the directory itself as well as the document beneath it.
+        for path in (".jarvis-skills-staging", relative):
+            with self.subTest(safe_target=path):
+                with self.assertRaises(PermissionError):
+                    tools_module._safe_target(workspace, path)
+
+        # The bytes are still there: the tools refused, they did not delete.
+        self.assertIn(b"staged body", staged.read_bytes())
+
+    def test_an_alias_spelling_cannot_reach_a_protected_path(self):
+        """Red team R-2 / design ruling 17: the check follows the RESOLVED path.
+
+        `_safe_target` compared the components the caller typed and only then
+        resolved.  On NTFS a directory has a second legal spelling -- the 8.3
+        short name -- so `JARVIS~1/learned-code-fix/SKILL.md` passed every
+        check and was expanded to `.jarvis-skills-staging/...` afterwards.  The
+        model could read AND write the staging root, and the same alias reached
+        `.aws`, `.ssh` and `.jarvis-runtime`.
+
+        The volume decides whether 8.3 names exist, so this uses a real one
+        where `dir /x` provides it and a junction otherwise -- both are the
+        same defect: a second name for one directory.
+        """
+        import subprocess
+
+        from jarvis import tools as tools_module
+
+        workspace = Path(self.config.workspace)
+        for name in (".jarvis-skills-staging", ".jarvis-runtime", ".aws", ".ssh"):
+            (workspace / name).mkdir(exist_ok=True)
+        staged = workspace / ".jarvis-skills-staging" / "learned-code-fix"
+        staged.mkdir(parents=True, exist_ok=True)
+        (staged / "SKILL.md").write_text(
+            "---\nname: learned-code-fix\n---\nstaged\n", encoding="utf-8"
+        )
+        (workspace / ".aws" / "credentials").write_text(
+            "[default]\n", encoding="utf-8"
+        )
+
+        aliases: dict[str, str] = {}
+        try:
+            listing = subprocess.run(
+                ["cmd", "/c", "dir", "/x", str(workspace)],
+                capture_output=True, text=True, timeout=30,
+            ).stdout
+        except (OSError, subprocess.SubprocessError):
+            listing = ""
+        for line in listing.splitlines():
+            for real in (".jarvis-skills-staging", ".jarvis-runtime", ".aws", ".ssh"):
+                if line.rstrip().endswith(real):
+                    for field in line.split():
+                        if "~" in field:
+                            aliases[real] = field
+        if not aliases:
+            # No 8.3 names on this volume: a junction is the same defect, a
+            # second name for one directory, and mklink /J needs no elevation.
+            link = workspace / "alias-link"
+            created = subprocess.run(
+                ["cmd", "/c", "mklink", "/J", str(link),
+                 str(workspace / ".jarvis-skills-staging")],
+                capture_output=True, text=True, timeout=30,
+            )
+            if created.returncode != 0 or not link.exists():
+                self.skipTest("volume provides neither 8.3 names nor junctions")
+            aliases[".jarvis-skills-staging"] = "alias-link"
+
+        toolbox = ToolBox(self.config, self.memory)
+        for real, alias in sorted(aliases.items()):
+            document = f"{alias}/learned-code-fix/SKILL.md"
+            operations = (
+                ("read_file", lambda d=document: toolbox.read_file(d)),
+                ("read_files", lambda d=document: toolbox.read_files([d])),
+                ("write_file", lambda d=document: toolbox.write_file(d, "planted")),
+                ("make_directory", lambda a=alias: toolbox.make_directory(
+                    f"{a}/planted"
+                )),
+                ("list_files", lambda a=alias: toolbox.list_files(a)),
+                ("search_files", lambda a=alias: toolbox.search_files("staged", a)),
+                ("shell_cwd", lambda a=alias: toolbox.run_process(
+                    "python", ["--version"], cwd=a
+                )),
+                ("safe_target", lambda d=document: tools_module._safe_target(
+                    workspace, d
+                )),
+                ("safe_target_dir", lambda a=alias: tools_module._safe_target(
+                    workspace, a
+                )),
+            )
+            for label, operation in operations:
+                with self.subTest(real=real, alias=alias, operation=label):
+                    with self.assertRaises(PermissionError):
+                        operation()
+
+        # The alias refusal must not have cost the long name its own refusal.
+        with self.assertRaises(PermissionError):
+            toolbox.read_file(".jarvis-skills-staging/learned-code-fix/SKILL.md")
+        # And the staged bytes survived every refused write.
+        self.assertIn("staged", (staged / "SKILL.md").read_text(encoding="utf-8"))
+
+    def test_an_ordinary_name_that_merely_looks_like_an_alias_is_allowed(self):
+        """The fix keys on what a path RESOLVES to, not on how it is spelled.
+
+        A directory literally named `JARVIS~9` that aliases nothing is an
+        ordinary workspace directory.  Refusing it by pattern would be a
+        different rule, and one that breaks real filenames.
+        """
+        from jarvis import tools as tools_module
+
+        workspace = Path(self.config.workspace)
+        ordinary = workspace / "JARVIS~9"
+        ordinary.mkdir()
+        (ordinary / "notes.txt").write_text("ordinary\n", encoding="utf-8")
+
+        target = tools_module._safe_target(workspace, "JARVIS~9/notes.txt")
+
+        self.assertTrue(Path(target).is_file())
+        toolbox = ToolBox(self.config, self.memory)
+        self.assertIn(
+            "ordinary", json.dumps(toolbox.read_file("JARVIS~9/notes.txt"))
+        )
 
     def test_tool_availability_matrix_matches_capability_modes(self):
         all_tools = {

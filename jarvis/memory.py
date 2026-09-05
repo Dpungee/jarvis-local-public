@@ -3,6 +3,7 @@ from __future__ import annotations
 import copy
 import functools
 import hashlib
+import hmac
 import json
 import math
 import os
@@ -10,6 +11,7 @@ import re
 import secrets
 import sqlite3
 import struct
+import time
 from collections import Counter
 from collections.abc import Mapping, Sequence
 from contextlib import contextmanager
@@ -28,7 +30,17 @@ from .claim_clock import (
     protected_predicate,
     source_key as claim_source_key,
 )
-from .governed_memory import parse_explicit_project_fact, project_claim_scope
+from . import learning_ladder
+from . import memory_compaction
+from . import memory_graph
+from . import memory_spine
+from .governed_memory import (
+    GovernedMemoryCommandError,
+    parse_explicit_project_fact,
+    parse_explicit_project_fact_erasure,
+    parse_explicit_project_fact_retraction,
+    project_claim_scope,
+)
 from .learning_memory_quality import (
     TRAINING_QUALITY_CONTRACT_VERSION,
     learning_memory_record_allowed,
@@ -58,6 +70,7 @@ from .memory_retrieval import (
     _structured_memory_identifier,
     RecallCache,
 )
+from . import skill_library
 from .redaction import (
     contains_explicit_sensitive_key_phrase,
     contains_private_identifier,
@@ -67,6 +80,7 @@ from .redaction import (
     is_sensitive_key,
     redact_private_identifiers,
     redact_secrets,
+    screen_endpoint,
 )
 from .run_observability import aggregate_run_metrics, sanitize_run_metrics
 from .specialists import (
@@ -204,7 +218,7 @@ def training_prompt_split(prompt: str, task_kind: str) -> str:
     return "train" if bucket < 80 else "validation" if bucket < 90 else "test"
 
 
-SCHEMA_VERSION = 44
+SCHEMA_VERSION = 50
 
 _ORDINARY_MEMORY_PROVENANCE_ORIGINS = frozenset({
     "explicit_operator_memory",
@@ -367,10 +381,24 @@ _PERSISTENT_READ_APPROVAL_TOOLS = frozenset({
 _PAIRING_ALPHABET = "23456789ABCDEFGHJKLMNPQRSTUVWXYZ"
 _PAIRING_PBKDF2_ROUNDS = 150_000
 DEFAULT_BUSY_TIMEOUT_MS = 5_000
+# Claim-clock read telemetry is best-effort: a foreground read must never wait
+# the full busy timeout on a concurrent writer just to bump a counter.
+_CLAIM_CLOCK_WRITE_TIMEOUT_MS = 250
 DEFAULT_LEASE_SECONDS = 3_600
 TERMINAL_TASK_STATUSES = frozenset({"done", "failed", "cancelled"})
 MAX_WORKER_ID_CHARS = 500
 MAX_SEARCH_QUERY_CHARS = 5_000
+# A question names a handful of subjects.  Every start beyond that is another
+# traversal root and, on the non-exact path, another store-wide look-alike
+# comparison, so the graph channel bounds them and reports the remainder as
+# ``subjects_dropped`` rather than letting a crafted question widen the read.
+MAX_GRAPH_START_SUBJECTS = 3
+# Claims-lane modes that silence the graph channel outright (design 5.6.1,
+# 10.7 item 5).  Every other mode -- including the identity floors -- leaves
+# the graph to answer on its own rules.
+_LANE_SILENCING_MODES = frozenset({
+    "screened", "project-unavailable", "corrupt-strongest", "error",
+})
 MAX_TASK_RESULT_CHARS = 100_000
 MAX_TASK_ERROR_CHARS = 10_000
 MAX_QUERY_EMBEDDING_CACHE = 2_048
@@ -769,6 +797,38 @@ def _bounded_persisted_text(value: Any, limit: int, label: str) -> str:
     return text[: max(0, limit - len(suffix))] + suffix
 
 
+def backing_content_variants(
+    subject: str,
+    predicate: str,
+    value: str,
+    scope: str,
+    created_at: str,
+    claim_key: str,
+) -> tuple[str, str]:
+    """The only two contents a claim's backing ``memories`` row may hold.
+
+    ``(canonical, keyed)``.  Two claim keys can render the same global
+    backing content (``Kestrel relay / port / 9090`` and ``Kestrel / relay
+    port / 9090``); the second write takes the keyed variant so it gets its
+    own backing row instead of colliding on ``UNIQUE(memory_claims.
+    memory_id)``.  Nothing is recorded anywhere about which variant was
+    chosen: the writer, recall eligibility, the rebuild, and ``verify``
+    all derive both from the claim row's own fields, so they cannot
+    disagree (M3 design 6.3, review R1).
+
+    The canonical part is truncated **first** and the fixed-length suffix
+    appended afterwards, so ``_bounded_persisted_text``'s clip marker can
+    never cut the suffix off.
+    """
+    raw = _claim_memory_content(subject, predicate, value, scope, created_at)
+    suffix = f" [jarvis claim {str(claim_key)[:16]}]"
+    canonical = _bounded_persisted_text(raw, 8_000, "temporal claim")
+    keyed = _bounded_persisted_text(
+        raw, 8_000 - len(suffix), "temporal claim"
+    ) + suffix
+    return canonical, keyed
+
+
 def _redacted_json_value(value: Any) -> Any:
     """Recursively redact strings while preserving valid structured JSON."""
     if isinstance(value, dict):
@@ -874,6 +934,79 @@ def _blank_recall_report(
     }
 
 
+def _blank_claim_recall_report(mode: str) -> dict[str, Any]:
+    """Fresh diagnostic record for one claim-lane recall attempt."""
+    return {
+        "channel": "claim",
+        "mode": str(mode),
+        "candidate_limit": int(MAX_MEMORY_SEARCH_CANDIDATES),
+        "discovery_terms": 0,
+        "candidates": 0,
+        "returned": 0,
+        "abstained": False,
+        "reason": None,
+    }
+
+
+# --- the lesson lane's diagnostic record (M4 design 5.4) -------------------
+#
+# ``match_lessons`` has fifteen ``return []`` statements, two raises and an
+# empty-prefix break, and before M4 a caller could not tell any of them from
+# "the store had nothing".  ``learning_ladder.LESSON_EXITS`` is the single
+# mapping from each of those exits to one of sixteen modes, and it is owned by
+# ``learning_ladder`` alone so the store, the Agent, the tests and the sealed
+# holdout scorer cannot drift apart: the store writes its report through
+# ``lesson_recall_record`` and the scorer reads the same table.
+#
+# This is **instrumentation only**.  M4 changes no threshold, no ordering and
+# no refusal in ``match_lessons``, and a differential test pins the returned
+# rows byte for byte against a baseline captured before the change.
+LESSON_RECALL_MODES: tuple[str, ...] = learning_ladder.LESSON_RECALL_MODES
+LESSON_ABSTAINING_MODES: frozenset[str] = learning_ladder.LESSON_ABSTENTION_MODES
+# ``_lesson_control_validation`` reasons that mean the operator retired the
+# advice or it aged out, as opposed to a tamper or a scope mismatch.  These are
+# the answer to "why did my lesson go quiet", reported as
+# ``superseded_shadowed``, printed by ``/ladder``, and never shown to the
+# model.
+_LESSON_LIFECYCLE_SHADOW_REASONS: frozenset[str] = frozenset({
+    "superseded", "contradicted", "quarantined", "expired",
+})
+
+
+def _blank_graph_recall_report(mode: str) -> dict[str, Any]:
+    """Fresh diagnostic record for one graph-channel read.
+
+    ``mode`` is the closed set of M3 design 5.6: ``idle``, ``screened``,
+    ``project-unavailable``, ``no-start``, ``identity-conflict``, ``overflow``,
+    ``budget-exceeded``, ``screened-rows``, ``no-answer``, ``complete``,
+    ``error``.
+    """
+    return {
+        "channel": "graph",
+        "mode": str(mode),
+        "budget": None,
+        "starts": 0,
+        "expanded": 0,
+        "edges": 0,
+        "chains": 0,
+        "rows": 0,
+        "overflow": 0,
+        "incomplete": 0,
+        "excluded_by_screen": 0,
+        "abstained": False,
+        "reason": None,
+        "lane_mode": None,
+        "lane_abstained": False,
+        "subjects_dropped": 0,
+        # Typed names that resolved nothing while another named subject did
+        # (design 10.7 item 4).  The walk fills it; the key is declared here so
+        # every report carries it, including the abstention paths that never
+        # reach the walk, and so a consumer can read it without a default.
+        "unresolved": [],
+        "elapsed_ms": 0.0,
+    }
+
+
 def _with_recall_cache(method: Any) -> Any:
     """Activate the store's ``RecallCache`` for the duration of one recall call."""
 
@@ -935,6 +1068,497 @@ def _with_immediate_snapshot(method: Any) -> Any:
 
 def _bounded_limit(value: int, maximum: int) -> int:
     return max(0, min(int(value), maximum))
+
+
+# --- the learning ladder: record tables, sequence and lineage (schema 49) ---
+#
+# Two record tables, never projections.  A sealed calibration epoch and a
+# skill promotion are *records of decisions*: neither is derivable from the
+# claim projection, so neither is rebuilt by ``rebuild-claims`` and neither
+# joins ``memory_spine._REBUILT_PROJECTIONS`` (M4 design 4.1, M-12).  Both
+# carry spine lineage instead, both are created once by
+# ``Memory._migrate_v49``, and **neither is ever dropped by a migration** — a
+# downgrade that would discard authentic spine-backed ladder state refuses to
+# open, exactly as migration 46 refuses an authentic spine below 46 (M4
+# design 4.3, H-6).
+
+LADDER_TABLES: tuple[str, ...] = (
+    "memory_calibration_ledger",
+    "ladder_promotions",
+    "ladder_id_sequence",
+)
+LADDER_PROMOTION_STAGES: frozenset[str] = frozenset({
+    "staged", "approved", "unapproved_legacy", "rolled_back", "withdrawn",
+    "discarded",
+})
+# The two stages that claim the live document.  One row per
+# ``(project_id, skill_name)`` may hold either, which
+# ``idx_ladder_promotions_one_live`` enforces and the grandfather pass relies
+# on for idempotence (M4 design 4.3, S-8).
+LADDER_LIVE_STAGES: tuple[str, ...] = ("approved", "unapproved_legacy")
+# The seven digest-only spine kinds of M4 design 4.4.  They are spelled here
+# so ``memory.py`` stays importable before ``memory_spine`` carries them;
+# ``tests/test_learning_ladder_integration.py`` pins this tuple against
+# ``memory_spine.LADDER_KINDS``, so the two can never drift.
+LADDER_SPINE_KINDS: tuple[str, ...] = (
+    "ladder.calibration_sealed",
+    "ladder.candidate",
+    "ladder.staged",
+    "ladder.grandfathered",
+    "ladder.approved",
+    "ladder.rolled_back",
+    "ladder.withdrawn",
+)
+# A promotion row may name only a candidate or a grandfather event as its
+# lineage; a ledger row may name only a seal event.  The triggers below
+# enforce that on write and ``verify_calibration_ledger`` re-checks it, in
+# both directions, on read.
+LADDER_PROMOTION_CREATING_KINDS: tuple[str, ...] = (
+    "ladder.candidate", "ladder.grandfathered",
+)
+LADDER_LEDGER_CREATING_KIND = "ladder.calibration_sealed"
+# The gate population, shared verbatim with ``competence()`` and
+# ``calibration_gate``, so a sealed epoch and the gate always describe the
+# same rows (M4 design 2.2).
+LADDER_LEDGER_ORIGINS: tuple[str, ...] = ("interactive", "worker", "proactive")
+# A recorded tool name is a bounded, screened identifier or nothing at all
+# (M4 design 3.4, H-7).
+_LADDER_TOOL_NAME_RE = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
+# Domain tag for the keyed coverage digest, tagged the way
+# ``memory_spine.content_digest`` is, so a database without its key sidecar
+# can neither forge nor brute-force one.
+_LADDER_COVERAGE_DIGEST_TAG = "jarvis-ladder-coverage-v1"
+
+_LADDER_LEDGER_SQL = """CREATE TABLE memory_calibration_ledger (
+    id INTEGER PRIMARY KEY,
+    created_at TEXT NOT NULL,
+    family TEXT NOT NULL,
+    epoch INTEGER NOT NULL CHECK(epoch > 0),
+    n INTEGER NOT NULL CHECK(n > 0),
+    successes INTEGER NOT NULL CHECK(successes >= 0 AND successes <= n),
+    mean_predicted REAL NOT NULL CHECK(mean_predicted BETWEEN 0.0 AND 1.0),
+    brier REAL NOT NULL CHECK(brier BETWEEN 0.0 AND 1.0),
+    calibration_error REAL NOT NULL CHECK(calibration_error BETWEEN 0.0 AND 1.0),
+    evidence_applicable INTEGER NOT NULL CHECK(evidence_applicable >= 0),
+    evidence_successes INTEGER NOT NULL CHECK(evidence_successes >= 0),
+    applied_n INTEGER NOT NULL CHECK(applied_n >= 0),
+    applied_successes INTEGER NOT NULL CHECK(applied_successes >= 0),
+    unapplied_n INTEGER NOT NULL CHECK(unapplied_n >= 0),
+    unapplied_successes INTEGER NOT NULL CHECK(unapplied_successes >= 0),
+    refused_stagings INTEGER NOT NULL DEFAULT 0 CHECK(refused_stagings >= 0),
+    refused_approvals INTEGER NOT NULL DEFAULT 0 CHECK(refused_approvals >= 0),
+    withdrawals INTEGER NOT NULL DEFAULT 0 CHECK(withdrawals >= 0),
+    screened_components INTEGER NOT NULL DEFAULT 0 CHECK(screened_components >= 0),
+    unverified_at_seal INTEGER NOT NULL DEFAULT 0 CHECK(unverified_at_seal >= 0),
+    first_prediction_id INTEGER NOT NULL,
+    last_prediction_id INTEGER NOT NULL
+        CHECK(last_prediction_id >= first_prediction_id),
+    -- The exact prediction ids the epoch covers, ascending, canonical JSON.
+    -- The [first, last] pair above is the reported range and the index key,
+    -- but it does NOT determine the covered set: a prediction held open while
+    -- the block around it is cut sits inside that range, so a range test
+    -- would leave it permanently uncoverable while competence() kept counting
+    -- it (design 10.7 item 8, the S-2 defect one level down).  The spine
+    -- payload stays digest-only: coverage_digest binds this set, and the ids
+    -- themselves live only here.
+    covered_ids_json TEXT NOT NULL,
+    coverage_digest TEXT NOT NULL
+        CHECK(length(coverage_digest)=64 AND coverage_digest NOT GLOB '*[^0-9a-f]*'),
+    spine_event_id INTEGER NOT NULL UNIQUE,
+    UNIQUE(family, epoch),
+    FOREIGN KEY(spine_event_id) REFERENCES memory_spine_events(id)
+)"""
+
+# ``approval_token`` is a CONFIRMATION CODE, not a capability (design 4.2,
+# S-1): sixteen random url-safe characters generated at staging, stored in
+# cleartext on the row, read back only by the operator surfaces (``ladder
+# list``, ``ladder show``, ``/ladder``), compared with
+# ``hmac.compare_digest``, and single-use because a successful approval moves
+# the row out of ``staged``.  Its job is to prove the operator looked at the
+# staged document.  It is in no spine payload (which carries only the boolean
+# ``token_required``), no ``activity_log`` row, no run metric, no Presence
+# payload and no prompt block.  Revision 2's ``approval_token_sha256`` column
+# is withdrawn.
+#
+# The four one-directional stage CHECKs (S-6) replace revision 2's equality,
+# which would have nulled ``approved_sha256``/``approved_at`` on every
+# transition to ``rolled_back`` or ``withdrawn`` and so destroyed the row's
+# record of what was live and when.  A terminal row keeps both.
+_LADDER_PROMOTIONS_SQL = """CREATE TABLE ladder_promotions (
+    id INTEGER PRIMARY KEY,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    project_id INTEGER NOT NULL,
+    family TEXT NOT NULL,
+    skill_name TEXT NOT NULL,
+    stage TEXT NOT NULL CHECK(stage IN
+        ('staged','approved','unapproved_legacy','rolled_back','withdrawn','discarded')),
+    stage_reason TEXT,
+    lesson_ids_json TEXT NOT NULL,
+    proof_json TEXT NOT NULL,
+    proof_sha256 TEXT NOT NULL
+        CHECK(length(proof_sha256)=64 AND proof_sha256 NOT GLOB '*[^0-9a-f]*'),
+    reuse_count INTEGER NOT NULL CHECK(reuse_count >= 0),
+    context_count INTEGER NOT NULL CHECK(context_count >= 0),
+    epoch_id INTEGER,
+    gate_json TEXT NOT NULL,
+    staged_sha256 TEXT NOT NULL
+        CHECK(length(staged_sha256)=64 AND staged_sha256 NOT GLOB '*[^0-9a-f]*'),
+    approval_token TEXT NOT NULL
+        CHECK(length(approval_token) BETWEEN 16 AND 43
+              AND approval_token NOT GLOB '*[^A-Za-z0-9_-]*'),
+    approved_sha256 TEXT,
+    approved_at TEXT,
+    prior_sha256 TEXT,
+    prior_document BLOB CHECK(prior_document IS NULL OR length(prior_document) <= 32768),
+    prior_document_pruned INTEGER NOT NULL DEFAULT 0
+        CHECK(prior_document_pruned IN (0,1)),
+    spine_event_id INTEGER NOT NULL UNIQUE,
+    FOREIGN KEY(project_id) REFERENCES agent_projects(id),
+    FOREIGN KEY(epoch_id) REFERENCES memory_calibration_ledger(id),
+    FOREIGN KEY(spine_event_id) REFERENCES memory_spine_events(id),
+    CHECK(stage NOT IN ('staged','discarded') OR approved_sha256 IS NULL),
+    CHECK(stage NOT IN ('staged','discarded') OR approved_at IS NULL),
+    CHECK(stage NOT IN ('approved','unapproved_legacy') OR approved_sha256 IS NOT NULL),
+    CHECK(stage NOT IN ('approved','unapproved_legacy') OR approved_at IS NOT NULL)
+)"""
+
+_LADDER_SEQUENCE_SQL = """CREATE TABLE ladder_id_sequence (
+    id INTEGER PRIMARY KEY CHECK(id=1),
+    next_id INTEGER NOT NULL CHECK(next_id > 0)
+)"""
+
+_LADDER_INDEX_SQL: tuple[str, ...] = (
+    """CREATE INDEX IF NOT EXISTS idx_memory_calibration_ledger_family
+       ON memory_calibration_ledger(family, epoch)""",
+    """CREATE UNIQUE INDEX IF NOT EXISTS idx_ladder_promotions_one_staged
+       ON ladder_promotions(project_id, skill_name) WHERE stage='staged'""",
+    """CREATE UNIQUE INDEX IF NOT EXISTS idx_ladder_promotions_one_live
+       ON ladder_promotions(project_id, skill_name)
+       WHERE stage IN ('approved','unapproved_legacy')""",
+    """CREATE INDEX IF NOT EXISTS idx_ladder_promotions_scope
+       ON ladder_promotions(project_id, family, stage, id)""",
+)
+
+# Modelled byte-for-byte on ``memory_spine._MEMORY_LINEAGE_TRIGGER_SQL``,
+# including its ``NEW.id IS -1`` property: a BEFORE INSERT trigger sees -1
+# when the writer omits the id, so an implicit id aborts and every ladder id
+# comes from ``ladder_id_sequence``.
+_LADDER_PROMOTION_LINEAGE_TRIGGER_SQL = (
+    """CREATE TRIGGER ladder_promotions_require_spine_event
+BEFORE INSERT ON ladder_promotions
+WHEN NEW.spine_event_id IS NULL OR NOT EXISTS (
+    SELECT 1 FROM memory_spine_events AS e
+    WHERE e.id = NEW.spine_event_id
+      AND e.kind IN ('ladder.candidate','ladder.grandfathered')
+      AND e.subject_kind = 'ladder' AND e.subject_id = NEW.id)
+BEGIN SELECT RAISE(ABORT, 'ladder promotions require a spine event'); END"""
+)
+_LADDER_LEDGER_LINEAGE_TRIGGER_SQL = (
+    """CREATE TRIGGER memory_calibration_ledger_require_spine_event
+BEFORE INSERT ON memory_calibration_ledger
+WHEN NEW.spine_event_id IS NULL OR NOT EXISTS (
+    SELECT 1 FROM memory_spine_events AS e
+    WHERE e.id = NEW.spine_event_id
+      AND e.kind = 'ladder.calibration_sealed'
+      AND e.subject_kind = 'calibration' AND e.subject_id = NEW.id)
+BEGIN SELECT RAISE(ABORT, 'calibration ledger rows require a spine event'); END"""
+)
+# These two make "append-only" a database property rather than a convention.
+_LADDER_LEDGER_APPEND_ONLY_TRIGGER_SQL = (
+    """CREATE TRIGGER memory_calibration_ledger_append_only
+BEFORE UPDATE ON memory_calibration_ledger
+BEGIN SELECT RAISE(ABORT, 'the calibration ledger is append-only'); END"""
+)
+_LADDER_LEDGER_NO_DELETE_TRIGGER_SQL = (
+    """CREATE TRIGGER memory_calibration_ledger_no_delete
+BEFORE DELETE ON memory_calibration_ledger
+BEGIN SELECT RAISE(ABORT, 'the calibration ledger is append-only'); END"""
+)
+LADDER_TRIGGER_SQL: dict[str, str] = {
+    "ladder_promotions_require_spine_event":
+        _LADDER_PROMOTION_LINEAGE_TRIGGER_SQL,
+    "memory_calibration_ledger_require_spine_event":
+        _LADDER_LEDGER_LINEAGE_TRIGGER_SQL,
+    "memory_calibration_ledger_append_only":
+        _LADDER_LEDGER_APPEND_ONLY_TRIGGER_SQL,
+    "memory_calibration_ledger_no_delete":
+        _LADDER_LEDGER_NO_DELETE_TRIGGER_SQL,
+}
+
+
+# One call bounds a bulk catch-up so ``ladder seal --all`` over a long history
+# takes many short write locks rather than one long one (L-5).
+_LADDER_SEAL_MAX_EPOCHS = 4096
+_LADDER_PROOF_DIGEST_TAG = "jarvis-ladder-proof-v1"
+_LADDER_PLAN_DIGEST_TAG = "jarvis-ladder-plan-v1"
+_LADDER_VERIFY_CACHE_TAG = "jarvis-ladder-unverified-v1"
+_LESSON_APPLIED_KIND = "lesson.applied"
+# The confirmation code's alphabet, the same one the column CHECK names.
+# Shape-checked before ``hmac.compare_digest``, which refuses a non-ASCII
+# str operand with a TypeError: an operator typing a fullwidth or Cyrillic
+# code must get a refusal, not a traceback (R-4).
+_LADDER_APPROVAL_CODE_RE = re.compile(r"^[A-Za-z0-9_-]{16,43}$")
+# Every reason code the ladder emits is a closed code, never prose; the spine's
+# payload validator enforces the same shape from the other side.
+_LADDER_REASON_RE = re.compile(r"^[a-z][a-z0-9_]{0,39}$")
+# The two template lines whose variable parts design 3.4 requires to be
+# re-screened.  They are the whole screenable surface of a staged document:
+# everything else in it is fixed template text.
+_LADDER_TOOLS_LINE_RE = re.compile(
+    r"^Tools sampled from \d+ verified reuses:\s*(.+)$", re.MULTILINE
+)
+_LADDER_ORACLES_LINE_RE = re.compile(
+    r"^Verification oracles observed:\s*(.+)$", re.MULTILINE
+)
+
+
+def _ladder_covered_id_list(value: Any) -> list[int]:
+    """The covered prediction ids of one sealed epoch, ascending.
+
+    A row whose column cannot be parsed contributes nothing rather than
+    raising: ``verify_calibration_ledger`` reports it as
+    ``coverage_shape_invalid`` and the tail treats those rows as uncovered,
+    which is the fail-closed direction (they get sealed again into a new
+    epoch and the overlap is then visible).
+    """
+    try:
+        parsed = json.loads(str(value))
+    except (TypeError, ValueError):
+        return []
+    if not isinstance(parsed, list):
+        return []
+    ids: list[int] = []
+    for item in parsed:
+        if isinstance(item, bool) or not isinstance(item, int) or item <= 0:
+            return []
+        ids.append(int(item))
+    return ids
+
+
+def _ladder_payload(value: Any) -> dict[str, Any]:
+    try:
+        parsed = json.loads(str(value))
+    except (TypeError, ValueError):
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
+
+
+def _ladder_epoch_dict(row: Mapping[str, Any]) -> dict[str, Any]:
+    """One sealed epoch as plain data, with the covered ids parsed.
+
+    ``learning_ladder.monotonicity_verdict`` reads a subset of these keys and
+    ignores the rest, so this is also the exact shape the statistics see.
+    """
+    record = {key: row[key] for key in row.keys()}
+    record["covered_ids"] = _ladder_covered_id_list(row["covered_ids_json"])
+    return record
+
+
+def _ladder_promotion_dict(
+    row: Mapping[str, Any], *, include_token: bool = False
+) -> dict[str, Any]:
+    """One promotion row as plain data.
+
+    ``approval_token`` is dropped unless the caller asked for it, and
+    ``prior_document`` is never returned: it is up to 32 KB of bytes that only
+    ``rollback_ladder_promotion`` needs, and a reader that carries it by
+    default is a reader that eventually logs it.
+    """
+    record = {
+        key: row[key] for key in row.keys()
+        if key not in {"approval_token", "prior_document"}
+    }
+    record["lesson_ids"] = _ladder_payload_list(row["lesson_ids_json"])
+    record["has_prior_document"] = row["prior_document"] is not None
+    if include_token:
+        record["approval_token"] = str(row["approval_token"])
+    return record
+
+
+def _ladder_payload_list(value: Any) -> list[Any]:
+    try:
+        parsed = json.loads(str(value))
+    except (TypeError, ValueError):
+        return []
+    return parsed if isinstance(parsed, list) else []
+
+
+def _ladder_clear_catalog_cache() -> None:
+    """Drop ``learning_ladder``'s per-workspace catalog memo.
+
+    Called after this module moves a learned document, which it does behind
+    that module's back.  Tolerant of a build where the helper is absent: a
+    missing memo is not a reason to fail a withdrawal.
+    """
+    clear = getattr(learning_ladder, "clear_catalog_cache", None)
+    if callable(clear):
+        try:
+            clear()
+        except Exception:  # noqa: BLE001 - a stale memo must not fail a write
+            pass
+
+
+def _ladder_payload_admits(kind: str, key: str) -> bool:
+    """Does the spine's contract for ``kind`` allow ``key``?
+
+    Lets this module carry a field the moment ladder-core's key set admits it,
+    without a flag day in either direction: before it lands the key is simply
+    not sent, and no store writes a payload its own validator would reject.
+    """
+    try:
+        _required, allowed = memory_spine.payload_keys(str(kind))
+    except Exception:  # noqa: BLE001 - an unknown or open kind admits nothing
+        return False
+    return str(key) in allowed
+
+
+
+def _ladder_proof_record(proof: Mapping[str, Any]) -> dict[str, Any]:
+    """The stored form of a derived proof: counts, ids and screened names.
+
+    Never lesson text and never operator prose, so ``proof_json`` is safe to
+    keep on a row an operator surface renders, and the privacy screen has a
+    small exact surface.  The row is a record of what was counted; the digest
+    beside it is what anything actually trusts, and every gate re-derives
+    rather than reading either.
+    """
+    return {
+        "family": str(proof["family"]),
+        "project_id": int(proof["project_id"]),
+        "lesson_ids": [int(value) for value in proof["lesson_ids"]],
+        "reuses": int(proof["reuses"]),
+        "contexts": int(proof["contexts"]),
+        "tool_names": [str(name) for name in proof["tool_names"]],
+        "oracles": [str(name) for name in proof["oracles"]],
+        "application_ids": [
+            int(use["application_id"]) for use in proof["applications"]
+        ],
+        "prediction_ids": sorted({
+            int(use["prediction_id"]) for use in proof["applications"]
+        }),
+        "effectiveness": dict(proof["effectiveness"]),
+        "minimum_reuses": int(proof["minimum_reuses"]),
+        "minimum_lessons": int(proof["minimum_lessons"]),
+    }
+
+
+def _ladder_document_components(document: Mapping[str, Any]) -> list[str]:
+    """The screenable components of a live or staged skill document.
+
+    Only the variable parts design 3.4 defines -- the sampled tool names and
+    the observed oracle names -- because everything else in the template is
+    fixed text the store wrote itself.  A pre-M4 legacy document carries
+    neither line and yields nothing, which is honest: there is nothing in it
+    the ladder chose.
+    """
+    content = str(document.get("content") or "")
+    names: list[str] = []
+    for pattern in (_LADDER_TOOLS_LINE_RE, _LADDER_ORACLES_LINE_RE):
+        for match in pattern.finditer(content):
+            for part in str(match.group(1)).split(","):
+                cleaned = part.strip()
+                if cleaned and cleaned != "none recorded":
+                    names.append(cleaned)
+    return names
+
+
+def _sqlite_table_exists(db: sqlite3.Connection, table: str) -> bool:
+    return db.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (table,)
+    ).fetchone() is not None
+
+
+def _sqlite_table_columns(db: sqlite3.Connection, table: str) -> set[str]:
+    return {str(row[1]) for row in db.execute(f"PRAGMA table_info({table})")}
+
+
+def ladder_ready(db: sqlite3.Connection) -> bool:
+    """True once every ladder object of schema 49 exists."""
+    return all(_sqlite_table_exists(db, name) for name in LADDER_TABLES)
+
+
+def ladder_sequence_floor(db: sqlite3.Connection) -> int:
+    """The highest ladder id the store has ever used: live rows in either
+    record table and every ladder- or calibration-subject spine event, so a
+    discarded id never comes back."""
+    ledger = db.execute(
+        "SELECT COALESCE(MAX(id), 0) FROM memory_calibration_ledger"
+    ).fetchone()[0]
+    promotions = db.execute(
+        "SELECT COALESCE(MAX(id), 0) FROM ladder_promotions"
+    ).fetchone()[0]
+    seen = db.execute(
+        """SELECT COALESCE(MAX(subject_id), 0) FROM memory_spine_events
+           WHERE subject_kind IN ('ladder','calibration')"""
+    ).fetchone()[0]
+    return max(int(ledger or 0), int(promotions or 0), int(seen or 0))
+
+
+def allocate_ladder_id(db: sqlite3.Connection) -> int:
+    """Explicit, never-reused ladder ids from the one sequence both record
+    tables share (the spine's ``subject_kind`` tells a promotion from an
+    epoch).  Allocate only inside the write transaction that appends the
+    lineage event: the trigger aborts an implicit id."""
+    row = db.execute("SELECT next_id FROM ladder_id_sequence WHERE id=1").fetchone()
+    if row is None:
+        raise memory_spine.SpineError("ladder id sequence is missing")
+    ladder_id = int(row[0])
+    if ladder_id <= ladder_sequence_floor(db):
+        raise memory_spine.SpineError(
+            "ladder id sequence is behind the store; run ladder verify"
+        )
+    db.execute("UPDATE ladder_id_sequence SET next_id=? WHERE id=1", (ladder_id + 1,))
+    return ladder_id
+
+
+def ladder_coverage_digest(key: bytes, covered: Sequence[Sequence[Any]]) -> str:
+    """Keyed digest over one sealed epoch's exact coverage.
+
+    ``covered`` is the list of ``(id, predicted_success, actual_status,
+    evidence_ok)`` for every row the epoch covers, sorted by id.  Keyed, so an
+    epoch re-cut over different rows — a hand-edited ``last_prediction_id``, a
+    covered failure flipped to ``complete``, a row inserted into a sealed
+    range — cannot be made to re-derive without the spine key sidecar (M4
+    design 2.2, 2.4).
+    """
+    material = memory_spine.canonical([
+        [
+            int(row[0]),
+            float(row[1]),
+            str(row[2]),
+            None if row[3] is None else int(row[3]),
+        ]
+        for row in sorted(covered, key=lambda item: int(item[0]))
+    ])
+    return hmac.new(
+        key,
+        (_LADDER_COVERAGE_DIGEST_TAG + "\0" + material).encode("utf-8"),
+        hashlib.sha256,
+    ).hexdigest()
+
+
+def screened_tool_name(value: Any) -> str | None:
+    """One bounded, screened tool name, or ``None``.
+
+    ``[a-z][a-z0-9_]{0,63}`` and clean under both ``screen_endpoint`` (the
+    widened M3 screen) and ``contains_secret`` (M4 design 3.4).  Anything else
+    becomes ``None`` rather than raising: this runs on the outcome-recording
+    path, and a strange tool name must never cost the store a resolved
+    prediction — losing one would change the gate population, which is the
+    thing the calibration ledger exists to keep honest.  A non-string is still
+    a caller bug and raises.
+    """
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise ValueError("primary_tool must be a string or None")
+    name = value.strip()
+    if not _LADDER_TOOL_NAME_RE.match(name):
+        return None
+    if contains_secret(name) or screen_endpoint(name)[0]:
+        return None
+    return name
 
 
 class Memory:
@@ -1016,15 +1640,50 @@ class Memory:
             "eligible_manifests": 0,
         }
         self._claim_clock_ready = False
+        # The spine key lives beside the database; it is loaded once the
+        # store is open (created only for a store that has no spine yet).  An
+        # in-memory store gets an ephemeral key.  Hooks stay off until the
+        # spine schema exists.
+        self._spine_key = b""
+        self._spine_ready = False
+        # The temporal graph is a projection of the claim projection; the
+        # write hooks stay off until its tables exist (schema 48).
+        self._graph_ready = False
+        # The learning ladder's two record tables (schema 49).  Unlike the
+        # graph these are not a projection: the flag gates the ladder
+        # methods, and nothing rebuilds them.
+        self._ladder_ready = False
+        # Typed-invariant compaction (schema 50).  Like the ladder these are
+        # records, not a projection -- a compacted span is the ONLY copy of
+        # the transcript rows it replaced -- so nothing rebuilds them and a
+        # downgrade over them refuses rather than dropping (M5 design 2.11,
+        # H-1).
+        self._compaction_ready = False
+        self._dropped_spine_events = 0
         # Per-store memo for pure recall helpers; digest-keyed, byte-bounded,
         # cleared on deletion and close (see RecallCache).
         self._recall_cache = RecallCache()
+        self._last_claim_recall_report = _blank_claim_recall_report("idle")
+        self._last_graph_recall_report = _blank_graph_recall_report("idle")
+        self._last_lesson_recall_report = learning_ladder.lesson_recall_record(
+            "idle"
+        )
+        # Turn-path writes that lost the race for the write lock (S-3).
+        # Held in memory as well as written to the receipt path, because
+        # the receipt itself needs the very lock the write just failed to
+        # get: the caller must be able to learn about the degradation on
+        # the turn it happened, not only after the worker lets go.
+        self._degraded_writes: list[dict[str, Any]] = []
+        self._pending_degraded_receipts: list[tuple[str, str, str]] = []
+        self._pending_claim_clock_updates: list[tuple[Any, ...]] = []
+        self._dropped_claim_clock_reads = 0
         # Diagnostic record of the most recent lexical recall attempt so an
         # abstention at scale is observable instead of silent.  Read it
         # through ``recall_report()``, which returns a copy.
         self._last_recall_report: dict[str, Any] = _blank_recall_report("idle")
         self.vault: Vault | None = None
         busy_timeout_ms = max(100, min(int(busy_timeout_ms), 120_000))
+        self._busy_timeout_ms = busy_timeout_ms
         self.db = sqlite3.connect(
             str(self.path),
             timeout=busy_timeout_ms / 1000,
@@ -1044,10 +1703,24 @@ class Memory:
             self.db.execute("PRAGMA foreign_keys=ON")
             self.db.execute(f"PRAGMA busy_timeout={busy_timeout_ms}")
             self.db.execute("PRAGMA synchronous=FULL")
+            # Freed pages are zeroed so erased or deleted values do not linger
+            # in the file (right to forget; see docs/MEMORY_SPINE.md).
+            self.db.execute("PRAGMA secure_delete=ON")
+            has_spine = self.db.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='memory_spine_head'"
+            ).fetchone() is not None
+            self._spine_key = memory_spine.load_spine_key(
+                None if str(self.path) == ":memory:" else self.path,
+                create=not has_spine,
+            )
             self._migrate()
             if str(self.path) != ":memory:":
                 self.db.execute("PRAGMA journal_mode=WAL").fetchone()
             self._claim_clock_ready = True
+            self._spine_ready = memory_spine.spine_ready(self.db)
+            self._graph_ready = memory_graph.graph_ready(self.db)
+            self._ladder_ready = ladder_ready(self.db)
+            self._compaction_ready = memory_compaction.compaction_ready(self.db)
         except BaseException:
             self.db.close()
             self._closed = True
@@ -1082,8 +1755,25 @@ class Memory:
             # unavailable mirror must never roll back the canonical SQLite row.
             return
 
-    def sync_vault_notes(self, notes: list[VaultNote]) -> dict[str, int]:
-        """Synchronize derived vault search records into canonical memory indexing."""
+    def sync_vault_notes(
+        self,
+        notes: list[VaultNote],
+        *,
+        actor: str = "runtime",
+        permission: str = "runtime:indexer",
+        conversation_id: int | None = None,
+    ) -> dict[str, int]:
+        """Synchronize derived vault search records into canonical memory indexing.
+
+        Every change is receipted on the memory spine: a new record appends
+        ``memory.created`` before its row, a changed record ``memory.updated``
+        after it (after-image digest), and the stale records one
+        ``memory.deleted`` listing their ids and digests, never content.  An
+        unchanged record appends nothing: the indexer loops re-run this on
+        every batch.  Those loops are ``runtime`` / ``runtime:indexer`` (the
+        defaults); the chat verb passes ``operator`` / ``operator:interactive``.
+        """
+        context = self._spine_context(actor, conversation_id, permission)
         desired = {
             f"vault:{note.kind}:"
             f"{hashlib.sha256(note.relative_path.encode('utf-8')).hexdigest()}": (
@@ -1107,11 +1797,13 @@ class Memory:
                 ).fetchall()
                 if row["source"] is not None
             }
-            stale_ids = [
-                memory_id
-                for source, (memory_id, _content) in existing.items()
+            stamp = now_iso()
+            stale = [
+                (memory_id, content)
+                for source, (memory_id, content) in existing.items()
                 if source not in desired
             ]
+            stale_ids = [memory_id for memory_id, _content in stale]
             if stale_ids:
                 placeholders = ",".join("?" for _ in stale_ids)
                 for table in (
@@ -1129,17 +1821,62 @@ class Memory:
                     f"DELETE FROM memories WHERE id IN ({placeholders})", stale_ids
                 )
                 removed = len(stale_ids)
-            stamp = now_iso()
+                if self._spine_ready:
+                    # Deletion receipts carry ids and digests only (design
+                    # 12.6 item 2), in bounded chunks: one receipt for a large
+                    # removal would exceed the payload cap and roll the whole
+                    # pass back, so the stale rows would never go away.  The
+                    # ids never come back (memory_id_sequence).
+                    chunk_size = max(
+                        1, int(getattr(memory_spine, "MEMORY_DELETED_MAX_IDS", 128))
+                    )
+                    for offset in range(0, len(stale), chunk_size):
+                        chunk = stale[offset:offset + chunk_size]
+                        self._append_memory_event(
+                            "memory.deleted",
+                            memory_id=chunk[-1][0],
+                            payload=memory_spine.memory_deleted_payload(
+                                self._spine_key, chunk, reason="vault re-index"
+                            ),
+                            stamp=stamp,
+                            source="vault re-index",
+                            context=context,
+                        )
             for source, content in desired.items():
                 current = existing.get(source)
+                fields = {
+                    "kind": "vault", "content": content, "source": source,
+                    "family": None, "outcome_status": None, "reflection_id": None,
+                }
                 if current is None:
-                    cursor = self.db.execute(
-                        """INSERT INTO memories(created_at, kind, content, source)
-                           VALUES (?, 'vault', ?, ?)""",
-                        (stamp, content, source),
-                    )
+                    if self._spine_ready:
+                        memory_id = memory_spine.allocate_memory_id(self.db)
+                        event_id = self._append_memory_event(
+                            "memory.created",
+                            memory_id=memory_id,
+                            payload=memory_spine.memory_event_payload(
+                                self._spine_key, fields,
+                                origin="verified_vault_note", eligible=True,
+                            ),
+                            stamp=stamp,
+                            source="vault re-index",
+                            context=context,
+                        )
+                        self.db.execute(
+                            """INSERT INTO memories(
+                                   id, created_at, kind, content, source, spine_event_id
+                               ) VALUES (?, ?, 'vault', ?, ?, ?)""",
+                            (memory_id, stamp, content, source, event_id),
+                        )
+                    else:
+                        cursor = self.db.execute(
+                            """INSERT INTO memories(created_at, kind, content, source)
+                               VALUES (?, 'vault', ?, ?)""",
+                            (stamp, content, source),
+                        )
+                        memory_id = int(cursor.lastrowid)
                     self._set_ordinary_memory_provenance_locked(
-                        int(cursor.lastrowid),
+                        memory_id,
                         origin="verified_vault_note",
                         eligible=True,
                     )
@@ -1154,6 +1891,18 @@ class Memory:
                         origin="verified_vault_note",
                         eligible=True,
                     )
+                    if self._spine_ready:
+                        self._append_memory_event(
+                            "memory.updated",
+                            memory_id=int(current[0]),
+                            payload=memory_spine.memory_event_payload(
+                                self._spine_key, fields,
+                                origin="verified_vault_note", eligible=True,
+                            ),
+                            stamp=stamp,
+                            source="vault re-index",
+                            context=context,
+                        )
                     updated += 1
                 else:
                     self._set_ordinary_memory_provenance_locked(
@@ -1230,6 +1979,14 @@ class Memory:
             return
         if self.db.in_transaction:
             self.db.rollback()
+        # A degradation queued while the worker held the write lock is written
+        # here or never (R-10): a CLI invocation, a worker pass or a turn whose
+        # store closes at the end would otherwise leave no trace of a write it
+        # dropped, and the epoch counters would lose it too.
+        try:
+            self._flush_degraded_receipts()
+        except sqlite3.DatabaseError:
+            pass
         self.db.close()
         self._closed = True
         self._recall_cache.clear()
@@ -1260,6 +2017,33 @@ class Memory:
                 raise RuntimeError(
                     f"Database schema version {version} is newer than supported version {SCHEMA_VERSION}"
                 )
+            # FIRST, before any other schema work.  A store carrying compacted
+            # spans below schema 50 is a downgrade over records that cannot be
+            # rebuilt: the ``messages`` rows a span replaced were deleted when
+            # it was written, so the span is the only copy.  The check has to
+            # precede the graph DROP three lines down (N-9) or a migration
+            # that is about to refuse has already destroyed the graph on its
+            # way to raising.
+            self._refuse_compaction_downgrade_locked(version)
+            if version < 48:
+                # A store re-migrated from below 48 runs the 46 and 47 steps
+                # first, and those write and rewrite ``memory_claims``; a
+                # stale graph from an earlier 48 would still hold foreign keys
+                # into rows they are about to recreate.  Dropping the three
+                # graph tables at the very start of the migration transaction
+                # makes the whole migration see a store with no graph, which
+                # is the state ``_migrate_v48`` is written for.  A partial
+                # graph from an interrupted migration was never authoritative
+                # (M3 design 4.3 step 0; the same premise as v45's proposals
+                # table).
+                for statement in memory_graph.DROP_GRAPH_SQL:
+                    self.db.execute(statement)
+            if version < 47:
+                # Legacy steps below write claims and memories before the
+                # spine exists; a lineage trigger left over from a newer life
+                # must not abort them.  v46 recreates the spine and v47 its
+                # complete trigger set.
+                memory_spine.drop_spine_triggers(self.db)
             if version < 1:
                 self._migrate_v1()
                 version = 1
@@ -1405,7 +2189,354 @@ class Memory:
             self._reconcile_learning_quality_assessments_locked(
                 reinstall_triggers=not quality_schema_healthy
             )
+            if version < 45:
+                self._migrate_v45()
+                version = 45
+            if version < 46:
+                self._migrate_v46()
+                version = 46
+            if version < 47:
+                self._migrate_v47()
+                version = 47
+            if version < 48:
+                self._migrate_v48()
+                version = 48
+            if version < 49:
+                self._migrate_v49()
+                version = 49
+            if version < 50:
+                self._migrate_v50()
+                version = 50
             self.db.execute(f"PRAGMA user_version={version}")
+
+    def _migrate_v46(self) -> None:
+        """Add the memory spine: append-only keyed event chain, claim lineage,
+        explicit claim ids, and a backfill of every existing claim."""
+        memory_spine.migrate_memory_spine_v46(
+            self.db, self._spine_key, now=now_iso()
+        )
+
+    def _migrate_v47(self) -> None:
+        """Put ordinary memories and lessons on the spine: explicit memory
+        ids, lineage on every ``memories`` row (a claim's backing row carries
+        the claim's event), and a digest-only ``memory.imported`` backfill of
+        every other row.  Runs in the same transaction as v46 for a legacy
+        store; a store that already has memory events is re-linked, never
+        re-imported, and a row whose content no longer matches its event is
+        refused (see ``memory_spine.migrate_memory_spine_v47``)."""
+        memory_spine.migrate_memory_spine_v47(
+            self.db, self._spine_key, now=now_iso()
+        )
+
+    def _migrate_v48(self) -> None:
+        """Add the temporal graph: entities, edges with validity intervals,
+        and a backfill of every non-excluded claim row.
+
+        The three tables were dropped at the top of ``_migrate`` (design 4.3
+        step 0), so this step always builds the projection from scratch and is
+        idempotent by construction.  It reads ``memory_claims`` and writes no
+        spine table except its own ``projection.rebuilt`` receipt, which
+        ``memory_graph`` appends because it holds the key; the spine is ready
+        on every path here, since 46 and 47 ran earlier in this transaction
+        for a legacy store.  Nothing is written to ``memory_claims`` — in
+        particular no ``valid_until`` backfill on rows superseded in place
+        before schema 46 (design 3.2, review R9).
+        """
+        memory_graph.migrate_memory_graph_v48(
+            self.db, self._spine_key, now=now_iso()
+        )
+
+    def _migrate_v49(self) -> None:
+        """Add the learning ladder: two record tables, one shared id sequence,
+        their lineage and append-only triggers, and the nullable
+        ``lesson_applications.tool_name`` column (schema 49).
+
+        Four things and nothing else (M4 design 4.3):
+
+        1. **Refuse rather than rebuild.**  If the spine records ``ladder.*``
+           events but a record table is absent, or present without the rows
+           those events name, the store **fails to open** with the fixed
+           reason ``ladder_records_missing`` — the same shape as migration
+           46's refusal of an authentic spine below 46.  Dropping the tables
+           on every re-migration, as the first draft did, would mean one
+           ``PRAGMA user_version = 48`` plus a reopen permanently destroys
+           every sealed epoch and every promotion record (exactly the move
+           someone makes to erase an inconvenient ledger), and would leave the
+           store broken: spine events cannot be deleted, so every ``ladder.*``
+           event would survive naming a row that no longer exists.
+        2. Create the DDL when the tables are absent.  **Only
+           ``ladder_id_sequence`` is ever dropped and rebuilt**, from the two
+           tables and the spine, because a sequence is derivable and a record
+           is not.
+        3. Add ``lesson_applications.tool_name``; existing rows keep ``NULL``,
+           and a promotion built from them honestly records "none recorded"
+           rather than inventing a tool list.
+        4. **Seal no epochs and grandfather nothing.**  The ledger starts
+           empty: a store with 50,000 historical predictions does not get a
+           fabricated history.  Bulk sealing is the operator's ``ladder seal
+           --all``, and even then the boundaries are mechanical (design 2.2),
+           so it is a catch-up rather than a choice.  Grandfathering pre-M4
+           live documents needs a workspace, which ``Memory`` does not have,
+           and is the separate receipted pass ``grandfather_ladder``.
+
+        No receipt is appended.  The ladder is not a projection, so
+        ``projection.rebuilt`` would be a lie and ``"ladder"`` is deliberately
+        absent from ``memory_spine._REBUILT_PROJECTIONS`` (design 4.3, M-12);
+        the grandfather pass appends its own kind instead.
+        """
+        ledger_present = _sqlite_table_exists(self.db, "memory_calibration_ledger")
+        promotions_present = _sqlite_table_exists(self.db, "ladder_promotions")
+        self._refuse_unbacked_ladder_events_locked(
+            ledger_present=ledger_present, promotions_present=promotions_present
+        )
+        # Widen the events table's closed CHECK lists for the seven
+        # ``ladder.*`` kinds, the two new subject kinds and ``lesson.applied``,
+        # exactly as migration 47 widened them for the memory kinds: SQLite
+        # cannot alter a CHECK, so the table is copied column for column and
+        # every keyed digest still verifies.  The copy is idempotent -- it
+        # compares the stored SQL against ``memory_spine._EVENT_TABLE_SQL``
+        # and does nothing when they already match -- so a re-migration over
+        # an already-widened store touches no row.
+        #
+        # **Every spine trigger comes down first, and this is not optional.**
+        # The rebuild ends in ``ALTER TABLE ... RENAME``, and SQLite re-parses
+        # every trigger in the schema on a rename.  Two of them --
+        # ``memory_claims_require_spine_event`` and
+        # ``memories_require_spine_event`` -- sit on OTHER tables, so the
+        # ``DROP TABLE memory_spine_events`` does not take them with it, and
+        # they reference a table that does not exist between the drop and the
+        # rename: ``OperationalError: no such table: main.memory_spine_events``
+        # on every real store carrying claims or memories.  Migration 47 never
+        # met this because ``_migrate`` drops the spine triggers below 47; at
+        # 48 all four are installed.  Dropping and recreating them around the
+        # rebuild is the same thing migration 47 relies on, done explicitly.
+        if memory_spine.spine_ready(self.db):
+            memory_spine.drop_spine_triggers(self.db)
+            try:
+                memory_spine._rebuild_events_table(self.db)
+            finally:
+                memory_spine.create_spine_triggers(self.db)
+        if not ledger_present:
+            self.db.execute(_LADDER_LEDGER_SQL)
+        if not promotions_present:
+            self.db.execute(_LADDER_PROMOTIONS_SQL)
+        for statement in _LADDER_INDEX_SQL:
+            self.db.execute(statement)
+        for name, statement in LADDER_TRIGGER_SQL.items():
+            # Triggers are definitions, not records: restoring them
+            # deterministically on every open is the v44 discipline, and a
+            # store whose triggers were dropped out of band gets them back.
+            self.db.execute(f"DROP TRIGGER IF EXISTS {name}")
+            self.db.execute(statement)
+        self.db.execute("DROP TABLE IF EXISTS ladder_id_sequence")
+        self.db.execute(_LADDER_SEQUENCE_SQL)
+        self.db.execute(
+            "INSERT INTO ladder_id_sequence(id, next_id) VALUES (1, ?)",
+            (ladder_sequence_floor(self.db) + 1,),
+        )
+        if "tool_name" not in _sqlite_table_columns(self.db, "lesson_applications"):
+            self.db.execute("ALTER TABLE lesson_applications ADD COLUMN tool_name TEXT")
+
+    def _migrate_v50(self) -> None:
+        """Add typed-invariant compaction: milestones, compacted spans, their
+        lineage and immutability triggers, and the one new spine kind
+        (schema 50 / spine 49).
+
+        Three things and nothing else (M5 design 2.11):
+
+        1. **Widen the events table for ``transcript.compacted`` first.**
+           ``memory_spine.migrate_memory_spine_v49`` copies the events table
+           column for column because SQLite cannot alter a CHECK, and the copy
+           ends in ``ALTER TABLE ... RENAME``.  SQLite re-parses every trigger
+           in the schema on a rename, and two of them --
+           ``memory_claims_require_spine_event`` and
+           ``memories_require_spine_event`` -- sit on OTHER tables, so the
+           ``DROP TABLE`` does not take them with it and they reference a
+           table that does not exist between the drop and the rename.  Every
+           real store carrying claims or memories would raise
+           ``OperationalError: no such table: main.memory_spine_events``.
+           ``_migrate`` drops the spine triggers only below 47, so at 49 all
+           four are installed and this bracket is mandatory, not defensive.
+           It is the M4 correctness review's HIGH-1, paid for once already.
+        2. **Create the two record tables when absent, and never drop them.**
+           A compacted span is the only copy of the transcript rows it
+           replaced, so the graph's drop-and-rebuild rule does not transfer:
+           the graph is derived and a span is not (design 2.11, H-1).
+        3. **No backfill.**  Existing conversations are not compacted by the
+           migration and no ``transcript.compacted`` event is synthesised for
+           history that was never compacted.
+
+        No receipt is appended.  Compaction is not a projection, so
+        ``projection.rebuilt`` would be a lie; the compaction pass appends its
+        own receipt when it actually runs.
+        """
+        if memory_spine.spine_ready(self.db):
+            # EVERY trigger that lives on another table and mentions
+            # ``memory_spine_events`` has to come down, not just the ones
+            # ``memory_spine`` knows about.  M4 learned half of this: its
+            # migration dropped the spine's own two external triggers
+            # (``memory_claims_require_spine_event``,
+            # ``memories_require_spine_event``) around the rebuild.  By 49 the
+            # ladder has added two more of exactly the same shape, and
+            # ``memory_spine.drop_spine_triggers`` cannot know about them --
+            # so a real schema-49 store failed to open with
+            # ``error in trigger ladder_promotions_require_spine_event: no
+            # such table: main.memory_spine_events``.  Only the real-store
+            # test finds this: a store built by the current tree gets the
+            # widened CHECK directly and never runs the copy at all.
+            #
+            # Derived from the live schema rather than listed, so the next
+            # phase to add a lineage trigger is carried automatically instead
+            # of discovering this a third time.
+            external = [
+                (str(row["name"]), str(row["sql"]))
+                for row in self.db.execute(
+                    """SELECT name, sql FROM sqlite_master
+                       WHERE type='trigger' AND sql IS NOT NULL
+                         AND tbl_name <> 'memory_spine_events'
+                         AND sql LIKE '%memory_spine_events%'"""
+                ).fetchall()
+            ]
+            memory_spine.drop_spine_triggers(self.db)
+            for name, _sql in external:
+                self.db.execute(f"DROP TRIGGER IF EXISTS {name}")
+            try:
+                memory_spine.migrate_memory_spine_v49(
+                    self.db, self._spine_key, now=now_iso()
+                )
+            finally:
+                memory_spine.create_spine_triggers(self.db)
+                for name, sql in external:
+                    # Idempotent whichever set ``create_spine_triggers``
+                    # already restored.
+                    self.db.execute(f"DROP TRIGGER IF EXISTS {name}")
+                    self.db.execute(sql)
+        memory_compaction.migrate_compaction_v50(
+            self.db, self._spine_key, now=now_iso()
+        )
+
+    def _refuse_compaction_downgrade_locked(self, version: int) -> None:
+        """Refuse to open a store whose compacted spans predate its schema.
+
+        The shape is ``_refuse_unbacked_ladder_events_locked``'s, and the
+        reason is stronger.  A ladder downgrade destroys records that cannot
+        be re-derived; a compaction downgrade destroys the operator's
+        transcript itself, because the ``messages`` rows were deleted when the
+        span was written and ``memory_compacted_spans`` holds the only copy.
+        Migration 50 therefore never drops either table, and a store that
+        arrives below 50 with spans in it fails to open and says what to type.
+
+        A real store below schema 50 has no spans at all, so this state can
+        only be a hand-set ``user_version`` over the record tables.
+        """
+        if version >= 50:
+            return
+        spans = memory_compaction.compaction_downgrade_blocked(self.db)
+        if not spans:
+            return
+        raise memory_spine.SpineError(
+            memory_compaction.compaction_downgrade_message(
+                int(spans), version=int(version)
+            ),
+            code="compaction_downgrade_refused",
+        )
+
+    def _refuse_unbacked_ladder_events_locked(
+        self, *, ledger_present: bool, promotions_present: bool
+    ) -> None:
+        """Refuse to open a store whose ladder events have lost their records.
+
+        A real store below schema 49 has no ``ladder.*`` event at all, so an
+        event with no row can only be a manual downgrade over the record
+        tables.  Rebuilding is not an option — the numbers a sealed epoch
+        froze are not derivable from anything else — so the store fails to
+        open and says why, exactly as ``migrate_memory_spine_v46`` refuses an
+        authentic keyed head below 46 (design 4.3 step 1, H-6).
+        """
+        if not _sqlite_table_exists(self.db, "memory_spine_events"):
+            return
+        placeholders = ", ".join("?" for _ in LADDER_SPINE_KINDS)
+        events = self.db.execute(
+            f"""SELECT id, kind, subject_kind, subject_id
+                FROM memory_spine_events WHERE kind IN ({placeholders})
+                ORDER BY id""",
+            LADDER_SPINE_KINDS,
+        ).fetchall()
+        if not events:
+            return
+        reason = None
+        if not ledger_present or not promotions_present:
+            reason = "the ladder record tables are absent"
+        else:
+            orphans: list[int] = []
+            for event in events:
+                kind = str(event["kind"])
+                if kind == LADDER_LEDGER_CREATING_KIND:
+                    table = "memory_calibration_ledger"
+                elif kind in LADDER_PROMOTION_CREATING_KINDS:
+                    table = "ladder_promotions"
+                else:
+                    # Status events (staged, approved, rolled back, withdrawn)
+                    # do not create a row; the creating event for their
+                    # subject does, and it is checked on its own line.
+                    continue
+                subject_id = event["subject_id"]
+                if subject_id is None:
+                    orphans.append(int(event["id"]))
+                    continue
+                backing = self.db.execute(
+                    f"SELECT 1 FROM {table} WHERE id=? AND spine_event_id=?",
+                    (int(subject_id), int(event["id"])),
+                ).fetchone()
+                if backing is None:
+                    orphans.append(int(event["id"]))
+            if orphans:
+                reason = (
+                    f"{len(orphans)} ladder event(s) name a record row that is "
+                    f"missing (first: event {orphans[0]})"
+                )
+        if reason is None:
+            return
+        raise memory_spine.SpineError(
+            "ladder_records_missing: the memory spine records ladder events "
+            f"but {reason}; refusing to open (a real store below schema 49 "
+            "has no ladder events, so this is a schema downgrade over the "
+            "record tables; see docs/LEARNING_LADDER.md)",
+            code="ladder_records_missing",
+        )
+
+    def _migrate_v45(self) -> None:
+        """Keep the runtime's own record of every shown project-fact proposal.
+
+        user_version<45 proves no proposal row is authoritative, so a partial
+        table from an interrupted migration is dropped before creation.
+        """
+        self.db.execute("DROP TABLE IF EXISTS memory_fact_proposals")
+        self.db.execute(
+            """CREATE TABLE memory_fact_proposals (
+                id INTEGER PRIMARY KEY,
+                created_at TEXT NOT NULL,
+                conversation_id INTEGER NOT NULL,
+                assistant_message_id INTEGER NOT NULL UNIQUE,
+                project_id INTEGER NOT NULL,
+                command TEXT NOT NULL,
+                command_sha256 TEXT NOT NULL CHECK(length(command_sha256)=64),
+                assisted INTEGER NOT NULL CHECK(assisted IN (0, 1)),
+                reply_asked_question INTEGER NOT NULL
+                    CHECK(reply_asked_question IN (0, 1)),
+                status TEXT NOT NULL CHECK(status IN
+                    ('shown', 'confirmed', 'refused', 'expired')),
+                resolved_at TEXT,
+                claim_id INTEGER,
+                FOREIGN KEY(conversation_id) REFERENCES conversations(id),
+                FOREIGN KEY(assistant_message_id) REFERENCES messages(id),
+                FOREIGN KEY(claim_id) REFERENCES memory_claims(id)
+            )"""
+        )
+        self.db.execute(
+            """CREATE INDEX IF NOT EXISTS idx_memory_fact_proposals_conversation
+               ON memory_fact_proposals(conversation_id, status, id)"""
+        )
 
     def _migrate_v1(self) -> None:
         statements = (
@@ -4468,9 +5599,26 @@ class Memory:
         actual_steps: int | None,
         evidence_ok: bool | None,
         failure_class: str | None = None,
+        primary_tool: str | None = None,
     ) -> bool:
-        """Resolve one prediction exactly once; evidence may be not applicable."""
+        """Resolve one prediction exactly once; evidence may be not applicable.
+
+        ``primary_tool`` is the one tool name this outcome records, stamped
+        onto every ``lesson_applications`` row the resolution closes (M4
+        design 3.4, H-7).  ``task_predictions`` has no tool column and M4 does
+        not add one, so the learning ladder builds a staged document's tool
+        line from these values alone — one per outcome, which makes the line a
+        **sample and not a union**, and a row written before schema 49 keeps
+        ``NULL`` and honestly reports "none recorded".  The Agent passes the
+        alphabetically first non-internal tool actually called in the turn.
+        The value is bounded to ``[a-z][a-z0-9_]{0,63}`` and screened by
+        ``screen_endpoint`` and ``contains_secret``; anything else is recorded
+        as ``NULL`` rather than raising, because losing a resolved prediction
+        to a strange tool name would change the very population the
+        calibration ledger exists to keep honest.
+        """
         normalized_id = self._prediction_optional_id(prediction_id, "prediction_id")
+        safe_tool = screened_tool_name(primary_tool)
         if actual_status not in {"complete", "incomplete", "failed"}:
             raise ValueError("actual_status must be complete, incomplete, or failed")
         if actual_steps is not None and (
@@ -4493,6 +5641,40 @@ class Memory:
             failure_class = "unknown"
         if failure_class is not None and failure_class not in self.PREDICTION_FAILURE_CLASSES:
             raise ValueError(f"Unknown failure class: {failure_class}")
+        try:
+            return self._resolve_prediction_locked(
+                normalized_id,
+                actual_status=actual_status,
+                actual_steps=actual_steps,
+                evidence_ok=evidence_ok,
+                failure_class=failure_class,
+                safe_tool=safe_tool,
+            )
+        except (sqlite3.Error, memory_spine.SpineError) as exc:
+            # S-3: the worker holds the write lock; the turn degrades to a
+            # recorded non-fatal outcome instead of failing.  Every ValueError
+            # above is untouched -- those are caller bugs and still raise.
+            # ``SpineError`` joins it for ruling 27.
+            self._record_degraded_write(
+                "resolve", type(exc).__name__,
+                reason=(
+                    "spine_unverified"
+                    if isinstance(exc, memory_spine.SpineError)
+                    else "store_locked"
+                ),
+            )
+            return False
+
+    def _resolve_prediction_locked(
+        self,
+        normalized_id: int,
+        *,
+        actual_status: str,
+        actual_steps: int | None,
+        evidence_ok: bool | None,
+        failure_class: str | None,
+        safe_tool: str | None,
+    ) -> bool:
         with self._immediate_transaction():
             stamp = now_iso()
             try:
@@ -4532,9 +5714,13 @@ class Memory:
             if updated.rowcount == 1:
                 self.db.execute(
                     """UPDATE lesson_applications
-                       SET resolved_at=?, successful=?
+                       SET resolved_at=?, successful=?,
+                           tool_name=COALESCE(?, tool_name)
                        WHERE prediction_id=? AND resolved_at IS NULL""",
-                    (stamp, int(actual_status == "complete"), normalized_id),
+                    (
+                        stamp, int(actual_status == "complete"), safe_tool,
+                        normalized_id,
+                    ),
                 )
                 memory_ids = [
                     int(row["memory_id"])
@@ -4630,6 +5816,95 @@ class Memory:
                         ),
                     )
         return updated.rowcount == 1
+
+
+    def _record_degraded_write(
+        self, action: str, detail: str, *, reason: str = "store_locked"
+    ) -> None:
+        """Note that a turn-path write lost the race for the write lock.
+
+        Design 3.4 (iii), S-3.  ``Memory.record_lesson_applications`` and
+        ``Memory.resolve_prediction`` are the two writers a turn takes that
+        can collide with the consolidation worker, and the second pass
+        measured what a collision costs: a 1 s worker hold delays the turn's
+        write by about 1,080 ms and a hold past the busy timeout raises
+        ``OperationalError: database is locked``.  Failing the operator's turn
+        over that is the M1 round-2 M-1 finding one layer up, so both writers
+        degrade -- and the degradation is **recorded**, not swallowed, because
+        a prediction that silently failed to resolve would quietly leave the
+        gate population that the calibration ledger exists to keep honest.
+
+        ``reason`` is the closed code (``spine_unverified`` when the chain
+        refused the append, ``store_locked`` when the worker held the write
+        lock); ``detail`` stays free text for a human.
+
+        Recorded twice, on purpose.  The durable receipt is an
+        ``activity_log`` row, but writing it needs the very lock the write
+        just failed to get, so it is queued and flushed on the next attempt
+        that succeeds.  The in-memory record is what the caller can read on
+        the turn it happened, through ``degraded_writes()``, and it is also
+        what distinguishes "the store was locked" from ``resolve_prediction``'s
+        other ``False``, "this prediction was already resolved".
+
+        Never raises: a receipt that cannot be written must not become the
+        second failure of the same turn.
+        """
+        stamp = now_iso()
+        record = {
+            "at": stamp,
+            "action": str(action),
+            # A closed code a caller can branch on.  The sealed holdout read
+            # ``row.get("reason")`` on one of these and got ``None``, because
+            # the record carried only a free-text ``detail`` -- so a scorer
+            # (and an operator surface) could not tell a spine refusal from a
+            # lock timeout without parsing prose.
+            "reason": str(reason),
+            "detail": str(detail)[:200],
+        }
+        self._degraded_writes.append(record)
+        # Bounded: a store that is locked out for a long time must not grow a
+        # list until it is the problem.
+        if len(self._degraded_writes) > 256:
+            del self._degraded_writes[:-256]
+        self._pending_degraded_receipts.append(
+            (stamp, str(action), str(detail)[:200])
+        )
+        if len(self._pending_degraded_receipts) > 256:
+            del self._pending_degraded_receipts[:-256]
+        self._flush_degraded_receipts()
+
+    def _flush_degraded_receipts(self) -> None:
+        """Write any queued degradation receipts, or leave them queued."""
+        if not self._pending_degraded_receipts:
+            return
+        queued = list(self._pending_degraded_receipts)
+        try:
+            for stamp, action, detail in queued:
+                self.db.execute(
+                    """INSERT INTO activity_log(
+                           created_at, category, action, status, details_json
+                       ) VALUES (?, 'ladder', ?, 'degraded', ?)""",
+                    (
+                        stamp, action,
+                        memory_spine.canonical({"detail": detail}),
+                    ),
+                )
+        except sqlite3.DatabaseError:
+            # Still locked out.  The queue keeps them for the next attempt and
+            # ``degraded_writes()`` already knows.
+            return
+        del self._pending_degraded_receipts[:len(queued)]
+
+    def degraded_writes(self) -> list[dict[str, Any]]:
+        """Turn-path writes this store degraded rather than failing on.
+
+        Read it to tell a locked-out ``resolve_prediction`` (which returns
+        ``False`` having written nothing) from an ordinary one (which returns
+        ``False`` because the prediction was already resolved).  The list is
+        per-store, bounded, and never reaches the model.
+        """
+        self._flush_degraded_receipts()
+        return [dict(record) for record in self._degraded_writes]
 
     def calibration_gate(
         self,
@@ -4903,6 +6178,3874 @@ class Memory:
                 })
         return findings
 
+
+    # --- the calibration ledger (M4 design 2) -------------------------------
+    #
+    # An append-only record of what the gate was reading, cut mechanically
+    # into fixed-size epochs.  ``competence()`` answers "how good is Jarvis at
+    # this family right now, over everything currently in the table"; the
+    # ledger answers the three questions that are different in kind: what was
+    # true when the gate authorised a promotion, whether competence has
+    # regressed since, and whether the ladder itself misbehaved in that
+    # period.  Nothing here is derived on read: the numbers were frozen at
+    # seal time, which is why erasing evidence afterwards cannot improve a
+    # verdict.
+
+    def _ladder_available(self) -> bool:
+        return bool(self._ladder_ready and self._spine_ready)
+
+    def _require_ladder(self) -> None:
+        self._ensure_open()
+        if not self._ladder_available():
+            raise RuntimeError(
+                "the learning ladder is unavailable on this store "
+                "(schema 49 objects or the memory spine are missing)"
+            )
+
+    def _ladder_eligible_outcomes(self, family: str) -> list[sqlite3.Row]:
+        """The gate population for one family, in id order.
+
+        Exactly ``competence()``'s restriction — resolved, and an origin in
+        ``LADDER_LEDGER_ORIGINS`` — so a sealed epoch and the calibrated gate
+        always describe the same rows (design 2.2).
+        """
+        placeholders = ", ".join("?" for _ in LADDER_LEDGER_ORIGINS)
+        return self.db.execute(
+            f"""SELECT id, created_at, predicted_success, actual_status, evidence_ok
+                FROM task_predictions
+                WHERE resolved_at IS NOT NULL AND family=?
+                  AND origin IN ({placeholders})
+                ORDER BY id""",
+            (str(family), *LADDER_LEDGER_ORIGINS),
+        ).fetchall()
+
+    def _ladder_covered_ids(self, family: str) -> set[int]:
+        """Every prediction id any sealed epoch of this family covers.
+
+        Read from ``covered_ids_json`` and never inferred from the
+        ``[first_prediction_id, last_prediction_id]`` range: a prediction held
+        open while the block around it is cut sits *inside* that range, so a
+        range test would leave it permanently uncoverable while
+        ``competence()`` kept counting it — the S-2 defect, one level down
+        (design 10.7 item 8).
+        """
+        covered: set[int] = set()
+        for row in self.db.execute(
+            """SELECT covered_ids_json FROM memory_calibration_ledger
+               WHERE family=? ORDER BY epoch""",
+            (str(family),),
+        ):
+            covered.update(_ladder_covered_id_list(row["covered_ids_json"]))
+        return covered
+
+    def _ladder_unsealed_tail(self, family: str) -> list[sqlite3.Row]:
+        covered = self._ladder_covered_ids(family)
+        return [
+            row for row in self._ladder_eligible_outcomes(family)
+            if int(row["id"]) not in covered
+        ]
+
+    def _ladder_next_epoch(self, family: str) -> int:
+        row = self.db.execute(
+            "SELECT COALESCE(MAX(epoch), 0) FROM memory_calibration_ledger WHERE family=?",
+            (str(family),),
+        ).fetchone()
+        return int(row[0] or 0) + 1
+
+    def _ladder_live_promotion_windows(self, family: str) -> list[tuple[str, str | None]]:
+        """``(approved_at, ended_at)`` for every artefact this family has had
+        live, so an outcome can be labelled applied or unapplied.
+
+        A terminal row keeps ``approved_at`` (S-6), and the table records no
+        "stopped being live" instant, so ``updated_at`` stands in for one on a
+        row that has left the live stages.  Stated here rather than left
+        implicit, because it is the one approximation in the epoch numbers.
+        """
+        windows: list[tuple[str, str | None]] = []
+        for row in self.db.execute(
+            """SELECT stage, approved_at, updated_at FROM ladder_promotions
+               WHERE family=? AND approved_at IS NOT NULL""",
+            (str(family),),
+        ):
+            started = str(row["approved_at"])
+            if str(row["stage"]) in LADDER_LIVE_STAGES:
+                windows.append((started, None))
+            else:
+                windows.append((started, str(row["updated_at"])))
+        return windows
+
+    def _ladder_applied_ids(
+        self, family: str, block: Sequence[sqlite3.Row]
+    ) -> set[int]:
+        """Covered predictions that had the learning channel behind them:
+        either a ``lesson_applications`` row, or a live artefact for the
+        family at the moment the prediction was created (design 2.2)."""
+        ids = [int(row["id"]) for row in block]
+        applied: set[int] = set()
+        for start in range(0, len(ids), 400):
+            chunk = ids[start:start + 400]
+            placeholders = ", ".join("?" for _ in chunk)
+            applied.update(
+                int(found[0]) for found in self.db.execute(
+                    f"""SELECT DISTINCT prediction_id FROM lesson_applications
+                        WHERE prediction_id IN ({placeholders})""",
+                    chunk,
+                )
+            )
+        windows = self._ladder_live_promotion_windows(family)
+        if windows:
+            for row in block:
+                if int(row["id"]) in applied:
+                    continue
+                created = str(row["created_at"])
+                if any(
+                    started <= created and (ended is None or created < ended)
+                    for started, ended in windows
+                ):
+                    applied.add(int(row["id"]))
+        return applied
+
+    def _ladder_epoch_receipts(
+        self, family: str, since: str | None, until: str
+    ) -> dict[str, int]:
+        """The ladder's own counters for one epoch window.
+
+        Two of the four are read from the spine, which is where design 2.2
+        puts them: ``withdrawals`` counts ``ladder.withdrawn`` events for this
+        family in ``(since, until]``, and ``screened_components`` counts the
+        subset whose reason is ``screened_component``.
+
+        The other two cannot come from the spine, and saying so is the point:
+        **a refused staging or approval appends no spine event at all** — a
+        refusal returns a dict and changes nothing, which is exactly why it
+        leaves no receipt on an append-only chain.  They are read instead from
+        ``activity_log`` category ``ladder``, which design 3.4 already names
+        as the refusal receipt path, and ``docs/LEARNING_LADDER.md`` records
+        that these two counters have a different provenance from the twenty
+        beside them.
+        """
+        counts = {
+            "refused_stagings": 0,
+            "refused_approvals": 0,
+            "withdrawals": 0,
+            "screened_components": 0,
+        }
+        window = "created_at <= ?" if since is None else "created_at > ? AND created_at <= ?"
+        params: tuple[Any, ...] = (until,) if since is None else (since, until)
+        for row in self.db.execute(
+            f"""SELECT payload_json FROM memory_spine_events
+                WHERE kind='ladder.withdrawn' AND {window}""",
+            params,
+        ):
+            payload = _ladder_payload(row["payload_json"])
+            if str(payload.get("family") or "") != str(family):
+                continue
+            counts["withdrawals"] += 1
+            if str(payload.get("reason") or "") == "screened_component":
+                counts["screened_components"] += 1
+        try:
+            for row in self.db.execute(
+                f"""SELECT action, details_json FROM activity_log
+                    WHERE category='ladder' AND status='refused' AND {window}""",
+                params,
+            ):
+                details = _ladder_payload(row["details_json"])
+                if str(details.get("family") or "") != str(family):
+                    continue
+                if str(row["action"]) == "stage":
+                    counts["refused_stagings"] += 1
+                elif str(row["action"]) == "approve":
+                    counts["refused_approvals"] += 1
+                if str(details.get("reason") or "") == "screened_component":
+                    counts["screened_components"] += 1
+        except sqlite3.DatabaseError:
+            # An activity log that cannot be read is a reporting problem, not
+            # a reason to refuse a seal: the counters stay at zero and the
+            # epoch's calibration numbers, which are what the gate reads, are
+            # unaffected.
+            pass
+        return counts
+
+    def _log_ladder_refusal(
+        self, action: str, *, family: str, project_id: int | None, reason: str
+    ) -> None:
+        """Record one refusal on the receipt path (design 3.4).
+
+        Never the confirmation code, never a document digest, never operator
+        prose: only the action, the family, the project and a closed reason
+        code, so the epoch counters have a durable source that an operator can
+        also read directly.
+        """
+        try:
+            self.db.execute(
+                """INSERT INTO activity_log(
+                       created_at, category, action, status, details_json
+                   ) VALUES (?, 'ladder', ?, 'refused', ?)""",
+                (
+                    now_iso(),
+                    str(action),
+                    memory_spine.canonical({
+                        "family": str(family),
+                        "project_id": None if project_id is None else int(project_id),
+                        "reason": str(reason),
+                    }),
+                ),
+            )
+        except sqlite3.DatabaseError:
+            # A refusal is already a no-op; failing to log it must not turn it
+            # into an exception on the worker's pass.
+            pass
+
+    def _ladder_epoch_metrics(
+        self, family: str, epoch: int, block: Sequence[sqlite3.Row]
+    ) -> dict[str, Any]:
+        """Every number an epoch freezes, computed from the covered rows alone
+        and **outside** the write transaction (L-5)."""
+        n = len(block)
+        successes = sum(
+            1 for row in block if str(row["actual_status"]) == "complete"
+        )
+        predicted = [float(row["predicted_success"]) for row in block]
+        mean_predicted = sum(predicted) / n
+        brier = sum(
+            (float(row["predicted_success"])
+             - (1.0 if str(row["actual_status"]) == "complete" else 0.0)) ** 2
+            for row in block
+        ) / n
+        evidence_rows = [row for row in block if row["evidence_ok"] is not None]
+        applied = self._ladder_applied_ids(family, block)
+        applied_rows = [row for row in block if int(row["id"]) in applied]
+        unapplied_rows = [row for row in block if int(row["id"]) not in applied]
+        covered_ids = sorted(int(row["id"]) for row in block)
+        return {
+            "family": str(family),
+            "epoch": int(epoch),
+            "n": n,
+            "successes": successes,
+            "mean_predicted": mean_predicted,
+            "brier": brier,
+            "calibration_error": abs(mean_predicted - successes / n),
+            "evidence_applicable": len(evidence_rows),
+            "evidence_successes": sum(
+                1 for row in evidence_rows if int(row["evidence_ok"]) == 1
+            ),
+            "applied_n": len(applied_rows),
+            "applied_successes": sum(
+                1 for row in applied_rows
+                if str(row["actual_status"]) == "complete"
+            ),
+            "unapplied_n": len(unapplied_rows),
+            "unapplied_successes": sum(
+                1 for row in unapplied_rows
+                if str(row["actual_status"]) == "complete"
+            ),
+            "first_prediction_id": covered_ids[0],
+            "last_prediction_id": covered_ids[-1],
+            "covered_ids": covered_ids,
+            "coverage_digest": ladder_coverage_digest(
+                self._spine_key,
+                [
+                    (
+                        int(row["id"]), float(row["predicted_success"]),
+                        str(row["actual_status"]), row["evidence_ok"],
+                    )
+                    for row in block
+                ],
+            ),
+        }
+
+    def seal_calibration_epoch(
+        self,
+        family: str,
+        *,
+        workspace: Path | None = None,
+        actor: str = "runtime",
+        conversation_id: int | None = None,
+        permission: str = "runtime",
+        maximum_epochs: int = 64,
+    ) -> list[dict[str, Any]]:
+        """Seal every whole unsealed block of ``LADDER_EPOCH_SIZE`` outcomes.
+
+        Never seals a partial block, never takes a boundary from the caller,
+        and never re-cuts a sealed one, so ``ladder seal --all`` and a worker
+        that seals after every single outcome produce byte-identical ledgers
+        for the same store (design 2.2, exit test 7.1 part 2).  Returns the
+        rows it sealed, possibly empty.
+
+        The whole coverage scan and every derived number are computed
+        **outside** the write transaction; the transaction re-reads the
+        family's newest epoch and the exact covered id set and aborts if
+        either moved, so a bulk catch-up takes one short lock per epoch rather
+        than one long one for the whole scan (L-5).  ``maximum_epochs`` bounds
+        one call; the worker simply calls again.
+
+        ``workspace`` is what makes ``unverified_at_seal`` the full design 3.7
+        count.  Without one the filesystem cannot be consulted, so the count
+        covers only the reasons the store can derive on its own and the
+        difference is recorded on the row rather than hidden: pass the
+        project's workspace from the worker and the CLI, which both have one.
+        """
+        self._require_ladder()
+        if family not in self.PREDICTION_FAMILIES:
+            raise ValueError(f"Unknown task family: {family}")
+        if actor not in memory_spine.SPINE_ACTORS:
+            raise ValueError(f"Unknown spine actor: {actor}")
+        size = int(learning_ladder.LADDER_EPOCH_SIZE)
+        bound = max(0, min(int(maximum_epochs), _LADDER_SEAL_MAX_EPOCHS))
+        sealed: list[dict[str, Any]] = []
+        for _ in range(bound):
+            tail = self._ladder_unsealed_tail(family)
+            if len(tail) < size:
+                break
+            block = tail[:size]
+            epoch = self._ladder_next_epoch(family)
+            metrics = self._ladder_epoch_metrics(family, epoch, block)
+            row = self._ladder_commit_epoch(
+                metrics,
+                workspace=workspace,
+                actor=actor,
+                conversation_id=conversation_id,
+                permission=permission,
+            )
+            if row is None:
+                # The block moved under us; the caller retries on its next
+                # pass rather than sealing something it did not measure.
+                break
+            sealed.append(row)
+        return sealed
+
+    def _ladder_commit_epoch(
+        self,
+        metrics: Mapping[str, Any],
+        *,
+        workspace: Path | None,
+        actor: str,
+        conversation_id: int | None,
+        permission: str,
+    ) -> dict[str, Any] | None:
+        family = str(metrics["family"])
+        epoch = int(metrics["epoch"])
+        covered = [int(value) for value in metrics["covered_ids"]]
+        stamp = now_iso()
+        previous = self.db.execute(
+            """SELECT created_at FROM memory_calibration_ledger
+               WHERE family=? ORDER BY epoch DESC LIMIT 1""",
+            (family,),
+        ).fetchone()
+        receipts = self._ladder_epoch_receipts(
+            family, None if previous is None else str(previous["created_at"]), stamp
+        )
+        unverified = len(self._ladder_unverified_for_seal(workspace))
+        with self._immediate_transaction():
+            if self._ladder_next_epoch(family) != epoch:
+                return None
+            tail = self._ladder_unsealed_tail(family)
+            if [int(row["id"]) for row in tail[:len(covered)]] != covered:
+                return None
+            ladder_id = allocate_ladder_id(self.db)
+            event_id = memory_spine.append_event(
+                self.db,
+                self._spine_key,
+                kind=LADDER_LEDGER_CREATING_KIND,
+                actor=actor,
+                source="calibration ledger",
+                scope="global",
+                permission=permission,
+                outcome="applied",
+                payload={
+                    "at": stamp,
+                    "family": family,
+                    "epoch": epoch,
+                    "n": int(metrics["n"]),
+                    "successes": int(metrics["successes"]),
+                    "mean_predicted": float(metrics["mean_predicted"]),
+                    "brier": float(metrics["brier"]),
+                    "calibration_error": float(metrics["calibration_error"]),
+                    "evidence_applicable": int(metrics["evidence_applicable"]),
+                    "evidence_successes": int(metrics["evidence_successes"]),
+                    "applied_n": int(metrics["applied_n"]),
+                    "applied_successes": int(metrics["applied_successes"]),
+                    "unapplied_n": int(metrics["unapplied_n"]),
+                    "unapplied_successes": int(metrics["unapplied_successes"]),
+                    "refused_stagings": int(receipts["refused_stagings"]),
+                    "refused_approvals": int(receipts["refused_approvals"]),
+                    "withdrawals": int(receipts["withdrawals"]),
+                    "screened_components": int(receipts["screened_components"]),
+                    "unverified_at_seal": int(unverified),
+                    "first_prediction_id": int(metrics["first_prediction_id"]),
+                    "last_prediction_id": int(metrics["last_prediction_id"]),
+                    "coverage_digest": str(metrics["coverage_digest"]),
+                },
+                now=stamp,
+                conversation_id=conversation_id,
+                subject_kind="calibration",
+                subject_id=ladder_id,
+            )
+            self.db.execute(
+                """INSERT INTO memory_calibration_ledger(
+                       id, created_at, family, epoch, n, successes,
+                       mean_predicted, brier, calibration_error,
+                       evidence_applicable, evidence_successes,
+                       applied_n, applied_successes,
+                       unapplied_n, unapplied_successes,
+                       refused_stagings, refused_approvals, withdrawals,
+                       screened_components, unverified_at_seal,
+                       first_prediction_id, last_prediction_id,
+                       covered_ids_json, coverage_digest, spine_event_id
+                   ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                             ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    ladder_id, stamp, family, epoch,
+                    int(metrics["n"]), int(metrics["successes"]),
+                    float(metrics["mean_predicted"]), float(metrics["brier"]),
+                    float(metrics["calibration_error"]),
+                    int(metrics["evidence_applicable"]),
+                    int(metrics["evidence_successes"]),
+                    int(metrics["applied_n"]), int(metrics["applied_successes"]),
+                    int(metrics["unapplied_n"]), int(metrics["unapplied_successes"]),
+                    int(receipts["refused_stagings"]),
+                    int(receipts["refused_approvals"]),
+                    int(receipts["withdrawals"]),
+                    int(receipts["screened_components"]),
+                    int(unverified),
+                    int(metrics["first_prediction_id"]),
+                    int(metrics["last_prediction_id"]),
+                    memory_spine.canonical(covered),
+                    str(metrics["coverage_digest"]),
+                    int(event_id),
+                ),
+            )
+        return self.calibration_epoch(ladder_id)
+
+    def _ladder_unverified_for_seal(self, workspace: Path | None) -> list[dict[str, Any]]:
+        """``unverified_at_seal``'s population, degraded honestly.
+
+        With a workspace this is design 3.7 exactly.  Without one the
+        filesystem reasons (``digest_mismatch``, ``orphan_document``) cannot
+        be evaluated, so the count is the store-derivable subset; it can only
+        ever be an under-count, and clause (4) of design 2.3 treats any
+        non-zero value as a regression, so a degraded count never turns a
+        regression into a pass.
+        """
+        try:
+            return self.ladder_unverified_promotions(workspace=workspace)
+        except (OSError, ValueError, sqlite3.DatabaseError):
+            return []
+
+    def calibration_epoch(self, epoch_id: int) -> dict[str, Any] | None:
+        row = self.db.execute(
+            "SELECT * FROM memory_calibration_ledger WHERE id=?", (int(epoch_id),)
+        ).fetchone()
+        return None if row is None else _ladder_epoch_dict(row)
+
+    def calibration_ledger(
+        self, family: str | None = None, *, since_epoch: int = 1, limit: int = 500
+    ) -> list[dict[str, Any]]:
+        """Sealed epochs in order, newest last.  Read-only and derived from
+        nothing: every number was frozen when the epoch closed."""
+        self._ensure_open()
+        if family is not None and family not in self.PREDICTION_FAMILIES:
+            raise ValueError(f"Unknown task family: {family}")
+        if not self._ladder_ready:
+            return []
+        clause = "AND family=?" if family is not None else ""
+        params: tuple[Any, ...] = (
+            (int(since_epoch), family) if family is not None else (int(since_epoch),)
+        )
+        rows = self.db.execute(
+            f"""SELECT * FROM memory_calibration_ledger
+                WHERE epoch >= ? {clause}
+                ORDER BY family, epoch LIMIT ?""",
+            (*params, _bounded_limit(limit, 5_000)),
+        ).fetchall()
+        return [_ladder_epoch_dict(row) for row in rows]
+
+    def calibration_ledger_monotonicity(
+        self, family: str, *, since_epoch: int = 1
+    ) -> dict[str, Any]:
+        """Has this family's sealed ledger regressed?
+
+        ``memory.py`` owns the query and ``learning_ladder`` owns every piece
+        of the arithmetic (design 2.3's four clauses, both bands and the
+        consecutive-epoch streak), so neither can reimplement the other's
+        half.  The wrapper adds only ``family`` and ``coverage_intact``.
+
+        Read ``currently_regressed`` to refuse a staging or an approval, and
+        ``monotone`` / ``newest_regressed`` to record or display a verdict:
+        the streak is what refuses, the per-epoch predicate is what is
+        recorded, and swapping them would either silence a healthy family or
+        record a regression that never gated anything.
+        """
+        self._ensure_open()
+        if family not in self.PREDICTION_FAMILIES:
+            raise ValueError(f"Unknown task family: {family}")
+        epochs = self.calibration_ledger(family, since_epoch=since_epoch)
+        verdict = dict(learning_ladder.monotonicity_verdict(epochs))
+        verdict["family"] = str(family)
+        verdict["coverage_intact"] = bool(
+            self.verify_calibration_ledger(family)["coverage_intact"]
+        )
+        return verdict
+
+    def verify_calibration_ledger(self, family: str | None = None) -> dict[str, Any]:
+        """Lineage both ways, epoch numbering, disjoint coverage, and the
+        keyed digest over the exact covered rows.
+
+        What check 4 defends against is the important one and it is not
+        exotic: an epoch **re-cut over different rows** — a hand-edited
+        boundary, a covered failure flipped to ``complete``, a row inserted
+        into a sealed range.  What check 5 reports is narrower and honestly
+        labelled: no product path deletes a row from the gate population, so a
+        coverage gap means an out-of-band ``DELETE`` or a path nobody has
+        written yet.
+        """
+        self._ensure_open()
+        if family is not None and family not in self.PREDICTION_FAMILIES:
+            raise ValueError(f"Unknown task family: {family}")
+        report: dict[str, Any] = {
+            "rows": 0,
+            "families": [],
+            "chain_ok": True,
+            "sequence_ok": True,
+            "lineage_ok": True,
+            "coverage_gaps": [],
+            "coverage_intact": True,
+            # The design 6.3 figure, so an operator surface can print
+            # "coverage: K of N epochs re-derivable" rather than a bare
+            # boolean (R-5).  ``epochs_rederivable`` counts epochs whose
+            # covered rows all still exist AND whose keyed digest still
+            # matches, which is the only statement worth making.
+            "epochs_total": 0,
+            "epochs_rederivable": 0,
+            "problems": [],
+        }
+        if not self._ladder_available():
+            report["chain_ok"] = False
+            report["coverage_intact"] = False
+            report["problems"].append({"kind": "ladder_unavailable"})
+            return report
+        clause = "WHERE family=?" if family is not None else ""
+        params: tuple[Any, ...] = (family,) if family is not None else ()
+        rows = self.db.execute(
+            f"SELECT * FROM memory_calibration_ledger {clause} ORDER BY family, epoch",
+            params,
+        ).fetchall()
+        report["rows"] = len(rows)
+        report["epochs_total"] = len(rows)
+        report["families"] = sorted({str(row["family"]) for row in rows})
+        by_family: dict[str, list[sqlite3.Row]] = {}
+        for row in rows:
+            by_family.setdefault(str(row["family"]), []).append(row)
+
+        # (1) lineage, both directions.
+        for row in rows:
+            event = self.db.execute(
+                """SELECT kind, subject_kind, subject_id FROM memory_spine_events
+                   WHERE id=?""",
+                (int(row["spine_event_id"]),),
+            ).fetchone()
+            if (
+                event is None
+                or str(event["kind"]) != LADDER_LEDGER_CREATING_KIND
+                or str(event["subject_kind"] or "") != "calibration"
+                or int(event["subject_id"] or 0) != int(row["id"])
+            ):
+                report["lineage_ok"] = False
+                report["problems"].append({
+                    "kind": "lineage_broken",
+                    "epoch_id": int(row["id"]),
+                    "family": str(row["family"]),
+                    "epoch": int(row["epoch"]),
+                })
+        for event in self.db.execute(
+            """SELECT id, subject_id FROM memory_spine_events
+               WHERE kind=? AND subject_kind='calibration'""",
+            (LADDER_LEDGER_CREATING_KIND,),
+        ):
+            backing = self.db.execute(
+                """SELECT 1 FROM memory_calibration_ledger
+                   WHERE id=? AND spine_event_id=?""",
+                (int(event["subject_id"] or 0), int(event["id"])),
+            ).fetchone()
+            if backing is None:
+                report["lineage_ok"] = False
+                report["problems"].append({
+                    "kind": "orphan_seal_event", "event_id": int(event["id"]),
+                })
+
+        for name, family_rows in by_family.items():
+            # (2) epoch numbers are 1..K with no gap and no duplicate.
+            numbers = [int(row["epoch"]) for row in family_rows]
+            if numbers != list(range(1, len(numbers) + 1)):
+                report["sequence_ok"] = False
+                report["problems"].append({
+                    "kind": "epoch_sequence_broken", "family": name,
+                    "epochs": numbers,
+                })
+            # (3) exactly n covered ids per epoch, pairwise disjoint, with an
+            #     increasing reported range.
+            # Ranges are deliberately NOT required to increase.  When a
+            # prediction resolves late its id is lower than the range of the
+            # epoch that was cut around it, so the epoch that finally covers
+            # it legitimately starts inside an earlier epoch's span -- that is
+            # the whole reason the covered ids are stored, and a range-order
+            # check here would report the fix as the fault (design 10.7 item
+            # 8).  Disjointness of the id sets is the real invariant and is
+            # checked below.
+            seen: set[int] = set()
+            for row in family_rows:
+                covered = _ladder_covered_id_list(row["covered_ids_json"])
+                if len(covered) != int(row["n"]) or sorted(set(covered)) != covered:
+                    report["coverage_intact"] = False
+                    report["problems"].append({
+                        "kind": "coverage_shape_invalid", "family": name,
+                        "epoch": int(row["epoch"]),
+                    })
+                    continue
+                overlap = seen.intersection(covered)
+                if overlap:
+                    report["coverage_intact"] = False
+                    report["problems"].append({
+                        "kind": "coverage_overlap", "family": name,
+                        "epoch": int(row["epoch"]),
+                        "ids": sorted(overlap)[:10],
+                    })
+                seen.update(covered)
+                if (
+                    covered[0] != int(row["first_prediction_id"])
+                    or covered[-1] != int(row["last_prediction_id"])
+                ):
+                    report["coverage_intact"] = False
+                    report["problems"].append({
+                        "kind": "coverage_range_mismatch", "family": name,
+                        "epoch": int(row["epoch"]),
+                    })
+                # (4) and (5): the digest over the exact covered rows.
+                placeholders = ", ".join("?" for _ in covered)
+                present = self.db.execute(
+                    f"""SELECT id, predicted_success, actual_status, evidence_ok
+                        FROM task_predictions WHERE id IN ({placeholders})
+                        ORDER BY id""",
+                    covered,
+                ).fetchall()
+                if len(present) != len(covered):
+                    missing = sorted(
+                        set(covered) - {int(item["id"]) for item in present}
+                    )
+                    report["coverage_intact"] = False
+                    report["coverage_gaps"].append({
+                        "family": name,
+                        "epoch": int(row["epoch"]),
+                        "missing": missing[:20],
+                        "missing_count": len(missing),
+                    })
+                    continue
+                recomputed = ladder_coverage_digest(
+                    self._spine_key,
+                    [
+                        (
+                            int(item["id"]), float(item["predicted_success"]),
+                            str(item["actual_status"]), item["evidence_ok"],
+                        )
+                        for item in present
+                    ],
+                )
+                if not hmac.compare_digest(
+                    recomputed, str(row["coverage_digest"])
+                ):
+                    # THE tamper of design 2.4 -- an epoch re-cut over
+                    # different rows.  It used to append a problem and leave
+                    # ``coverage_intact`` true, so every operator surface,
+                    # which reads only that flag, printed a clean ledger over
+                    # a forged one (R-5).
+                    report["coverage_intact"] = False
+                    report["problems"].append({
+                        "kind": "coverage_digest_mismatch", "family": name,
+                        "epoch": int(row["epoch"]),
+                    })
+                else:
+                    report["epochs_rederivable"] += 1
+        report["chain_ok"] = not report["problems"]
+        return report
+
+    # --- the promotion ladder: the proof, and reading the record ------------
+    #
+    # Design 3.3's proof is re-derived at every gate and never trusted from
+    # the row.  ``LADDER_MIN_VERIFIED_REUSES`` is a **usage threshold, not a
+    # significance test**: three successes at an 0.8 base rate happen 51 % of
+    # the time by chance, and an application row is filed when the lesson
+    # *matched*, not when the model used it, so "verified reuse" means "the
+    # lesson was in the prompt and the turn succeeded".  The statistical work
+    # is done by the effectiveness clause and by the ledger's regression
+    # predicate, both of which have a comparison group; the reuse count only
+    # ensures the artefact is not built from a single incident.
+
+    def _ladder_verified_reuses(
+        self,
+        family: str,
+        project_id: int,
+        *,
+        now: str | None = None,
+        restrict: Sequence[int] | None = None,
+    ) -> dict[int, list[dict[str, Any]]]:
+        """Per lesson, the applications that count as a verified reuse.
+
+        Every clause of design 3.3 is applied here and nothing is cached: a
+        lesson that has since been superseded, contradicted, quarantined or
+        expired stops counting the moment it does, which is what makes
+        ``proof_stale`` a live check rather than a stored flag.
+
+        ``restrict`` limits the scan to an exact set of application ids -- the
+        set a promotion row recorded.  Re-validating over the recorded set
+        rather than over everything that currently qualifies is ruling 16:
+        digesting the maximal set meant an approved skill's own next verified
+        reuse moved the digest, so the artefact withdrew on the very outcome
+        the ladder exists to reward (R-1).  New evidence must never invalidate
+        an old proof.
+        """
+        stamp = str(now or now_iso())
+        restricted = None if restrict is None else sorted({int(v) for v in restrict})
+        clause = ""
+        extra: tuple[Any, ...] = ()
+        if restricted is not None:
+            if not restricted:
+                return {}
+            clause = " AND la.id IN (" + ", ".join("?" for _ in restricted) + ")"
+            extra = tuple(restricted)
+        rows = self.db.execute(
+            f"""SELECT la.id AS application_id, la.memory_id, la.prediction_id,
+                      la.created_at AS application_created_at,
+                      la.resolved_at AS application_resolved_at,
+                      la.successful, la.tool_name,
+                      p.origin, p.created_at AS prediction_created_at,
+                      p.resolved_at AS prediction_resolved_at,
+                      p.actual_status, p.evidence_ok, p.predicted_verification,
+                      p.task_id, p.conversation_id,
+                      lc.observed_at, lc.valid_until
+               FROM lesson_applications AS la
+               JOIN task_predictions AS p ON p.id = la.prediction_id
+               JOIN lesson_controls AS lc ON lc.memory_id = la.memory_id
+               WHERE la.family=? AND la.resolved_at IS NOT NULL
+                 AND la.successful=1 AND lc.project_id=?{clause}
+               ORDER BY la.memory_id, la.id""",
+            (str(family), int(project_id), *extra),
+        ).fetchall()
+        eligible: dict[int, bool] = {}
+        per_lesson: dict[int, list[dict[str, Any]]] = {}
+        seen_keys: dict[int, set[tuple[str, int]]] = {}
+        for row in rows:
+            memory_id = int(row["memory_id"])
+            # (2) evidence, with no exemption, and (3) a reusable origin.
+            if row["evidence_ok"] is None or int(row["evidence_ok"]) != 1:
+                continue
+            if str(row["origin"]) not in LESSON_REUSABLE_PREDICTION_ORIGINS:
+                continue
+            # (4) the application falls inside the lesson's validity window.
+            values = self._lesson_application_values(
+                family=str(family),
+                application_created_at=row["application_created_at"],
+                application_resolved_at=row["application_resolved_at"],
+                application_successful=row["successful"],
+                prediction_created_at=row["prediction_created_at"],
+                prediction_resolved_at=row["prediction_resolved_at"],
+                prediction_actual_status=row["actual_status"],
+                prediction_evidence_ok=row["evidence_ok"],
+                prediction_verification=row["predicted_verification"],
+                lesson_observed_at=row["observed_at"],
+                lesson_valid_until=row["valid_until"],
+                validation_at=stamp,
+            )
+            if values is None:
+                continue
+            # (5) provenance and controls both valid *now*.
+            if memory_id not in eligible:
+                eligible[memory_id] = bool(
+                    self._lesson_provenance_validation(memory_id)[0]
+                    and self._lesson_control_validation(
+                        memory_id, project_id=int(project_id), as_of=stamp
+                    )[0]
+                )
+            if not eligible[memory_id]:
+                continue
+            # (6) the distinctness key, so three applications from three
+            #     deleted conversations neither collapse into one nor count as
+            #     three (M-13).  A row with neither link does not count at all.
+            if row["conversation_id"] is not None:
+                key = ("c", int(row["conversation_id"]))
+            elif row["task_id"] is not None:
+                key = ("t", int(row["task_id"]))
+            else:
+                continue
+            keys = seen_keys.setdefault(memory_id, set())
+            if key in keys and restricted is None:
+                # Maximal derivation: three applications in one conversation
+                # are one context, so the first wins.  On the restricted path
+                # a collision means two recorded rows have come to share a key
+                # (a conversation delete nulled one), which is real staleness
+                # and is caught by the set comparison in ``ladder_proof``
+                # rather than hidden by dropping a row here.
+                continue
+            keys.add(key)
+            per_lesson.setdefault(memory_id, []).append({
+                "application_id": int(row["application_id"]),
+                "memory_id": memory_id,
+                "prediction_id": int(row["prediction_id"]),
+                "key": list(key),
+                "resolved_at": str(row["application_resolved_at"]),
+                "successful": 1,
+                "evidence_ok": 1,
+                "tool_name": (
+                    None if row["tool_name"] is None else str(row["tool_name"])
+                ),
+                "oracle": str(row["predicted_verification"]),
+            })
+        return per_lesson
+
+    def _ladder_effectiveness(self, family: str) -> dict[str, Any]:
+        """The comparison group, computed from **sealed epochs** and not from
+        live rows -- which is what makes the ledger load-bearing for staging
+        rather than decorative (design 3.3, H-10)."""
+        epochs = self.calibration_ledger(family)
+        applied_n = sum(int(row["applied_n"]) for row in epochs)
+        applied_successes = sum(int(row["applied_successes"]) for row in epochs)
+        unapplied_n = sum(int(row["unapplied_n"]) for row in epochs)
+        unapplied_successes = sum(
+            int(row["unapplied_successes"]) for row in epochs
+        )
+        minimum = int(learning_ladder.LADDER_EFFECTIVENESS_MIN_APPLIED)
+        if applied_n < minimum:
+            satisfied = False
+            contrast = "insufficient applied outcomes"
+        elif unapplied_n == 0:
+            satisfied = True
+            contrast = "no unapplied outcomes"
+        else:
+            satisfied = (
+                applied_successes / applied_n >= unapplied_successes / unapplied_n
+            )
+            contrast = "applied versus unapplied"
+        return {
+            "satisfied": bool(satisfied),
+            "contrast": contrast,
+            "applied_n": applied_n,
+            "applied_successes": applied_successes,
+            "unapplied_n": unapplied_n,
+            "unapplied_successes": unapplied_successes,
+            "minimum_applied": minimum,
+        }
+
+    def ladder_proof(
+        self,
+        *,
+        family: str,
+        project_id: int,
+        now: str | None = None,
+        application_ids: Sequence[int] | None = None,
+    ) -> dict[str, Any]:
+        """Derive design 3.3's outcome proof, or say exactly why there is none.
+
+        Always returns a dict.  ``reason`` is ``None`` when the proof holds and
+        one of ``no_eligible_lesson``, ``insufficient_reuse``,
+        ``insufficient_effectiveness``, ``proof_stale`` or ``proof_unbacked``
+        when it does not.
+
+        **Two modes, and the difference is ruling 16.**  With no
+        ``application_ids`` this derives the maximal proof, which is what
+        staging does.  With them it re-validates *exactly* that recorded set:
+        every recorded row must still exist, still be resolved and successful,
+        still be evidence-backed and in-window, and still belong to a lesson
+        whose provenance and controls hold -- a **subset check**.  Digesting
+        the maximal set at re-validation time was R-1: an approved skill's own
+        next verified reuse moved the digest, the row failed ``proof_stale``,
+        the artefact withdrew, and the family's ladder never recovered.  Adding
+        evidence must never invalidate a proof; only losing it can.
+        """
+        self._require_ladder()
+        stamp = str(now or now_iso())
+        recorded = (
+            None if application_ids is None
+            else sorted({int(value) for value in application_ids})
+        )
+        per_lesson = self._ladder_verified_reuses(
+            family, project_id, now=stamp, restrict=recorded
+        )
+        minimum = int(learning_ladder.LADDER_MIN_VERIFIED_REUSES)
+        if recorded is None:
+            qualifying = {
+                memory_id: uses
+                for memory_id, uses in per_lesson.items()
+                if len(uses) >= minimum
+            }
+        else:
+            # The recorded set already cleared the threshold when it was
+            # staged; what matters now is that all of it survived.
+            qualifying = dict(per_lesson)
+        effectiveness = self._ladder_effectiveness(family)
+        proof: dict[str, Any] = {
+            "family": str(family),
+            "project_id": int(project_id),
+            "lesson_ids": sorted(qualifying),
+            "reuses": sum(len(uses) for uses in qualifying.values()),
+            "contexts": len({
+                tuple(use["key"])
+                for uses in qualifying.values() for use in uses
+            }),
+            "tool_names": sorted({
+                str(use["tool_name"])
+                for uses in qualifying.values() for use in uses
+                if use["tool_name"]
+            }),
+            "oracles": sorted({
+                str(use["oracle"])
+                for uses in qualifying.values() for use in uses
+            }),
+            "applications": sorted(
+                (use for uses in qualifying.values() for use in uses),
+                key=lambda use: int(use["application_id"]),
+            ),
+            "effectiveness": effectiveness,
+            "minimum_reuses": minimum,
+            "minimum_lessons": int(learning_ladder.LADDER_MIN_DISTINCT_LESSONS),
+            "reason": None,
+        }
+        if recorded is not None:
+            survived = sorted(
+                int(use["application_id"])
+                for uses in qualifying.values() for use in uses
+            )
+            if survived != recorded:
+                # Something the row was proved on is gone or no longer
+                # qualifies.  Only a LOSS can reach here: the scan was
+                # restricted to the recorded ids, so a new application cannot
+                # appear in it.
+                proof["reason"] = "proof_stale"
+                proof["missing_applications"] = sorted(
+                    set(recorded) - set(survived)
+                )[:20]
+            elif not self._ladder_applications_are_receipted(
+                [int(use["prediction_id"]) for use in proof["applications"]]
+            ):
+                # Ruling 21: the evidence table needs its own integrity
+                # binding.  Rows planted by raw SQL have no matching
+                # ``lesson.applied`` receipt and change the recomputed
+                # identity digest, so they cannot manufacture a proof.
+                proof["reason"] = "proof_unbacked"
+        elif not per_lesson:
+            proof["reason"] = "no_eligible_lesson"
+        elif len(qualifying) < int(learning_ladder.LADDER_MIN_DISTINCT_LESSONS):
+            proof["reason"] = "insufficient_reuse"
+        elif not effectiveness["satisfied"]:
+            proof["reason"] = "insufficient_effectiveness"
+        elif not self._ladder_applications_are_receipted(
+            [int(use["prediction_id"]) for use in proof["applications"]]
+        ):
+            proof["reason"] = "proof_unbacked"
+        proof["sha256"] = self._ladder_proof_digest(proof)
+        return proof
+
+    def _ladder_recorded_application_ids(
+        self, row: Mapping[str, Any]
+    ) -> list[int] | None:
+        """The application ids a promotion row was proved on, or ``None``.
+
+        ``None`` means the row predates the recorded-set contract (or its
+        ``proof_json`` is unreadable) and the caller falls back to the maximal
+        derivation, which is the pre-fix behaviour and is only reachable for a
+        row written before this change.
+        """
+        record = _ladder_payload(row["proof_json"])
+        ids = record.get("application_ids")
+        if not isinstance(ids, list) or not ids:
+            return None
+        found: list[int] = []
+        for item in ids:
+            if isinstance(item, bool) or not isinstance(item, int) or item <= 0:
+                return None
+            found.append(int(item))
+        return sorted(set(found))
+
+    def _ladder_application_identity_digest(self, prediction_id: int) -> str:
+        """Keyed digest over the identity of one prediction's applications.
+
+        Identity only -- ``(id, prediction_id, memory_id)`` -- because those
+        three are immutable from the moment the row is inserted.  The
+        application's ``successful`` column is deliberately NOT in it: the
+        event is appended when the lesson is *matched*, which is before the
+        turn resolves, so the column is NULL at that instant and any digest
+        over it would disagree with every later re-check.  That is R-1's
+        failure mode by another route, and it is why the receipt binds the
+        evidence's identity while the proof's own clauses re-derive its
+        verdict live.
+        """
+        rows = self.db.execute(
+            """SELECT id, prediction_id, memory_id FROM lesson_applications
+               WHERE prediction_id=? ORDER BY id""",
+            (int(prediction_id),),
+        ).fetchall()
+        return memory_spine.lesson_applications_digest(
+            self._spine_key,
+            [
+                (int(row["id"]), int(row["prediction_id"]), int(row["memory_id"]))
+                for row in rows
+            ],
+        )
+
+    def _ladder_applications_are_receipted(
+        self, prediction_ids: Sequence[int]
+    ) -> bool:
+        """Every prediction in the proof has a matching ``lesson.applied``.
+
+        Ruling 21: the application table is the single input that decides
+        whether a document is promoted, and it is the only such input with no
+        receipt -- ``proof_sha256`` is computed *over* whatever rows are
+        there, so it is self-consistent with a forged set.  The event binds
+        the set that existed when the turn matched; a row planted by raw SQL
+        afterwards changes the recomputed identity digest and matches no
+        event, so it cannot manufacture a proof.
+
+        The **newest** event for a prediction is the authoritative one, so two
+        legitimate calls in one turn stay consistent (each event digests the
+        cumulative set after its own insert).  Returns True unchanged on a
+        store whose spine does not carry the kind yet, so the check switches
+        on with the kind rather than failing every proof before it lands.
+        """
+        if _LESSON_APPLIED_KIND not in memory_spine.SPINE_KINDS:
+            return True
+        for prediction_id in sorted({int(value) for value in prediction_ids}):
+            event = self.db.execute(
+                """SELECT payload_json FROM memory_spine_events
+                   WHERE kind=?
+                     AND json_extract(payload_json, '$.prediction_id')=?
+                   ORDER BY id DESC LIMIT 1""",
+                (_LESSON_APPLIED_KIND, int(prediction_id)),
+            ).fetchone()
+            if event is None:
+                return False
+            recorded = str(
+                _ladder_payload(event["payload_json"]).get(
+                    "applications_digest"
+                ) or ""
+            )
+            if not hmac.compare_digest(
+                recorded, self._ladder_application_identity_digest(prediction_id)
+            ):
+                return False
+        return True
+
+    def _ladder_proof_digest(self, proof: Mapping[str, Any]) -> str:
+        """Keyed HMAC over the sorted proof material.
+
+        Only the material, never the verdict: the digest covers the lesson
+        ids, the application ids, the prediction ids, the distinctness keys
+        and each application's ``(resolved_at, successful, evidence_ok,
+        tool_name)``, so re-deriving it later answers "is this the same
+        evidence" and nothing else.
+        """
+        material = [
+            [
+                int(use["application_id"]), int(use["memory_id"]),
+                int(use["prediction_id"]), list(use["key"]),
+                str(use["resolved_at"]), int(use["successful"]),
+                int(use["evidence_ok"]),
+                None if use["tool_name"] is None else str(use["tool_name"]),
+            ]
+            for use in proof["applications"]
+        ]
+        payload = memory_spine.canonical({
+            "family": str(proof["family"]),
+            "project_id": int(proof["project_id"]),
+            "lesson_ids": [int(value) for value in proof["lesson_ids"]],
+            "applications": material,
+        })
+        return hmac.new(
+            self._spine_key,
+            (_LADDER_PROOF_DIGEST_TAG + "\0" + payload).encode("utf-8"),
+            hashlib.sha256,
+        ).hexdigest()
+
+    # --- reading the promotion record ---------------------------------------
+
+    def ladder_promotions(
+        self,
+        *,
+        project_id: int | None = None,
+        family: str | None = None,
+        stages: Sequence[str] | None = None,
+        skill_name: str | None = None,
+        include_token: bool = False,
+    ) -> list[dict[str, Any]]:
+        """Promotion rows, newest last.
+
+        ``include_token`` is off by default and every model-facing or
+        network-facing caller leaves it off: the confirmation code is an
+        operator surface only (S-1), and a payload builder that has the value
+        and must remember to drop it is the shape that leaks.  ``ladder list``,
+        ``ladder show`` and ``/ladder`` are the three callers that pass True.
+        """
+        self._ensure_open()
+        if family is not None and family not in self.PREDICTION_FAMILIES:
+            raise ValueError(f"Unknown task family: {family}")
+        if not self._ladder_ready:
+            return []
+        clauses: list[str] = []
+        params: list[Any] = []
+        if project_id is not None:
+            clauses.append("project_id=?")
+            params.append(int(project_id))
+        if family is not None:
+            clauses.append("family=?")
+            params.append(str(family))
+        if skill_name is not None:
+            clauses.append("skill_name=?")
+            params.append(str(skill_name))
+        if stages is not None:
+            wanted = [str(stage) for stage in stages]
+            unknown = sorted(set(wanted) - LADDER_PROMOTION_STAGES)
+            if unknown:
+                raise ValueError(f"Unknown promotion stage: {unknown[0]}")
+            clauses.append(
+                "stage IN (" + ", ".join("?" for _ in wanted) + ")"
+            )
+            params.extend(wanted)
+        where = ("WHERE " + " AND ".join(clauses)) if clauses else ""
+        rows = self.db.execute(
+            f"SELECT * FROM ladder_promotions {where} ORDER BY id", params
+        ).fetchall()
+        return [_ladder_promotion_dict(row, include_token=include_token) for row in rows]
+
+    def ladder_promotion(
+        self, promotion_id: int, *, include_token: bool = False
+    ) -> dict[str, Any] | None:
+        self._ensure_open()
+        if not self._ladder_ready:
+            return None
+        row = self.db.execute(
+            "SELECT * FROM ladder_promotions WHERE id=?", (int(promotion_id),)
+        ).fetchone()
+        return (
+            None if row is None
+            else _ladder_promotion_dict(row, include_token=include_token)
+        )
+
+    def _ladder_live_documents(
+        self, workspace: Path | None
+    ) -> dict[str, dict[str, Any]]:
+        """Every auto-distilled document currently live in one workspace.
+
+        Keyed by name.  A workspace that does not exist, or one on a drive
+        that has gone away, yields nothing rather than raising: the callers
+        report ``workspace_unavailable`` instead of failing a worker pass
+        (S-8).
+        """
+        if workspace is None:
+            return {}
+        live: dict[str, dict[str, Any]] = {}
+        try:
+            catalog = skill_library.list_available_skills(Path(workspace))
+        except (OSError, ValueError):
+            return {}
+        for entry in catalog:
+            if not bool(entry.get("auto_distilled")):
+                continue
+            name = str(entry.get("name") or "")
+            try:
+                document = skill_library.read_available_skill(name, Path(workspace))
+            except (KeyError, OSError, ValueError, PermissionError):
+                continue
+            live[name] = {
+                "name": name,
+                "family": entry.get("family"),
+                "verified_outcomes": entry.get("verified_outcomes"),
+                "sha256": str(document.get("sha256") or ""),
+                "content": str(document.get("content") or ""),
+            }
+        return live
+
+    def ladder_legacy_documents(
+        self, *, workspace: Path, project_id: int | None = None
+    ) -> list[dict[str, Any]]:
+        """Pre-M4 live documents the grandfather pass adopted (ruling 2).
+
+        A separate bucket from the unverified promotions, because no ladder
+        promotion ever claimed them: they reach the model with no proof, no
+        gate and no ledger check until an operator approves or rolls one back,
+        which is the pre-M4 status quo made visible rather than a new
+        weakness (S-4).
+        """
+        self._ensure_open()
+        if not self._ladder_ready:
+            return []
+        live = self._ladder_live_documents(workspace)
+        rows = self.ladder_promotions(
+            project_id=project_id, stages=("unapproved_legacy",)
+        )
+        found: list[dict[str, Any]] = []
+        for row in rows:
+            document = live.get(str(row["skill_name"]))
+            found.append({
+                "promotion_id": int(row["id"]),
+                "project_id": int(row["project_id"]),
+                "family": str(row["family"]),
+                "skill_name": str(row["skill_name"]),
+                "approved_sha256": row["approved_sha256"],
+                "adopted": True,
+                "live": document is not None,
+                "digest_matches": bool(
+                    document is not None
+                    and str(document["sha256"]) == str(row["approved_sha256"] or "")
+                ),
+            })
+        # Documents the ladder has never touched at all: pre-M4 artefacts on a
+        # store where the grandfather pass has not run yet.  They belong in
+        # this bucket and not among the unverified promotions -- see
+        # ``_ladder_untouched_documents`` for why that distinction is
+        # load-bearing rather than cosmetic.
+        for name in sorted(self._ladder_untouched_documents(live, project_id)):
+            found.append({
+                "promotion_id": None,
+                "project_id": None if project_id is None else int(project_id),
+                "family": live[name].get("family"),
+                "skill_name": name,
+                "approved_sha256": None,
+                "adopted": False,
+                "live": True,
+                "digest_matches": False,
+            })
+        return found
+
+    def _ladder_untouched_documents(
+        self, live: Mapping[str, Mapping[str, Any]], project_id: int | None
+    ) -> set[str]:
+        """Live auto-distilled documents with **no promotion row of any stage**.
+
+        The distinction this draws is load-bearing, and it was found by
+        execution rather than by reading (see the review record).  Design
+        3.7's ``no_approved_row`` is meant for the crash window of design 7.8
+        -- the file was written and the approving transaction then failed --
+        and in that case a row for the pair *does* exist, at ``staged``.  A
+        document with no row at all is something else: a pre-M4 artefact on a
+        store whose grandfather pass has not run yet.
+
+        Counting the second as an unverified promotion is a trap with a
+        measured consequence.  ``unverified_at_seal`` is frozen into an
+        append-only ledger row, clause (4) of design 2.3 has no band and no
+        slack, and every epoch sealed before the first grandfather pass would
+        therefore record a regression that can never be corrected -- so the
+        family refuses every staging and every approval, including the very
+        approval that would clear the document causing it.  That is the S-4
+        trap by another route, and excluding untouched documents here closes
+        it while leaving the crash window exactly as design 7.8 wants it.
+
+        They are not ignored: they are reported by
+        ``ladder_legacy_documents`` with ``adopted: False``, which is what
+        ``ladder status`` and ``jarvis doctor`` print, and the grandfather
+        pass adopts them at ``unapproved_legacy`` on its first run.
+        """
+        touched = {
+            str(row["skill_name"])
+            for row in self.ladder_promotions(project_id=project_id)
+        } | self._ladder_named_in_spine()
+        return {name for name in live if name not in touched}
+
+    def _ladder_named_in_spine(self) -> set[str]:
+        """Every skill name any ``ladder.*`` event has ever mentioned.
+
+        A row can be deleted by raw SQL; an event cannot.  Without this, a
+        raw-SQL ``DELETE`` of an ``approved`` row under a live document turned
+        that document into an *untouched* one, which the next grandfather pass
+        adopted at ``unapproved_legacy`` -- after which it reached the model
+        with no proof, no gate and no ledger check, and never counted toward
+        ``unverified_at_seal`` (R-9).  The spine is the thing the attacker
+        cannot rewrite, so it is what decides whether the ladder has ever
+        touched a name.
+        """
+        placeholders = ", ".join("?" for _ in LADDER_SPINE_KINDS)
+        return {
+            str(row[0]) for row in self.db.execute(
+                f"""SELECT DISTINCT json_extract(payload_json, '$.skill_name')
+                    FROM memory_spine_events
+                    WHERE kind IN ({placeholders})
+                      AND json_extract(payload_json, '$.skill_name') IS NOT NULL""",
+                LADDER_SPINE_KINDS,
+            )
+        }
+
+    def _ladder_unverified_cache_key(
+        self,
+        project_id: int | None,
+        workspace: Path | None,
+        live: Mapping[str, Mapping[str, Any]],
+        rows: Sequence[Mapping[str, Any]],
+    ) -> tuple[Any, ...]:
+        """Everything the verdict depends on, as one keyed digest.
+
+        The cache this keys is a **correctness surface**, not a convenience,
+        so the key is the whole input and not a summary of it.  Staleness
+        cannot hide a tamper because every input a tamper can touch is in the
+        digest: an edited live document changes its ``sha256`` and therefore
+        the key, so it misses the cache and is re-verified from scratch.
+
+        Covered, and each is here because something can change it without
+        changing anything else:
+
+        1. the project and the workspace path;
+        2. every promotion row's stage, digests and ``updated_at`` -- any
+           ladder write moves one of these;
+        3. the live documents' names and **content digests** -- the tamper;
+        4. the spine head event id -- every seal, erase, memory write and
+           ladder transition appends an event, so this moves for all of them;
+        5. the resolved-prediction count and high-water id -- an ordinary turn
+           resolving can shut the calibrated gate without touching 2-4;
+        6. a digest over the scoped lessons' lifecycle rows -- a supersede or
+           a contradiction flips ``lesson_controls`` in place and appends no
+           event, so it would otherwise be invisible to 4.
+
+        **Staged documents are deliberately NOT in the key**, and their
+        absence is the point: this function's verdict reads live documents,
+        promotion rows, the spine and the lesson lifecycle, and nothing
+        staged.  Keying on them bought no correctness, invalidated the cache
+        whenever anyone staged, and cost a staging-root walk on every call --
+        including the calls where the caller passed ``documents`` precisely
+        to avoid a second walk.  With them gone this method touches the
+        filesystem **not at all** when ``documents`` is supplied.
+
+        Not covered, deliberately and stated so it can be checked rather than
+        trusted: nothing that the verdict reads.  If a future input is added
+        to the verdict it must be added here, and the test battery asserts
+        each of the six above invalidates on its own.
+        """
+        head = self.db.execute(
+            "SELECT COALESCE(MAX(id), 0) FROM memory_spine_events"
+        ).fetchone()[0]
+        outcomes = self.db.execute(
+            """SELECT COUNT(*), COALESCE(MAX(id), 0) FROM task_predictions
+               WHERE resolved_at IS NOT NULL"""
+        ).fetchone()
+        lesson_ids: set[int] = set()
+        for row in rows:
+            for value in _ladder_payload_list(row["lesson_ids_json"]):
+                if isinstance(value, int) and not isinstance(value, bool):
+                    lesson_ids.add(int(value))
+        lifecycle: list[list[Any]] = []
+        if lesson_ids:
+            scoped = sorted(lesson_ids)
+            placeholders = ", ".join("?" for _ in scoped)
+            lifecycle = [
+                [
+                    int(item["memory_id"]), str(item["lifecycle_status"]),
+                    None if item["superseded_by"] is None
+                    else int(item["superseded_by"]),
+                    str(item["valid_until"]),
+                ]
+                for item in self.db.execute(
+                    f"""SELECT memory_id, lifecycle_status, superseded_by,
+                               valid_until
+                        FROM lesson_controls WHERE memory_id IN ({placeholders})
+                        ORDER BY memory_id""",
+                    scoped,
+                )
+            ]
+        material = memory_spine.canonical({
+            "project_id": None if project_id is None else int(project_id),
+            "workspace": (
+                None if workspace is None
+                else os.path.normcase(str(Path(workspace)))
+            ),
+            "rows": [
+                [
+                    int(row["id"]), str(row["stage"]), str(row["family"]),
+                    str(row["skill_name"]),
+                    str(row["approved_sha256"] or ""),
+                    str(row["proof_sha256"]), str(row["updated_at"]),
+                ]
+                for row in rows
+            ],
+            "live": sorted(
+                (name, str(entry["sha256"])) for name, entry in live.items()
+            ),
+            "head": int(head or 0),
+            "outcomes": [int(outcomes[0] or 0), int(outcomes[1] or 0)],
+            "lifecycle": lifecycle,
+            # The pending-withdrawal set is part of the answer (item 30), so
+            # it has to be part of the key: a row that becomes pending, or
+            # stops being pending when its receipt finally lands, must miss.
+            "pending": sorted(
+                int(entry["promotion_id"])
+                for entry in self.ladder_pending_withdrawals(project_id)
+            ),
+        })
+        return (
+            "ladder-unverified",
+            hmac.new(
+                self._spine_key,
+                (_LADDER_VERIFY_CACHE_TAG + "\x1f" + material).encode("utf-8"),
+                hashlib.sha256,
+            ).hexdigest(),
+        )
+
+    def ladder_unverified_promotions(
+        self,
+        *,
+        workspace: Path | None,
+        project_id: int | None = None,
+        documents: Mapping[str, Mapping[str, Any]] | None = None,
+    ) -> list[dict[str, Any]]:
+        """Every live promoted artefact that is not verified, with its reason.
+
+        A *live promoted artefact* is an auto-distilled document in the live
+        root **whose ``(project_id, skill_name)`` has no ``unapproved_legacy``
+        row** (S-4): a document the grandfather pass adopted is not a promoted
+        artefact at all, is reported by ``ladder_legacy_documents`` instead,
+        and can therefore never make clause (4) of design 2.3 fire -- which
+        would otherwise trap the store, since a regressed family refuses the
+        very approval that would clear the legacy row.
+
+        Reasons (closed set): ``no_approved_row``, ``digest_mismatch``,
+        ``proof_stale``, ``gate_closed``, ``ledger_regressed``,
+        ``lineage_broken``, ``screened_component``, ``orphan_document``.
+        """
+        self._ensure_open()
+        if not self._ladder_ready:
+            return []
+        # ``documents`` lets a caller that already walked the catalog this turn
+        # hand it over instead of paying for a second walk (the seam rule's
+        # append-a-keyword-with-a-default, as ``skill_channel_report`` does).
+        live = (
+            self._ladder_live_documents(workspace) if documents is None
+            else dict(documents)
+        )
+        rows_for_key = self.ladder_promotions(project_id=project_id)
+        cache_key = self._ladder_unverified_cache_key(
+            project_id, workspace, live, rows_for_key
+        )
+        cached = self._recall_cache.get(cache_key)
+        if cached is not None:
+            return [dict(entry) for entry in cached]
+        # Out of scope entirely: a document the grandfather pass adopted,
+        # and a document the ladder has never touched.  Neither was ever
+        # claimed by a promotion, so neither can be an unverified one (S-4).
+        legacy = {
+            str(row["skill_name"])
+            for row in self.ladder_promotions(
+                project_id=project_id, stages=("unapproved_legacy",)
+            )
+        } | self._ladder_untouched_documents(live, project_id)
+        approved = {
+            str(row["skill_name"]): row
+            for row in self.ladder_promotions(
+                project_id=project_id, stages=("approved",)
+            )
+        }
+        # Design 3.7: verified requires the chain to verify THROUGH the
+        # approving event.  A broken head invalidates every approved artefact
+        # at once, so it is checked once here rather than per row.
+        head_ok = self._ladder_spine_head_ok()
+        unverified: list[dict[str, Any]] = []
+        for name, document in sorted(live.items()):
+            if name in legacy:
+                continue
+            row = approved.get(name)
+            if row is not None:
+                try:
+                    if head_ok:
+                        reason = self._ladder_promotion_defect(row, document)
+                    else:
+                        # A broken head invalidates every approved artefact
+                        # at once; no per-row check can rescue one.
+                        reason = "lineage_broken"
+                except (RuntimeError, sqlite3.DatabaseError):
+                    # Fail closed on the artefact rather than on the turn.
+                    reason = "proof_stale"
+                if reason is not None:
+                    unverified.append({
+                        "skill_name": name,
+                        "promotion_id": int(row["id"]),
+                        "project_id": int(row["project_id"]),
+                        "family": str(row["family"]),
+                        "reason": reason,
+                        "deferred": False,
+                    })
+                continue
+            if row is None:
+                # ``orphan_document``: a live FILE the ladder has touched
+                # before but that no live row claims -- including the shape
+                # R-9 plants, where the approved row was deleted by raw SQL.
+                # ``no_approved_row`` is kept for the design 7.8 crash window,
+                # where a row for the pair does exist, at ``staged``.
+                touched_rows = any(
+                    str(entry["skill_name"]) == name for entry in rows_for_key
+                )
+                unverified.append({
+                    "skill_name": name,
+                    "promotion_id": None,
+                    "family": document.get("family"),
+                    "reason": (
+                        "no_approved_row" if touched_rows else "orphan_document"
+                    ),
+                    "deferred": False,
+                })
+                continue
+        # A row that claims the live document but has none is the other half
+        # of the crash window (design 7.8), and it has its own name there:
+        # ``live_document_missing``.  ``orphan_document`` means the opposite
+        # shape -- a live FILE with no row claiming it -- and the two readers
+        # must not use one word for both, which is what made the reconciler
+        # and this function disagree.
+        for name, row in sorted(approved.items()):
+            if name not in live:
+                unverified.append({
+                    "skill_name": name,
+                    "promotion_id": int(row["id"]),
+                    "project_id": int(row["project_id"]),
+                    "family": str(row["family"]),
+                    "reason": "live_document_missing",
+                    "deferred": False,
+                })
+        # Design 10.7 item 30: while a withdrawal's receipt is outstanding
+        # the artefact keeps being listed, on EVERY later call, until the
+        # receipt is flushed.  These rows have no live document and no
+        # approved row -- the first read parked one and moved the other -- so
+        # nothing above can find them, which is precisely why the second read
+        # used to say the store was fine.
+        # Item 35: pass the live set so an already-parked orphan surfaces as
+        # a spine-derived outstanding withdrawal, while a still-live orphan is
+        # excluded here and reported as ``orphan_document`` by the scan above
+        # (the ``listed`` skip below is the second guard against a double).
+        listed = {entry["skill_name"] for entry in unverified}
+        for pending in self.ladder_pending_withdrawals(
+            project_id, documents=live
+        ):
+            if str(pending["skill_name"]) in listed:
+                continue
+            project_value = pending.get("project_id")
+            unverified.append({
+                "skill_name": str(pending["skill_name"]),
+                "promotion_id": int(pending["promotion_id"]),
+                "project_id": (
+                    None if project_value is None else int(project_value)
+                ),
+                "family": (
+                    None if pending.get("family") is None
+                    else str(pending["family"])
+                ),
+                "reason": str(pending.get("reason", "lineage_broken")),
+                "deferred": bool(pending.get("deferred", True)),
+            })
+        self._recall_cache.put(
+            cache_key, [dict(entry) for entry in unverified], 0
+        )
+        return [dict(entry) for entry in unverified]
+
+    def _ladder_spine_head_ok(self) -> bool:
+        """Does the keyed head record still verify and name the chain's tip?
+
+        The O(1) half of ``verify_spine``, and exactly the check
+        ``append_event`` makes before it will chain onto the head.  Design
+        3.7 requires the chain to verify **through** an artefact's approving
+        event, not merely that the event exists; without this a store whose
+        head had been tampered with kept serving its approved skills, because
+        the per-row lineage lookup still found the event sitting there.
+
+        Cheap on purpose: a full chain walk per read-path call would be paid
+        on every turn, and the head is what a tamper or a partially restored
+        backup breaks.
+        """
+        if not self._spine_ready:
+            return False
+        try:
+            last = self.db.execute(
+                "SELECT id, event_sha256 FROM memory_spine_events "
+                "ORDER BY id DESC LIMIT 1"
+            ).fetchone()
+            if last is None:
+                return True
+            head = self.db.execute(
+                "SELECT last_event_id, last_event_sha256, head_mac "
+                "FROM memory_spine_head WHERE id=1"
+            ).fetchone()
+        except sqlite3.DatabaseError:
+            return False
+        if head is None:
+            return False
+        return bool(
+            hmac.compare_digest(
+                memory_spine.head_mac(
+                    self._spine_key, int(head[0]), str(head[1])
+                ),
+                str(head[2]),
+            )
+            and int(head[0]) == int(last[0])
+            and str(head[1]) == str(last[1])
+        )
+
+    def _ladder_promotion_defect(
+        self, row: Mapping[str, Any], document: Mapping[str, Any]
+    ) -> str | None:
+        """The first design 3.7 clause an approved artefact fails, or None."""
+        if str(document.get("sha256") or "") != str(row["approved_sha256"] or ""):
+            return "digest_mismatch"
+        event = self.db.execute(
+            """SELECT id FROM memory_spine_events
+               WHERE kind='ladder.approved' AND subject_kind='ladder'
+                 AND subject_id=? ORDER BY id DESC LIMIT 1""",
+            (int(row["id"]),),
+        ).fetchone()
+        if event is None:
+            return "lineage_broken"
+        family = str(row["family"])
+        try:
+            proof = self.ladder_proof(
+                family=family, project_id=int(row["project_id"]),
+                application_ids=self._ladder_recorded_application_ids(row),
+            )
+        except (ValueError, RuntimeError, sqlite3.DatabaseError):
+            # ``RuntimeError`` covers ``memory_spine.SpineError`` and the
+            # ladder-unavailable guard.  A store that cannot answer whether
+            # the proof holds must report the artefact as unverified, not
+            # raise into the caller: the read path reaches here on every turn
+            # (ruling 27).
+            return "proof_stale"
+        if str(proof["reason"] or "") == "proof_unbacked":
+            return "proof_unbacked"
+        if proof["reason"] is not None or not hmac.compare_digest(
+            str(proof["sha256"]), str(row["proof_sha256"])
+        ):
+            return "proof_stale"
+        try:
+            gate = self.calibration_gate(
+                family, **learning_ladder.LADDER_GATE_THRESHOLDS
+            )
+        except (ValueError, sqlite3.DatabaseError):
+            return "gate_closed"
+        if not bool(gate.get("allowed")):
+            return "gate_closed"
+        if bool(
+            self.calibration_ledger_monotonicity(family)["currently_regressed"]
+        ):
+            return "ledger_regressed"
+        for component in (
+            family, *(str(name) for name in _ladder_document_components(document))
+        ):
+            if contains_secret(component) or screen_endpoint(component)[0]:
+                return "screened_component"
+        return None
+
+    def withdraw_ladder_promotion(
+        self,
+        promotion_id: int,
+        *,
+        reason: str,
+        workspace: Path | None = None,
+        actor: str = "runtime",
+        conversation_id: int | None = None,
+        permission: str = "runtime",
+    ) -> dict[str, Any]:
+        """Pull an artefact the runtime can no longer vouch for.
+
+        Idempotent per ``(promotion_id, reason)``: a row already withdrawn for
+        this reason is a no-op that appends no second event, so a read path
+        that consults it on every turn does not fill the chain.  The operator
+        learns *why* their skill went quiet instead of finding silence.
+
+        **Never raises because the spine will not accept an append (ruling
+        27).**  The read path reaches this method --
+        ``approved_skills`` -> ``_withdraw_unverified`` -> here -- so on a
+        store whose head no longer verifies, letting ``SpineError`` out would
+        crash the operator's turn at exactly the moment the ladder is trying
+        to protect them.  Instead:
+
+        * the document is **parked first**, before any append is attempted,
+          because moving the bytes out of the live root is the thing that
+          actually stops the model seeing them and it must not depend on the
+          chain being writable;
+        * the row still moves to ``withdrawn``, with
+          ``stage_reason='spine_unverified'``.  That is safe without the
+          receipt because ``ladder_promotions_require_spine_event`` is a
+          ``BEFORE INSERT`` trigger: it guards row creation, not a status
+          transition, and the row keeps the creating event it was born with;
+        * the receipt it could not append is recorded as a deferred write in
+          ``degraded_writes()``, which ``ladder verify`` reports;
+        * the return is a refusal -- ``{"withdrawn": False, "reason":
+          "spine_unverified", "parked": True, ...}`` -- because the withdrawal
+          is not fully recorded, and saying it was would be the lie that
+          matters here.
+        """
+        self._require_ladder()
+        code = str(reason)
+        if not _LADDER_REASON_RE.match(code):
+            raise ValueError(f"Unknown withdrawal reason: {reason}")
+        if actor not in memory_spine.SPINE_ACTORS or actor == "model":
+            raise ValueError(f"Unknown spine actor: {actor}")
+        row = self.db.execute(
+            "SELECT * FROM ladder_promotions WHERE id=?", (int(promotion_id),)
+        ).fetchone()
+        if row is None:
+            return {"withdrawn": False, "reason": "missing"}
+        if str(row["stage"]) == "withdrawn":
+            # Idempotent per ``(promotion_id, reason)`` and, deliberately,
+            # informative for ANY repeat: the read path calls this twice on a
+            # withdrawing turn -- once to exclude the artefact and once to
+            # learn why -- and a caller that treats every refusal as "receipt
+            # deferred" would otherwise read a receipted withdrawal as a
+            # deferred one just because the second call named a different
+            # reason.  The row's own recorded reason comes back so the report
+            # can tell the two apart.
+            recorded = str(row["stage_reason"] or "")
+            deferred = recorded == "spine_unverified" and bool(
+                self.ladder_pending_withdrawals(int(row["project_id"]))
+            )
+            if deferred and self._flush_pending_withdrawal(int(row["id"])):
+                # The spine has been repaired since; the receipt lands now and
+                # the artefact leaves the pending set (item 30's "until the
+                # receipt is flushed").
+                deferred = False
+            return {
+                "withdrawn": False,
+                "reason": "already_withdrawn",
+                "promotion_id": int(row["id"]),
+                "recorded_reason": recorded,
+                "receipt_deferred": deferred,
+            }
+        if str(row["stage"]) not in {"staged", *LADDER_LIVE_STAGES}:
+            return {
+                "withdrawn": False, "reason": "not_live",
+                "promotion_id": int(row["id"]), "stage": str(row["stage"]),
+            }
+        was_live = str(row["stage"]) in LADDER_LIVE_STAGES
+        stamp = now_iso()
+        # Park BEFORE the append (ruling 27).  On a healthy store the order is
+        # invisible; on a broken one it is the whole point.
+        parked = self._ladder_park_document(row, workspace, was_live=was_live)
+        try:
+            return self._withdraw_ladder_promotion_receipted(
+                row, code, stamp, parked,
+                actor=actor, conversation_id=conversation_id,
+                permission=permission,
+            )
+        except memory_spine.SpineError as exc:
+            return self._withdraw_ladder_promotion_deferred(
+                row, code, stamp, parked, exc,
+            )
+
+    def _ladder_park_document(
+        self,
+        row: Mapping[str, Any],
+        workspace: Path | None,
+        *,
+        was_live: bool,
+    ) -> dict[str, Any] | None:
+        """Move a live learned document into the staging root, or nothing.
+
+        Ruling 16, second half.  Withdrawing a LIVE row while leaving the file
+        live was R-1 steps 2-4: the document became an uncountable orphan,
+        ``unverified_at_seal`` never returned to zero, clause (4) has no
+        slack, and the family stayed ``currently_regressed`` for good -- with
+        the only exit deleting the operator's document.  The bytes go to the
+        staging root under a ``withdrawn-`` prefix instead: unreachable by the
+        catalog and by the model's file tools, listed by ``ladder verify``,
+        recoverable only through a new promotion.  Never deleted.
+        """
+        if not was_live or workspace is None:
+            return None
+        try:
+            parked = skill_library.withdraw_learned_skill(
+                Path(workspace), str(row["skill_name"])
+            )
+        except (OSError, ValueError, PermissionError):
+            # ``ladder verify`` reconciles the file on its next run.
+            return None
+        # ``learning_ladder`` memoizes the catalog per workspace behind a
+        # digest key; this module just moved a file out from under it, so the
+        # memo is dropped rather than left answering from a document that is
+        # no longer live.
+        _ladder_clear_catalog_cache()
+        return parked
+
+    def _withdraw_ladder_promotion_deferred(
+        self,
+        row: Mapping[str, Any],
+        code: str,
+        stamp: str,
+        parked: Mapping[str, Any] | None,
+        exc: BaseException,
+    ) -> dict[str, Any]:
+        """The spine refused the append; withdraw anyway and defer the receipt."""
+        promotion_id = int(row["id"])
+        self._record_degraded_write(
+            "withdraw",
+            f"promotion={promotion_id} skill={str(row['skill_name'])} "
+            f"({type(exc).__name__})",
+            reason="spine_unverified",
+        )
+        moved = False
+        try:
+            with self._immediate_transaction():
+                # Safe without the receipt: the lineage trigger is BEFORE
+                # INSERT, so it guards creation and not this transition, and
+                # the row keeps the creating event it was born with.
+                self.db.execute(
+                    """UPDATE ladder_promotions
+                       SET stage='withdrawn', stage_reason='spine_unverified',
+                           updated_at=?
+                       WHERE id=?""",
+                    (stamp, promotion_id),
+                )
+                moved = True
+        except sqlite3.Error:
+            moved = False
+        return {
+            "withdrawn": False,
+            "reason": "spine_unverified",
+            "promotion_id": promotion_id,
+            "family": str(row["family"]),
+            "skill_name": str(row["skill_name"]),
+            "parked": bool(parked and parked.get("withdrawn")),
+            "row_withdrawn": moved,
+            "receipt_deferred": True,
+            "intended_reason": code,
+        }
+
+    def _withdraw_ladder_promotion_receipted(
+        self,
+        row: Mapping[str, Any],
+        code: str,
+        stamp: str,
+        parked: Mapping[str, Any] | None,
+        *,
+        actor: str,
+        conversation_id: int | None,
+        permission: str,
+    ) -> dict[str, Any]:
+        promotion_id = int(row["id"])
+        with self._immediate_transaction():
+            current = self.db.execute(
+                "SELECT stage, stage_reason FROM ladder_promotions WHERE id=?",
+                (int(promotion_id),),
+            ).fetchone()
+            if current is None or (
+                str(current["stage"]) == "withdrawn"
+                and str(current["stage_reason"] or "") == code
+            ):
+                return {
+                    "withdrawn": False, "reason": "already_withdrawn",
+                    "promotion_id": int(promotion_id),
+                    "parked": bool(parked and parked.get("withdrawn")),
+                }
+            memory_spine.append_event(
+                self.db,
+                self._spine_key,
+                kind="ladder.withdrawn",
+                actor=actor,
+                source="learning ladder",
+                scope="global",
+                permission=permission,
+                outcome="applied",
+                payload={
+                    "at": stamp,
+                    "family": str(row["family"]),
+                    "project_id": int(row["project_id"]),
+                    "skill_name": str(row["skill_name"]),
+                    "withdrawn_sha256": row["approved_sha256"],
+                    "reason": code,
+                },
+                now=stamp,
+                conversation_id=conversation_id,
+                subject_kind="ladder",
+                subject_id=int(promotion_id),
+            )
+            self.db.execute(
+                """UPDATE ladder_promotions
+                   SET stage='withdrawn', stage_reason=?, updated_at=?
+                   WHERE id=?""",
+                (code, stamp, int(promotion_id)),
+            )
+        return {
+            "withdrawn": True,
+            "promotion_id": int(promotion_id),
+            "reason": code,
+            "family": str(row["family"]),
+            "skill_name": str(row["skill_name"]),
+            "parked": bool(parked and parked.get("withdrawn")),
+            "replaced_parked_sha256": (
+                None if parked is None else parked.get("replaced_sha256")
+            ),
+        }
+
+
+    # --- the promotion ladder: the write path -------------------------------
+    #
+    # Rung 2 is an *event*, not a stored stage: ``candidate`` names the moment
+    # the proof is met, the gate is open and the ledger has not regressed, and
+    # it is recorded as ``ladder.candidate``, which is also the row's lineage.
+    # The row is born at ``staged``, because a candidate that is never staged
+    # leaves no artefact to govern.  A row never moves backwards: rolled back,
+    # withdrawn and discarded are terminal, and a later candidate opens a new
+    # row, so the history of what was live, when, and on whose authority is a
+    # sequence of rows and events rather than a mutable state machine.
+
+    def ladder_pending_withdrawals(
+        self,
+        project_id: int | None = None,
+        *,
+        workspace: Path | None = None,
+        documents: Mapping[str, Any] | None = None,
+    ) -> list[dict[str, Any]]:
+        """Withdrawals whose receipt is still outstanding (design 10.7 item 30).
+
+        A withdrawal on a spine that will not append moves the row and parks
+        the document but cannot write its ``ladder.withdrawn`` event.  The
+        first read reported that correctly; every LATER read reported
+        nothing -- the document was gone from the live root and no approved
+        row remained, so ``ladder_unverified_promotions`` returned ``[]`` and
+        the channel said ``none-approved``.  An artefact that is unverified
+        with its receipt outstanding was being described as fine.
+
+        Outstanding is decided from **durable** state and not from the
+        in-memory queue: a row at ``withdrawn`` with
+        ``stage_reason='spine_unverified'`` and no ``ladder.withdrawn`` event
+        naming it.  That survives a fresh ``Memory`` instance, which
+        ``degraded_writes()`` does not -- and the holdout's second read
+        happens in a new one, which is exactly how this was found.
+
+        **A pure read.**  No write, no transaction, no side effect: it runs on
+        every turn that reaches the family check, including turns with nothing
+        else to do.  The self-healing append lives in
+        ``withdraw_ladder_promotion``, which is the path that already owns the
+        write.
+        """
+        self._ensure_open()
+        if not self._ladder_ready:
+            return []
+        clauses = ["p.stage = 'withdrawn'", "p.stage_reason = 'spine_unverified'"]
+        params: list[Any] = []
+        if project_id is not None:
+            clauses.append("p.project_id = ?")
+            params.append(int(project_id))
+        try:
+            rows = self.db.execute(
+                f"""SELECT p.id, p.project_id, p.family, p.skill_name,
+                           p.approved_sha256, p.updated_at
+                    FROM ladder_promotions AS p
+                    WHERE {' AND '.join(clauses)}
+                      AND NOT EXISTS (
+                          SELECT 1 FROM memory_spine_events AS e
+                          WHERE e.kind = 'ladder.withdrawn'
+                            AND e.subject_kind = 'ladder'
+                            AND e.subject_id = p.id)
+                    ORDER BY p.id""",
+                params,
+            ).fetchall()
+        except sqlite3.DatabaseError:
+            # A read that cannot run must not fail the turn; an empty pending
+            # set is the quiet direction and the next call retries.
+            return []
+        result = [
+            {
+                "promotion_id": int(row["id"]),
+                "project_id": int(row["project_id"]),
+                "family": str(row["family"]),
+                "skill_name": str(row["skill_name"]),
+                "reason": "lineage_broken",
+                "deferred": True,
+                "intended_reason": "spine_unverified",
+                "approved_sha256": row["approved_sha256"],
+                "withdrawn_at": str(row["updated_at"]),
+            }
+            for row in rows
+        ]
+        # Spine-sourced orphan withdrawals (design 10.7 item 35).  Only when a
+        # live set is available, so a not-yet-parked orphan (whose file is
+        # still live and is reported as ``orphan_document`` by the live scan)
+        # is not double-counted here as an outstanding receipt.  Without a
+        # workspace this returns the row-backed set exactly as before, which
+        # every existing caller relies on.
+        live_names: set[str] | None = None
+        if documents is not None:
+            live_names = {str(name) for name in documents}
+        elif workspace is not None:
+            try:
+                live_names = {
+                    str(name) for name in self._ladder_live_documents(workspace)
+                }
+            except (OSError, ValueError, sqlite3.DatabaseError):
+                live_names = None
+        if live_names is not None:
+            already = {entry["skill_name"] for entry in result}
+            for orphan in self._ladder_orphan_pending(project_id):
+                name = str(orphan["skill_name"])
+                if name in live_names or name in already:
+                    continue
+                result.append(orphan)
+        return result
+
+    def _flush_pending_withdrawal(self, promotion_id: int) -> bool:
+        """Append the receipt a broken spine refused, once it will take it.
+
+        Called from ``withdraw_ladder_promotion``'s already-withdrawn branch,
+        which the read path reaches on every withdrawing turn -- so a repaired
+        store clears its own pending set on the next read rather than waiting
+        for an operator.  Returns True when the receipt landed.
+        """
+        if not self._ladder_available() or not self._ladder_spine_head_ok():
+            return False
+        row = self.db.execute(
+            """SELECT id, project_id, family, skill_name, approved_sha256
+               FROM ladder_promotions WHERE id=?""",
+            (int(promotion_id),),
+        ).fetchone()
+        if row is None:
+            return False
+        stamp = now_iso()
+        try:
+            with self._immediate_transaction():
+                memory_spine.append_event(
+                    self.db,
+                    self._spine_key,
+                    kind="ladder.withdrawn",
+                    actor="runtime",
+                    source="learning ladder",
+                    scope="global",
+                    permission="runtime",
+                    outcome="applied",
+                    payload={
+                        "at": stamp,
+                        "family": str(row["family"]),
+                        "project_id": int(row["project_id"]),
+                        "skill_name": str(row["skill_name"]),
+                        "withdrawn_sha256": row["approved_sha256"],
+                        "reason": "spine_unverified",
+                    },
+                    now=stamp,
+                    subject_kind="ladder",
+                    subject_id=int(promotion_id),
+                )
+        except (memory_spine.SpineError, sqlite3.Error):
+            return False
+        return True
+
+    def _ladder_orphan_approval(
+        self, skill_name: str
+    ) -> sqlite3.Row | None:
+        """The newest ``ladder.approved`` event for a name that still owes a
+        withdrawal receipt (design 10.7 item 35).
+
+        "Still owes" is the whole orphan condition, read from the spine: an
+        approving event whose ``subject_id`` has **no promotion row at all**
+        (the row was deleted -- the R-9 shape) and **no ``ladder.withdrawn``
+        event** naming it.  The row is what a raw ``DELETE`` removes; the event
+        is what it cannot.  ``ORDER BY id DESC`` so repeated parks flush the
+        oldest-owed last, which lets the rare two-orphans-one-name case drain
+        one call at a time instead of stranding the second forever.
+
+        Returns the ``promotion_id`` (the event's ``subject_id``) plus the
+        ``approved_sha256``, ``family`` and ``project_id`` its payload froze --
+        everything a faithful receipt needs, none of it recoverable from a
+        deleted row and the confirmation code deliberately not among it (S-1).
+        """
+        try:
+            return self.db.execute(
+                """SELECT e.subject_id AS promotion_id,
+                          json_extract(e.payload_json, '$.approved_sha256')
+                              AS approved_sha256,
+                          json_extract(e.payload_json, '$.family') AS family,
+                          json_extract(e.payload_json, '$.project_id')
+                              AS project_id
+                   FROM memory_spine_events AS e
+                   WHERE e.kind='ladder.approved' AND e.subject_kind='ladder'
+                     AND json_extract(e.payload_json, '$.skill_name')=?
+                     AND NOT EXISTS (
+                         SELECT 1 FROM ladder_promotions AS p
+                         WHERE p.id = e.subject_id)
+                     AND NOT EXISTS (
+                         SELECT 1 FROM memory_spine_events AS w
+                         WHERE w.kind='ladder.withdrawn'
+                           AND w.subject_kind='ladder'
+                           AND w.subject_id = e.subject_id)
+                   ORDER BY e.id DESC LIMIT 1""",
+                (str(skill_name),),
+            ).fetchone()
+        except sqlite3.DatabaseError:
+            return None
+
+    def _ladder_orphan_pending(
+        self, project_id: int | None = None
+    ) -> list[dict[str, Any]]:
+        """Outstanding orphan withdrawals, derived from the spine alone.
+
+        The durable half of item 35: once an orphan is parked, the live file
+        is gone and no row exists, so nothing on the promotion side remembers
+        that a ``ladder.withdrawn`` receipt is still owed -- which is holdout
+        v2's shape one level along.  The spine does remember: an approving
+        event with no promotion row and no matching withdrawn event is an
+        outstanding receipt, and that survives a fresh ``Memory`` instance
+        because it is read from ``memory_spine_events``, not from an in-memory
+        queue.
+
+        Whether the file is still live is NOT decided here -- this reader has
+        no workspace.  A caller with a live set (``ladder_pending_withdrawals``
+        given ``documents``/``workspace``; ``ladder_unverified_promotions`` via
+        its ``listed`` skip) excludes a not-yet-parked orphan, which is
+        reported as ``orphan_document`` from the live scan instead.
+        """
+        clauses = ["e.kind='ladder.approved'", "e.subject_kind='ladder'"]
+        params: list[Any] = []
+        if project_id is not None:
+            clauses.append(
+                "json_extract(e.payload_json, '$.project_id') = ?"
+            )
+            params.append(int(project_id))
+        try:
+            rows = self.db.execute(
+                f"""SELECT e.subject_id AS promotion_id,
+                           json_extract(e.payload_json, '$.project_id')
+                               AS project_id,
+                           json_extract(e.payload_json, '$.family') AS family,
+                           json_extract(e.payload_json, '$.skill_name')
+                               AS skill_name,
+                           json_extract(e.payload_json, '$.approved_sha256')
+                               AS approved_sha256,
+                           MAX(e.created_at) AS approved_at
+                    FROM memory_spine_events AS e
+                    WHERE {' AND '.join(clauses)}
+                      AND NOT EXISTS (
+                          SELECT 1 FROM ladder_promotions AS p
+                          WHERE p.id = e.subject_id)
+                      AND NOT EXISTS (
+                          SELECT 1 FROM memory_spine_events AS w
+                          WHERE w.kind='ladder.withdrawn'
+                            AND w.subject_kind='ladder'
+                            AND w.subject_id = e.subject_id)
+                    GROUP BY e.subject_id
+                    ORDER BY e.subject_id""",
+                params,
+            ).fetchall()
+        except sqlite3.DatabaseError:
+            # A read that cannot run must not fail the turn (ruling 27).
+            return []
+        return [
+            {
+                "promotion_id": int(row["promotion_id"]),
+                "project_id": (
+                    None if row["project_id"] is None
+                    else int(row["project_id"])
+                ),
+                "family": (
+                    None if row["family"] is None else str(row["family"])
+                ),
+                "skill_name": str(row["skill_name"]),
+                "reason": "orphan_parked",
+                "deferred": True,
+                "intended_reason": "orphan_parked",
+                "approved_sha256": row["approved_sha256"],
+                "withdrawn_at": str(row["approved_at"]),
+            }
+            for row in rows
+            if row["skill_name"] is not None
+        ]
+
+    def _append_orphan_withdrawal(
+        self,
+        promotion_id: int,
+        family: Any,
+        project_id: int,
+        skill_name: str,
+        approved_sha256: Any,
+    ) -> bool:
+        """Append the ``ladder.withdrawn`` receipt for a parked orphan.
+
+        Keyed to the ``promotion_id`` recovered from the approving event, so
+        the receipt names the same subject the approval did and the pending
+        derivation clears the moment it lands.  Returns True when it landed,
+        False when the chain refused it (a broken head) -- in which case the
+        fact stays derivable from the spine until a repaired store flushes it.
+        Never raises: this is reached from the read-path sweep (ruling 27).
+        """
+        if not self._ladder_available() or not self._ladder_spine_head_ok():
+            return False
+        stamp = now_iso()
+        try:
+            with self._immediate_transaction():
+                memory_spine.append_event(
+                    self.db,
+                    self._spine_key,
+                    kind="ladder.withdrawn",
+                    actor="runtime",
+                    source="learning ladder",
+                    scope="global",
+                    permission="runtime",
+                    outcome="applied",
+                    payload={
+                        "at": stamp,
+                        "family": str(family),
+                        "project_id": int(project_id),
+                        "skill_name": str(skill_name),
+                        "withdrawn_sha256": approved_sha256,
+                        "reason": "orphan_parked",
+                    },
+                    now=stamp,
+                    subject_kind="ladder",
+                    subject_id=int(promotion_id),
+                )
+        except (memory_spine.SpineError, sqlite3.Error):
+            return False
+        return True
+
+    def park_orphan_document(
+        self,
+        workspace: Path | None,
+        *,
+        project_id: int,
+        skill_name: str,
+    ) -> dict[str, Any]:
+        """Park a live orphan document and receipt it (design 10.7 item 35).
+
+        An *orphan* is a live learned document whose ``(project_id,
+        skill_name)`` has ``ladder.*`` events but no active promotion row --
+        the row was deleted (raw SQL, or a crash) while the file stayed live,
+        so ``approved_skills`` excludes it but the file-based catalog
+        (``list_available_skills`` / ``read_available_skill``) still serves it,
+        around the ladder.  This moves the file out of the live root and writes
+        the withdrawal receipt the vanished row can no longer carry.
+
+        Fail-closed and never raises -- ladder-core calls this from the
+        read-path sweep (ruling 27).  It **never** parks a name with no
+        ``ladder.*`` events: a hand-authored or pre-M4 file that merely shares
+        the name shape is guarded out by ``_ladder_named_in_spine`` and stays
+        exactly where it is.
+
+        Returns ``{"parked", "promotion_id", "receipt_deferred", "reason"}``:
+
+        * ``parked`` -- the document is no longer live after this call;
+        * ``promotion_id`` -- the id recovered from the approving event, or
+          ``None`` on a refusal;
+        * ``receipt_deferred`` -- the ``ladder.withdrawn`` append was refused
+          (a broken head) and the outstanding fact is left derivable from the
+          spine; the durable receipt lands on a later call once the chain
+          verifies;
+        * ``reason`` -- ``orphan_parked`` on success, ``spine_unverified``
+          when the receipt deferred, else a refusal code.
+        """
+        self._ensure_open()
+        name = str(skill_name)
+
+        def refuse(reason: str) -> dict[str, Any]:
+            return {
+                "parked": False,
+                "promotion_id": None,
+                "receipt_deferred": False,
+                "reason": reason,
+            }
+
+        if not self._ladder_ready:
+            return refuse("ladder_unavailable")
+        try:
+            # The load-bearing guard: only a name the spine has actually seen
+            # may be parked.  A file with no ladder.* events is not an orphan;
+            # it is a hand-authored or pre-M4 document, and parking it would be
+            # data loss for something the ladder never governed.
+            if name not in self._ladder_named_in_spine():
+                return refuse("not_ladder_touched")
+            approval = self._ladder_orphan_approval(name)
+            if approval is None:
+                # No approving event that still owes a receipt: either the row
+                # is intact (not an orphan) or the receipt is already written.
+                return refuse("no_orphan")
+            promotion_id = int(approval["promotion_id"])
+            family = approval["family"]
+            approved_sha256 = approval["approved_sha256"]
+            event_project = (
+                int(project_id) if approval["project_id"] is None
+                else int(approval["project_id"])
+            )
+            # Park the live file, if it is still live.  A re-call after a
+            # deferred receipt finds nothing to park and only re-attempts the
+            # receipt, which is the flush path a repaired store needs.
+            parked_file = False
+            try:
+                live = (
+                    None if workspace is None
+                    else self._ladder_live_documents(workspace).get(name)
+                )
+            except (OSError, ValueError, sqlite3.DatabaseError):
+                live = None
+            if live is not None:
+                try:
+                    skill_library.withdraw_learned_skill(Path(workspace), name)
+                    _ladder_clear_catalog_cache()
+                    parked_file = True
+                except (OSError, ValueError, PermissionError):
+                    # Could not move the file; it is still served, so this is
+                    # not a park.  The next sweep retries.
+                    return refuse("park_failed")
+            landed = self._append_orphan_withdrawal(
+                promotion_id, family, event_project, name, approved_sha256
+            )
+            receipt_deferred = not landed
+            if receipt_deferred:
+                # The in-turn courtesy record; the durable, cross-instance fact
+                # is the spine derivation in ``_ladder_orphan_pending``.
+                self._record_degraded_write(
+                    "ladder.orphan_parked",
+                    f"orphan {name} parked; withdrawal receipt deferred",
+                    reason="spine_unverified",
+                )
+            return {
+                "parked": bool(parked_file or live is None),
+                "promotion_id": promotion_id,
+                "receipt_deferred": receipt_deferred,
+                "reason": (
+                    "spine_unverified" if receipt_deferred else "orphan_parked"
+                ),
+            }
+        except (sqlite3.DatabaseError, RuntimeError, OSError, ValueError):
+            # Ruling 27: a refusal, never an exception, on the read path.
+            return refuse("read_failed")
+
+    def _ladder_workspace_matches(
+        self, project_id: int, workspace: Path | None
+    ) -> bool:
+        """The workspace check ``Memory`` can actually make (S-5).
+
+        ``memory.py`` imports no config module and
+        ``config.resolve_project_workspace`` takes a canonical relative path
+        rather than a project id, so the real derivation happens at the caller
+        -- the CLI, the governed verb, the agent -- and what is checked here
+        is the half the store can see on its own: for
+        ``"@projects/<slug>"`` the workspace directory must be named
+        ``<slug>``, and for ``"."`` the caller's declared workspace is taken
+        as given.  Both layers refuse with the same name,
+        ``workspace_mismatch``, so an operator sees one reason and not two.
+        """
+        if workspace is None:
+            return False
+        project = self.get_project(int(project_id))
+        if project is None:
+            return False
+        relative = str(project.get("relative_path") or ".").strip()
+        if relative in {"", "."}:
+            return True
+        slug = PurePosixPath(relative.replace("\\", "/")).name
+        return bool(slug) and Path(workspace).name == slug
+
+    def _ladder_refuse(
+        self,
+        action: str,
+        reason: str,
+        *,
+        family: str,
+        project_id: int | None = None,
+        log: bool = True,
+        **extra: Any,
+    ) -> dict[str, Any]:
+        """Every refusal is a returned dict with a reason, never a raise.
+
+        Design 3.4: the old distiller call site swallowed exceptions, so a
+        refusal that raised would be lost exactly where it matters.  The
+        refusal is also written to the receipt path so the epoch counters have
+        a durable source and an operator can read the history directly.
+        """
+        if log:
+            self._log_ladder_refusal(
+                action, family=family, project_id=project_id, reason=reason
+            )
+        refusal = {
+            "staged" if action == "stage" else "applied": False,
+            "reason": str(reason),
+            "family": str(family),
+        }
+        if project_id is not None:
+            refusal["project_id"] = int(project_id)
+        refusal.update(extra)
+        return refusal
+
+    def ladder_candidates(
+        self,
+        *,
+        project_id: int | None = None,
+        family: str | None = None,
+        workspace: Path | None = None,
+    ) -> list[dict[str, Any]]:
+        """Every ``(project, family)`` whose proof, gate and ledger currently
+        justify a staging, with nothing staged for it yet.
+
+        The consolidation worker calls this each pass and stages what
+        qualifies.  No queue and no new table are needed because the proof
+        lives entirely in the store, which is also why removing the
+        agent-side distiller call loses nothing.
+
+        ``family`` and ``project_id`` narrow the scan.  ``run_ladder_pass``
+        iterates the ten ladder families and passes both, so the pass costs
+        ten filtered derivations rather than ten full ones -- the proof
+        derivation is the expensive part and doing it for nine families you
+        are about to discard is nine wasted derivations per pass.
+        ``workspace`` is accepted and unused: this method reads no file, and
+        taking it keeps the driver from having to introspect the signature.
+
+        Every row is a mapping carrying at least ``family`` and
+        ``project_id``, which the driver relies on to attribute a candidate to
+        the right family rather than to the loop it was found in.
+        """
+        self._require_ladder()
+        del workspace  # read no file; see the docstring
+        if family is not None and family not in self.PREDICTION_FAMILIES:
+            raise ValueError(f"Unknown task family: {family}")
+        projects = (
+            [int(project_id)] if project_id is not None
+            else [int(row["id"]) for row in self.db.execute(
+                "SELECT id FROM agent_projects WHERE enabled=1 ORDER BY id"
+            )]
+        )
+        families = (
+            sorted(learning_ladder.LADDER_FAMILIES) if family is None
+            else ([family] if family in learning_ladder.LADDER_FAMILIES else [])
+        )
+        candidates: list[dict[str, Any]] = []
+        for pid in projects:
+            for family in families:
+                gate = self.calibration_gate(
+                    family, **learning_ladder.LADDER_GATE_THRESHOLDS
+                )
+                if not bool(gate["allowed"]):
+                    continue
+                epochs = self.calibration_ledger(family)
+                if not epochs:
+                    continue
+                verdict = self.calibration_ledger_monotonicity(family)
+                if bool(verdict["currently_regressed"]):
+                    continue
+                proof = self.ladder_proof(family=family, project_id=pid)
+                if proof["reason"] is not None:
+                    continue
+                name = learning_ladder.auto_skill_name(family)
+                if self.ladder_promotions(
+                    project_id=pid, skill_name=name, stages=("staged",)
+                ):
+                    continue
+                candidates.append({
+                    "project_id": pid,
+                    "family": family,
+                    "skill_name": name,
+                    "reuses": int(proof["reuses"]),
+                    "contexts": int(proof["contexts"]),
+                    "epoch": int(epochs[-1]["epoch"]),
+                    "proof_sha256": str(proof["sha256"]),
+                })
+        return candidates
+
+    def stage_ladder_promotion(
+        self,
+        *,
+        family: str,
+        project_id: int,
+        workspace: Path,
+        now: str | None = None,
+        actor: str = "runtime",
+        conversation_id: int | None = None,
+        permission: str = "runtime",
+    ) -> dict[str, Any]:
+        """Derive the proof, refuse or stage.  Never touches the live root.
+
+        Always returns a dict; never raises for a refusal.  Refusal reasons
+        (closed set): ``family_unsupported``, ``family_excluded``,
+        ``gate_closed``, ``ledger_regressed``, ``no_epoch``,
+        ``no_eligible_lesson``, ``insufficient_reuse``,
+        ``insufficient_effectiveness``, ``screened_component``,
+        ``document_unchanged``, ``staging_exists``, ``workspace_mismatch``,
+        ``spine_unavailable``, ``staging_write_failed``.
+
+        The staged bytes are written **outside** the database transaction and
+        the database is the record: if the write fails the row is moved to
+        ``withdrawn`` with ``staging_write_failed`` in a second transaction,
+        and ``ladder verify`` reconciles the filesystem to the record rather
+        than the other way round.  A filesystem operation inside a write
+        transaction would hold the lock for as long as the disk takes.
+        """
+        stamp = str(now or now_iso())
+        if not self._ladder_available():
+            return self._ladder_refuse(
+                "stage", "spine_unavailable", family=str(family),
+                project_id=project_id, log=False,
+            )
+        if family not in self.PREDICTION_FAMILIES:
+            return self._ladder_refuse(
+                "stage", "family_unsupported", family=str(family),
+                project_id=project_id,
+            )
+        if family in learning_ladder.LADDER_EXCLUDED_FAMILIES:
+            # The conversation family's predictions carry evidence_ok NULL and
+            # calibration_gate skips the evidence clause entirely when nothing
+            # is applicable, so a promotion there would rest on no
+            # verification at all (M-2).
+            return self._ladder_refuse(
+                "stage", "family_excluded", family=str(family),
+                project_id=project_id,
+            )
+        if not self._ladder_workspace_matches(project_id, workspace):
+            return self._ladder_refuse(
+                "stage", "workspace_mismatch", family=str(family),
+                project_id=project_id,
+            )
+        gate = self.calibration_gate(
+            family, **learning_ladder.LADDER_GATE_THRESHOLDS
+        )
+        if not bool(gate["allowed"]):
+            return self._ladder_refuse(
+                "stage", "gate_closed", family=str(family),
+                project_id=project_id, reasons=list(gate["reasons"]),
+            )
+        epochs = self.calibration_ledger(family)
+        if not epochs:
+            return self._ladder_refuse(
+                "stage", "no_epoch", family=str(family), project_id=project_id
+            )
+        verdict = self.calibration_ledger_monotonicity(family)
+        if bool(verdict["currently_regressed"]):
+            return self._ladder_refuse(
+                "stage", "ledger_regressed", family=str(family),
+                project_id=project_id,
+            )
+        proof = self.ladder_proof(
+            family=family, project_id=int(project_id), now=stamp
+        )
+        if proof["reason"] is not None:
+            return self._ladder_refuse(
+                "stage", str(proof["reason"]), family=str(family),
+                project_id=project_id,
+            )
+        try:
+            content = learning_ladder.build_staged_document(
+                family=str(family),
+                reuses=int(proof["reuses"]),
+                contexts=int(proof["contexts"]),
+                tool_names=list(proof["tool_names"]),
+                oracles=list(proof["oracles"]),
+                gate=gate,
+                epoch=int(epochs[-1]["epoch"]),
+                monotone=bool(verdict["monotone"]),
+                lift_pp=verdict.get("lift_pp"),
+            )
+        except learning_ladder.ScreenedComponent as exc:
+            return self._ladder_refuse(
+                "stage", "screened_component", family=str(family),
+                project_id=project_id, component=str(exc.component),
+            )
+        except ValueError as exc:
+            message = str(exc)
+            if message.startswith("screened_component"):
+                return self._ladder_refuse(
+                    "stage", "screened_component", family=str(family),
+                    project_id=project_id,
+                    component=message.split(":", 1)[-1].strip(),
+                )
+            raise
+        name = learning_ladder.auto_skill_name(family)
+        if self.ladder_promotions(
+            project_id=int(project_id), skill_name=name, stages=("staged",)
+        ):
+            return self._ladder_refuse(
+                "stage", "staging_exists", family=str(family),
+                project_id=project_id,
+            )
+        live = self._ladder_live_documents(workspace).get(name)
+        prior_sha256 = None if live is None else str(live["sha256"])
+        # The staged bytes are written BEFORE the row, and the row records the
+        # digest the writer produced rather than one this method computed.
+        # ``skill_library`` renders a description and front matter around the
+        # body, so a digest taken over ``content`` here would not be the
+        # digest of the file that ``apply_ladder_promotion`` later re-reads --
+        # and the approval would refuse ``staged_digest_mismatch`` on a
+        # perfectly good staging.  Recomputing the rendering in this module to
+        # avoid that would couple the store to a document format that is
+        # ladder-core's to change.
+        #
+        # The order is safe in both crash directions, unlike approval, where
+        # it is forced.  A staged file with no row is unreachable -- the
+        # catalog does not walk the staging root and the model's file tools
+        # refuse the whole directory -- and ``ladder verify`` discards it; a
+        # row with no staged file refuses ``staged_missing`` at approval and
+        # is reconciled the same way.  Neither is an unverified promotion,
+        # which is the thing that forces approval's order.
+        try:
+            written = skill_library.stage_learned_skill(
+                Path(workspace),
+                name,
+                learning_ladder.staged_skill_description(str(family)),
+                content,
+                family=str(family),
+                verified_outcomes=int(proof["reuses"]),
+            )
+        except (OSError, ValueError, PermissionError) as exc:
+            return self._ladder_refuse(
+                "stage", "staging_write_failed", family=str(family),
+                project_id=project_id, detail=type(exc).__name__,
+            )
+        staged_sha256 = str(written["sha256"])
+
+        def _discard_staged() -> None:
+            try:
+                skill_library.discard_staged_skill(Path(workspace), name)
+            except (KeyError, OSError, ValueError, PermissionError):
+                pass
+
+        if (
+            prior_sha256 == staged_sha256
+            and self.ladder_promotions(
+                project_id=int(project_id), skill_name=name,
+                stages=("approved",),
+            )
+        ):
+            _discard_staged()
+            return self._ladder_refuse(
+                "stage", "document_unchanged", family=str(family),
+                project_id=project_id,
+            )
+        token = secrets.token_urlsafe(12)
+        try:
+            transaction = self._immediate_transaction()
+        except BaseException:  # pragma: no cover - defensive
+            _discard_staged()
+            raise
+        with transaction:
+            promotion_id = allocate_ladder_id(self.db)
+            payload_common = {
+                "at": stamp,
+                "family": str(family),
+                "project_id": int(project_id),
+                "skill_name": name,
+            }
+            candidate_event = memory_spine.append_event(
+                self.db,
+                self._spine_key,
+                kind="ladder.candidate",
+                actor=actor,
+                source="learning ladder",
+                scope="global",
+                permission=permission,
+                outcome="applied",
+                payload={
+                    **payload_common,
+                    "lesson_ids": [int(value) for value in proof["lesson_ids"]][:10],
+                    "reuse_count": int(proof["reuses"]),
+                    "context_count": int(proof["contexts"]),
+                    "proof_sha256": str(proof["sha256"]),
+                    "epoch": int(epochs[-1]["epoch"]),
+                    "gate_allowed": True,
+                    "ledger_monotone": bool(verdict["monotone"]),
+                    "brier": gate.get("brier"),
+                    "calibration_error": gate.get("calibration_error"),
+                    "attempts": int(gate.get("attempts") or 0),
+                },
+                now=stamp,
+                conversation_id=conversation_id,
+                subject_kind="ladder",
+                subject_id=promotion_id,
+            )
+            memory_spine.append_event(
+                self.db,
+                self._spine_key,
+                kind="ladder.staged",
+                actor=actor,
+                source="learning ladder",
+                scope="global",
+                permission=permission,
+                outcome="applied",
+                payload={
+                    **payload_common,
+                    "staged_sha256": staged_sha256,
+                    "prior_sha256": prior_sha256,
+                    "verified_outcomes": int(proof["reuses"]),
+                    "tools_count": len(proof["tool_names"]),
+                    "oracles_count": len(proof["oracles"]),
+                    # The boolean and nothing else: the confirmation code is
+                    # never published, not even as a digest (S-1).
+                    "token_required": True,
+                },
+                now=stamp,
+                conversation_id=conversation_id,
+                subject_kind="ladder",
+                subject_id=promotion_id,
+            )
+            self.db.execute(
+                """INSERT INTO ladder_promotions(
+                       id, created_at, updated_at, project_id, family,
+                       skill_name, stage, stage_reason, lesson_ids_json,
+                       proof_json, proof_sha256, reuse_count, context_count,
+                       epoch_id, gate_json, staged_sha256, approval_token,
+                       prior_sha256, spine_event_id
+                   ) VALUES (?, ?, ?, ?, ?, ?, 'staged', NULL, ?, ?, ?, ?, ?,
+                             ?, ?, ?, ?, ?, ?)""",
+                (
+                    promotion_id, stamp, stamp, int(project_id), str(family),
+                    name,
+                    memory_spine.canonical(
+                        [int(value) for value in proof["lesson_ids"]]
+                    ),
+                    memory_spine.canonical(_ladder_proof_record(proof)),
+                    str(proof["sha256"]), int(proof["reuses"]),
+                    int(proof["contexts"]), int(epochs[-1]["id"]),
+                    memory_spine.canonical(gate), staged_sha256, token,
+                    prior_sha256, int(candidate_event),
+                ),
+            )
+        return {
+            "staged": True,
+            "promotion_id": int(promotion_id),
+            "project_id": int(project_id),
+            "family": str(family),
+            "skill_name": name,
+            "staged_sha256": staged_sha256,
+            "prior_sha256": prior_sha256,
+            "reuse_count": int(proof["reuses"]),
+            "context_count": int(proof["contexts"]),
+            "epoch": int(epochs[-1]["epoch"]),
+            # Returned once to the caller.  The worker hands it to the
+            # operator surfaces; it is in no spine payload and no log line.
+            "approval_token": token,
+        }
+
+    def apply_ladder_promotion(
+        self,
+        promotion_id: int,
+        *,
+        approval_token: str,
+        workspace: Path,
+        actor: str = "operator",
+        conversation_id: int | None = None,
+        permission: str = "operator:interactive",
+        operator_prompt: str | None = None,
+    ) -> dict[str, Any]:
+        """The only path to a live learned skill.  Operator-typed only.
+
+        Every gate is re-derived here and none is read from the row: the
+        proof, the calibrated gate, the ledger, the staged digest, the live
+        digest and the document's components.  ``operator_prompt``, when the
+        caller supplies one with a ``conversation_id``, is written to
+        ``messages`` **verbatim** inside the approving transaction, exactly as
+        the shipped governed verbs write their raw turn -- and **redaction is
+        the caller's responsibility**: the confirmation code must already have
+        been replaced before it reaches this method, because a transcript is
+        replayed into later prompts and the code being single-use does not
+        remove it from one.  ``memory.py`` performs no redaction and never
+        learns the verb's grammar.
+
+        Refusals (closed set, each a fixed reason and no state change):
+        ``missing``, ``not_staged``, ``token_mismatch``, ``proof_stale``,
+        ``gate_closed``, ``ledger_regressed``, ``staged_missing``,
+        ``staged_digest_mismatch``, ``live_digest_unexpected``,
+        ``screened_component``, ``workspace_mismatch``, ``spine_unavailable``.
+        """
+        if actor != "operator":
+            # Structural, not conventional: a verifier can then assert that
+            # every ladder.approved event in the chain carries actor=operator.
+            raise ValueError("skill promotions are approved by the operator only")
+        if not self._ladder_available():
+            return {"applied": False, "reason": "spine_unavailable"}
+        row = self.db.execute(
+            "SELECT * FROM ladder_promotions WHERE id=?", (int(promotion_id),)
+        ).fetchone()
+        if row is None:
+            return {"applied": False, "reason": "missing"}
+        family = str(row["family"])
+        name = str(row["skill_name"])
+        project_id = int(row["project_id"])
+
+        def refuse(reason: str, **extra: Any) -> dict[str, Any]:
+            return self._ladder_refuse(
+                "approve", reason, family=family, project_id=project_id,
+                promotion_id=int(promotion_id), **extra,
+            )
+
+        # 1. staged, which is also what makes the code single use.
+        if str(row["stage"]) != "staged":
+            return refuse("not_staged", stage=str(row["stage"]))
+        # 2. the shape first, THEN a constant-time compare against the
+        #    cleartext code on the row.  ``hmac.compare_digest`` raises
+        #    ``TypeError`` on a non-ASCII ``str`` operand, so a fullwidth,
+        #    en-dashed, Cyrillic or zero-width-joined code reached the
+        #    operator as a traceback out of the CLI instead of a refusal
+        #    (R-4).  The alphabet is the one the column CHECK already names.
+        if not _LADDER_APPROVAL_CODE_RE.match(str(approval_token)):
+            return refuse("token_malformed")
+        if not hmac.compare_digest(
+            str(approval_token), str(row["approval_token"])
+        ):
+            return refuse("token_mismatch")
+        # 3. the workspace the caller derived is this project's.
+        if not self._ladder_workspace_matches(project_id, workspace):
+            return refuse("workspace_mismatch")
+        # 4. the proof re-derives to the same digest NOW, over exactly the
+        #    application set this row was proved on (ruling 16).
+        proof = self.ladder_proof(
+            family=family, project_id=project_id,
+            application_ids=self._ladder_recorded_application_ids(row),
+        )
+        if str(proof["reason"] or "") == "proof_unbacked":
+            return refuse("proof_unbacked")
+        if proof["reason"] is not None or not hmac.compare_digest(
+            str(proof["sha256"]), str(row["proof_sha256"])
+        ):
+            return refuse("proof_stale")
+        # 5. the gate is still open.
+        gate = self.calibration_gate(
+            family, **learning_ladder.LADDER_GATE_THRESHOLDS
+        )
+        if not bool(gate["allowed"]):
+            return refuse("gate_closed", reasons=list(gate["reasons"]))
+        # 6. the newest sealed epoch has not regressed.
+        verdict = self.calibration_ledger_monotonicity(family)
+        if bool(verdict["currently_regressed"]):
+            return refuse("ledger_regressed")
+        # 7. the staged file is there and is the document that was measured.
+        try:
+            staged = skill_library.read_staged_skill(name, Path(workspace))
+        except (KeyError, OSError, ValueError, PermissionError):
+            return refuse("staged_missing")
+        if str(staged.get("sha256") or "") != str(row["staged_sha256"]):
+            return refuse("staged_digest_mismatch")
+        # 8. nothing changed the live document behind the ladder's back.
+        live = self._ladder_live_documents(workspace).get(name)
+        live_sha256 = None if live is None else str(live["sha256"])
+        if live_sha256 != (
+            None if row["prior_sha256"] is None else str(row["prior_sha256"])
+        ):
+            return refuse("live_digest_unexpected")
+        # 9. the document's components re-screen.
+        for component in (
+            family, *_ladder_document_components(staged)
+        ):
+            if contains_secret(component) or screen_endpoint(component)[0]:
+                return refuse("screened_component")
+
+        promoted = skill_library.promote_staged_skill(
+            Path(workspace), name, expected_staged_sha256=str(row["staged_sha256"])
+        )
+        stamp = now_iso()
+        approved_sha256 = str(promoted["approved_sha256"])
+        prior_document = promoted.get("prior_document")
+        prior_sha256 = promoted.get("prior_sha256")
+        try:
+            return self._apply_ladder_promotion_committed(
+                row, proof, verdict, stamp, approved_sha256, prior_document,
+                prior_sha256,
+                conversation_id=conversation_id, permission=permission,
+                operator_prompt=operator_prompt,
+            )
+        except sqlite3.IntegrityError as exc:
+            # A constraint on this path is a refusal at worst: the bytes are
+            # already live, so raising would leave the operator with a moved
+            # document, no row, and a traceback.
+            return refuse("row_conflict", detail=str(exc)[:120])
+
+    def _apply_ladder_promotion_committed(
+        self,
+        row: Mapping[str, Any],
+        proof: Mapping[str, Any],
+        verdict: Mapping[str, Any],
+        stamp: str,
+        approved_sha256: str,
+        prior_document: Any,
+        prior_sha256: Any,
+        *,
+        conversation_id: int | None,
+        permission: str,
+        operator_prompt: str | None,
+    ) -> dict[str, Any]:
+        promotion_id = int(row["id"])
+        project_id = int(row["project_id"])
+        family = str(row["family"])
+        name = str(row["skill_name"])
+        with self._immediate_transaction():
+            # Retire whatever currently holds the live slot for this
+            # (project, skill) -- an approved row just as much as a legacy one
+            # -- in the same transaction, so ``idx_ladder_promotions_one_live``
+            # never sees two.  Retiring only the legacy case meant the SECOND
+            # approval of a family raised ``sqlite3.IntegrityError`` out of the
+            # operator's turn, while design 1.4 (only the newest approval keeps
+            # ``prior_document``) and design 3.6 (``not_newest``) both assume
+            # successive approvals are ordinary.
+            #
+            # ``withdrawn`` + ``superseded_by_approval`` is the terminal stage,
+            # not a new ``superseded`` one: the stored stage set is the six of
+            # the DDL ``CHECK`` (design 3.1), and the retired row KEEPS its
+            # ``approved_sha256`` and ``approved_at`` because those record what
+            # was live and when.
+            superseded = self.db.execute(
+                """SELECT id FROM ladder_promotions
+                   WHERE project_id=? AND skill_name=? AND id<>?
+                     AND stage IN ('approved','unapproved_legacy')
+                   ORDER BY id DESC""",
+                (project_id, name, int(promotion_id)),
+            ).fetchall()
+            for retired in superseded:
+                self.db.execute(
+                    """UPDATE ladder_promotions
+                       SET stage='withdrawn', stage_reason='superseded_by_approval',
+                           updated_at=?
+                       WHERE id=?""",
+                    (stamp, int(retired["id"])),
+                )
+            legacy = superseded[0] if superseded else None
+            memory_spine.append_event(
+                self.db,
+                self._spine_key,
+                kind="ladder.approved",
+                actor="operator",
+                source="operator approval",
+                scope="global",
+                permission=permission,
+                outcome="applied",
+                payload={
+                    "at": stamp,
+                    "family": family,
+                    "project_id": project_id,
+                    "skill_name": name,
+                    "approved_sha256": approved_sha256,
+                    "prior_sha256": (
+                        None if prior_sha256 is None else str(prior_sha256)
+                    ),
+                    "proof_sha256": str(proof["sha256"]),
+                    "epoch": int(
+                        self.calibration_ledger(family)[-1]["epoch"]
+                    ),
+                    "gate_allowed": True,
+                    "ledger_monotone": bool(verdict["monotone"]),
+                    # Named only once ladder-core's contract admits it, so
+                    # this lands green either way and starts carrying the
+                    # retired id the moment the key set grows.
+                    **(
+                        {"superseded_promotion_id": (
+                            None if legacy is None else int(legacy["id"])
+                        )}
+                        if _ladder_payload_admits(
+                            "ladder.approved", "superseded_promotion_id"
+                        ) else {}
+                    ),
+                },
+                now=stamp,
+                conversation_id=conversation_id,
+                subject_kind="ladder",
+                subject_id=int(promotion_id),
+            )
+            self.db.execute(
+                """UPDATE ladder_promotions
+                   SET stage='approved', stage_reason=NULL, updated_at=?,
+                       approved_sha256=?, approved_at=?, prior_sha256=?,
+                       prior_document=?
+                   WHERE id=?""",
+                (
+                    stamp, approved_sha256, stamp,
+                    None if prior_sha256 is None else str(prior_sha256),
+                    prior_document, int(promotion_id),
+                ),
+            )
+            # Only the newest approved promotion per skill name keeps its
+            # prior bytes; rollback is exactly one step, so nothing it needs
+            # is pruned (LADDER_PRIOR_DOCUMENT_RETAINED = 1).
+            self.db.execute(
+                """UPDATE ladder_promotions
+                   SET prior_document=NULL, prior_document_pruned=1
+                   WHERE project_id=? AND skill_name=? AND id<>?
+                     AND prior_document IS NOT NULL""",
+                (project_id, name, int(promotion_id)),
+            )
+            if conversation_id is not None and operator_prompt:
+                self.db.execute(
+                    """INSERT INTO messages(conversation_id, created_at, role, content)
+                       VALUES (?, ?, 'user', ?)""",
+                    (int(conversation_id), stamp, str(operator_prompt)),
+                )
+        return {
+            "applied": True,
+            "promotion_id": int(promotion_id),
+            "project_id": project_id,
+            "family": family,
+            "skill_name": name,
+            "approved_sha256": approved_sha256,
+            "prior_sha256": None if prior_sha256 is None else str(prior_sha256),
+            "had_prior_document": prior_document is not None,
+            "retired_legacy": legacy is not None,
+        }
+
+    def rollback_ladder_promotion(
+        self,
+        promotion_id: int,
+        *,
+        workspace: Path,
+        actor: str = "operator",
+        conversation_id: int | None = None,
+        permission: str = "operator:interactive",
+        reason: str = "operator_rollback",
+        operator_prompt: str | None = None,
+    ) -> dict[str, Any]:
+        """Restore the exact bytes the promotion replaced, or remove the
+        document.  Operator-typed only, and exactly one step.
+
+        Deliberately **exempt from ``ledger_regressed``**: a regressed family
+        must always be able to undo, or a store can trap itself with an
+        artefact it can neither verify nor withdraw (S-4).
+
+        Refusals: ``missing``, ``not_approved``, ``not_newest``, ``pruned``,
+        ``live_digest_unexpected``, ``workspace_mismatch``,
+        ``spine_unavailable``.
+        """
+        if actor != "operator":
+            raise ValueError("skill promotions are rolled back by the operator only")
+        if not self._ladder_available():
+            return {"rolled_back": False, "reason": "spine_unavailable"}
+        row = self.db.execute(
+            "SELECT * FROM ladder_promotions WHERE id=?", (int(promotion_id),)
+        ).fetchone()
+        if row is None:
+            return {"rolled_back": False, "reason": "missing"}
+        family = str(row["family"])
+        name = str(row["skill_name"])
+        project_id = int(row["project_id"])
+
+        def refuse(code: str, **extra: Any) -> dict[str, Any]:
+            self._log_ladder_refusal(
+                "rollback", family=family, project_id=project_id, reason=code
+            )
+            return {
+                "rolled_back": False, "reason": code,
+                "promotion_id": int(promotion_id), "family": family, **extra,
+            }
+
+        if str(row["stage"]) not in LADDER_LIVE_STAGES:
+            if str(row["stage_reason"] or "") == "superseded_by_approval":
+                # A row a later approval retired is not "not approved" -- it
+                # WAS approved, and the actionable fact is which promotion
+                # took its place.  Design 3.6's one-step rule then reads
+                # correctly: roll back the newer one first.
+                newer = self.db.execute(
+                    """SELECT id FROM ladder_promotions
+                       WHERE project_id=? AND skill_name=?
+                         AND stage IN ('approved','unapproved_legacy')
+                       ORDER BY id DESC LIMIT 1""",
+                    (project_id, name),
+                ).fetchone()
+                return refuse(
+                    "not_newest",
+                    newest_promotion_id=None if newer is None else int(newer["id"]),
+                )
+            return refuse("not_approved", stage=str(row["stage"]))
+        if not self._ladder_workspace_matches(project_id, workspace):
+            return refuse("workspace_mismatch")
+        newest = self.db.execute(
+            """SELECT id FROM ladder_promotions
+               WHERE project_id=? AND skill_name=? AND stage IN ('approved','unapproved_legacy')
+               ORDER BY id DESC LIMIT 1""",
+            (project_id, name),
+        ).fetchone()
+        if newest is None or int(newest["id"]) != int(promotion_id):
+            return refuse(
+                "not_newest",
+                newest_promotion_id=None if newest is None else int(newest["id"]),
+            )
+        if bool(int(row["prior_document_pruned"] or 0)):
+            # A corrupted store fails closed rather than silently doing
+            # nothing: pruned means the bytes existed and are gone.
+            return refuse("pruned")
+        live = self._ladder_live_documents(workspace).get(name)
+        live_sha256 = None if live is None else str(live["sha256"])
+        if live_sha256 != str(row["approved_sha256"] or ""):
+            return refuse("live_digest_unexpected")
+        prior_document = row["prior_document"]
+        restored = skill_library.restore_learned_skill(
+            Path(workspace), name,
+            None if prior_document is None else bytes(prior_document),
+        )
+        _ladder_clear_catalog_cache()
+        stamp = now_iso()
+        # Design 10.7 item 32(B).  Approval retires whatever held the live
+        # slot; rolling that approval back has to undo the retirement too, or
+        # the older document is restored on disk with NO row at ``approved``
+        # -- ``approved_skills`` then serves nothing and the restored file is
+        # an orphan.  The second-approval fix created this: retiring the older
+        # row was right, and nothing put it back.
+        #
+        # Only reinstated when the bytes actually on disk are the ones that
+        # row approved.  A digest that does not match means the restored
+        # document is not what the older promotion vouched for, and
+        # reinstating it would make the row claim a document it never
+        # approved -- the exact lie the whole ladder exists to prevent.
+        reinstated = self._ladder_reinstatement_candidate(
+            project_id, name, int(promotion_id), prior_document
+        )
+        with self._immediate_transaction():
+            memory_spine.append_event(
+                self.db,
+                self._spine_key,
+                kind="ladder.rolled_back",
+                actor="operator",
+                source="operator rollback",
+                scope="global",
+                permission=permission,
+                outcome="applied",
+                payload={
+                    "at": stamp,
+                    "family": family,
+                    "project_id": project_id,
+                    "skill_name": name,
+                    "restored_sha256": (
+                        None if row["prior_sha256"] is None
+                        else str(row["prior_sha256"])
+                    ),
+                    "removed_sha256": str(row["approved_sha256"] or ""),
+                    "reason": str(reason),
+                    **(
+                        {"reinstated_promotion_id": (
+                            None if reinstated is None else int(reinstated["id"])
+                        )}
+                        if _ladder_payload_admits(
+                            "ladder.rolled_back", "reinstated_promotion_id"
+                        ) else {}
+                    ),
+                },
+                now=stamp,
+                conversation_id=conversation_id,
+                subject_kind="ladder",
+                subject_id=int(promotion_id),
+            )
+            self.db.execute(
+                """UPDATE ladder_promotions
+                   SET stage='rolled_back', stage_reason=?, updated_at=?
+                   WHERE id=?""",
+                (str(reason), stamp, int(promotion_id)),
+            )
+            if reinstated is not None:
+                # withdrawn -> approved, in the same transaction as the
+                # rollback, so the live slot is never empty and never doubly
+                # occupied: ``idx_ladder_promotions_one_live`` sees the newer
+                # row leave before the older one returns.
+                self.db.execute(
+                    """UPDATE ladder_promotions
+                       SET stage='approved', stage_reason=NULL, updated_at=?
+                       WHERE id=?""",
+                    (stamp, int(reinstated["id"])),
+                )
+            if conversation_id is not None and operator_prompt:
+                self.db.execute(
+                    """INSERT INTO messages(conversation_id, created_at, role, content)
+                       VALUES (?, ?, 'user', ?)""",
+                    (int(conversation_id), stamp, str(operator_prompt)),
+                )
+        return {
+            "rolled_back": True,
+            "promotion_id": int(promotion_id),
+            "family": family,
+            "skill_name": name,
+            "restored": bool(restored.get("restored", prior_document is not None)),
+            "removed": prior_document is None,
+            "reinstated_promotion_id": (
+                None if reinstated is None else int(reinstated["id"])
+            ),
+        }
+
+
+    def _ladder_reinstatement_candidate(
+        self,
+        project_id: int,
+        skill_name: str,
+        promotion_id: int,
+        prior_document: Any,
+    ) -> Mapping[str, Any] | None:
+        """The retired row a rollback should put back, or ``None``.
+
+        The newest row this promotion superseded, and only when the bytes just
+        restored are the ones it approved.  ``prior_document`` of the row
+        being rolled back IS the older document -- ``promote_staged_skill``
+        captured it -- so the check is a digest comparison and needs no second
+        filesystem read.
+
+        Returns ``None`` when nothing was superseded (the ordinary first-level
+        rollback), when the restored document is absent, or when the digests
+        disagree.  All three are the fail-closed direction: an artefact that
+        cannot be shown to be the one a row approved is not served.
+        """
+        if prior_document is None:
+            return None
+        candidate = self.db.execute(
+            """SELECT id, approved_sha256 FROM ladder_promotions
+               WHERE project_id=? AND skill_name=? AND id<>?
+                 AND stage='withdrawn'
+                 AND stage_reason='superseded_by_approval'
+               ORDER BY id DESC LIMIT 1""",
+            (int(project_id), str(skill_name), int(promotion_id)),
+        ).fetchone()
+        if candidate is None:
+            return None
+        restored_digest = hashlib.sha256(bytes(prior_document)).hexdigest()
+        if not hmac.compare_digest(
+            restored_digest, str(candidate["approved_sha256"] or "")
+        ):
+            return None
+        return candidate
+
+    def discard_ladder_promotion(
+        self,
+        promotion_id: int,
+        *,
+        workspace: Path,
+        actor: str = "operator",
+        conversation_id: int | None = None,
+        permission: str = "operator:interactive",
+        operator_prompt: str | None = None,
+    ) -> dict[str, Any]:
+        """Throw a staged document away.  Refuses anything not staged."""
+        if actor != "operator":
+            # Validated like approve and rollback (R-8).  Discarding is not a
+            # promotion, but it destroys an operator's candidate, and the
+            # ternary that used to stand in for this guard resolved to the
+            # same value on both branches.
+            raise ValueError(
+                "staged skill promotions are discarded by the operator only"
+            )
+        if not self._ladder_available():
+            return {"discarded": False, "reason": "spine_unavailable"}
+        row = self.db.execute(
+            "SELECT * FROM ladder_promotions WHERE id=?", (int(promotion_id),)
+        ).fetchone()
+        if row is None:
+            return {"discarded": False, "reason": "missing"}
+        if str(row["stage"]) != "staged":
+            return {
+                "discarded": False, "reason": "not_staged",
+                "promotion_id": int(promotion_id), "stage": str(row["stage"]),
+            }
+        if not self._ladder_workspace_matches(int(row["project_id"]), workspace):
+            return {
+                "discarded": False, "reason": "workspace_mismatch",
+                "promotion_id": int(promotion_id),
+            }
+        name = str(row["skill_name"])
+        try:
+            skill_library.discard_staged_skill(Path(workspace), name)
+        except (KeyError, OSError, ValueError, PermissionError):
+            # The record is authoritative; a missing staged file is exactly
+            # what `ladder verify` reconciles.
+            pass
+        stamp = now_iso()
+        with self._immediate_transaction():
+            memory_spine.append_event(
+                self.db,
+                self._spine_key,
+                kind="ladder.withdrawn",
+                actor="runtime",
+                source="operator discard",
+                scope="global",
+                permission=permission,
+                outcome="applied",
+                payload={
+                    "at": stamp,
+                    "family": str(row["family"]),
+                    "project_id": int(row["project_id"]),
+                    "skill_name": name,
+                    "withdrawn_sha256": str(row["staged_sha256"]),
+                    "reason": "operator_discard",
+                },
+                now=stamp,
+                conversation_id=conversation_id,
+                subject_kind="ladder",
+                subject_id=int(promotion_id),
+            )
+            self.db.execute(
+                """UPDATE ladder_promotions
+                   SET stage='discarded', stage_reason='operator_discard',
+                       updated_at=?
+                   WHERE id=?""",
+                (stamp, int(promotion_id)),
+            )
+            if conversation_id is not None and operator_prompt:
+                self.db.execute(
+                    """INSERT INTO messages(conversation_id, created_at, role, content)
+                       VALUES (?, ?, 'user', ?)""",
+                    (int(conversation_id), stamp, str(operator_prompt)),
+                )
+        return {
+            "discarded": True, "promotion_id": int(promotion_id),
+            "family": str(row["family"]), "skill_name": name,
+        }
+
+    def grandfather_ladder(
+        self,
+        workspace: Path,
+        *,
+        project_id: int,
+        actor: str = "runtime",
+        conversation_id: int | None = None,
+        permission: str = "runtime",
+    ) -> dict[str, Any]:
+        """Adopt pre-M4 live documents at stage ``unapproved_legacy``.
+
+        ``Memory`` has no workspace and cannot get one in M4, so this cannot
+        happen inside the migration (H-1): it is a one-time receipted pass.
+        The documents **stay live** -- no operator-visible regression -- and
+        are counted in their own bucket rather than as unverified promotions,
+        because no ladder promotion ever claimed them.  A legacy document
+        reaches the model with no proof, no gate and no ledger check until it
+        is approved or rolled back; that is the pre-M4 status quo made
+        visible, and ``ladder status`` says so in those words.
+
+        Idempotence is ``idx_ladder_promotions_one_live``, not a
+        check-then-insert: the partial unique index is what makes a duplicate
+        adoption impossible under a concurrent second pass, and the
+        ``IntegrityError`` it raises is caught here as "already grandfathered"
+        (S-8).
+        """
+        self._require_ladder()
+        if not self._ladder_workspace_matches(project_id, workspace):
+            return {"grandfathered": 0, "reason": "workspace_mismatch"}
+        try:
+            live = self._ladder_live_documents(workspace)
+        except OSError:
+            return {"grandfathered": 0, "reason": "workspace_unavailable"}
+        if not live:
+            return {"grandfathered": 0, "adopted": [], "skipped": []}
+        adopted: list[dict[str, Any]] = []
+        skipped: list[str] = []
+        # A row can be deleted by raw SQL; an event cannot.  Without consulting
+        # the spine, a deleted ``approved`` row under a live document made that
+        # document look untouched, and this pass adopted it at
+        # ``unapproved_legacy`` -- after which it reached the model with no
+        # proof, no gate and no ledger check, and never counted toward
+        # ``unverified_at_seal`` (R-9).  A name the ladder has ever named is
+        # never legacy; it is an ``orphan_document`` for the reconciler.
+        named = self._ladder_named_in_spine()
+        for name, document in sorted(live.items()):
+            family = str(document.get("family") or "")
+            if family not in learning_ladder.LADDER_READ_FAMILIES:
+                skipped.append(name)
+                continue
+            if name in named:
+                skipped.append(name)
+                continue
+            if self.ladder_promotions(project_id=int(project_id), skill_name=name):
+                skipped.append(name)
+                continue
+            stamp = now_iso()
+            digest = str(document["sha256"])
+            try:
+                with self._immediate_transaction():
+                    promotion_id = allocate_ladder_id(self.db)
+                    event_id = memory_spine.append_event(
+                        self.db,
+                        self._spine_key,
+                        kind="ladder.grandfathered",
+                        actor=actor,
+                        source="learning ladder",
+                        scope="global",
+                        permission=permission,
+                        outcome="applied",
+                        payload={
+                            "at": stamp,
+                            "family": family,
+                            "project_id": int(project_id),
+                            "skill_name": name,
+                            "approved_sha256": digest,
+                            "source": "legacy_document",
+                        },
+                        now=stamp,
+                        conversation_id=conversation_id,
+                        subject_kind="ladder",
+                        subject_id=promotion_id,
+                    )
+                    gate = self.calibration_gate(
+                        family, **learning_ladder.LADDER_GATE_THRESHOLDS
+                    ) if family in self.PREDICTION_FAMILIES else {}
+                    self.db.execute(
+                        """INSERT INTO ladder_promotions(
+                               id, created_at, updated_at, project_id, family,
+                               skill_name, stage, stage_reason,
+                               lesson_ids_json, proof_json, proof_sha256,
+                               reuse_count, context_count, epoch_id, gate_json,
+                               staged_sha256, approval_token, approved_sha256,
+                               approved_at, prior_sha256, prior_document,
+                               spine_event_id
+                           ) VALUES (?, ?, ?, ?, ?, ?, 'unapproved_legacy',
+                                     'legacy_document', '[]', ?, ?, 0, 0, NULL,
+                                     ?, ?, ?, ?, ?, NULL, NULL, ?)""",
+                        (
+                            promotion_id, stamp, stamp, int(project_id), family,
+                            name,
+                            memory_spine.canonical({"legacy": True}),
+                            self._ladder_legacy_proof_digest(),
+                            memory_spine.canonical(gate),
+                            digest, secrets.token_urlsafe(12), digest, stamp,
+                            int(event_id),
+                        ),
+                    )
+            except sqlite3.IntegrityError:
+                # The partial unique index fired: a concurrent pass adopted
+                # it first, which is the same outcome by a different route.
+                skipped.append(name)
+                continue
+            except memory_spine.SpineError as exc:
+                # Ruling 27: the agent runs this on its first workspace turn,
+                # so a spine that will not accept an append must stop the pass
+                # rather than the turn.  Nothing was adopted; the pass is
+                # idempotent and runs again once the chain is repaired.
+                self._record_degraded_write(
+                    "grandfather",
+                    f"skill={name} ({type(exc).__name__})",
+                    reason="spine_unverified",
+                )
+                return {
+                    "grandfathered": len(adopted),
+                    "adopted": adopted,
+                    "skipped": sorted(skipped + [name]),
+                    "reason": "spine_unverified",
+                }
+            adopted.append({
+                "promotion_id": int(promotion_id),
+                "skill_name": name,
+                "family": family,
+                "approved_sha256": digest,
+            })
+        return {
+            "grandfathered": len(adopted),
+            "adopted": adopted,
+            "skipped": sorted(skipped),
+        }
+
+    def _ladder_legacy_proof_digest(self) -> str:
+        """The digest over the literal legacy material.
+
+        A legacy row has no proof and says so: the digest is over
+        ``{"legacy": true}`` and nothing else, so it can never accidentally
+        equal a real proof digest and an approval that re-derives a proof will
+        always refuse ``proof_stale`` against it -- which is correct, because
+        approving a legacy document means staging a real promotion for the
+        family and approving that instead.
+        """
+        return hmac.new(
+            self._spine_key,
+            (_LADDER_PROOF_DIGEST_TAG + "\0legacy").encode("utf-8"),
+            hashlib.sha256,
+        ).hexdigest()
+
+    # --- the gate-closed half of the abstention cue (design 10.7 item 10) ---
+
+    def lesson_candidate_count(
+        self, family: str, project_id: int, *, limit: int | None = None
+    ) -> int:
+        """How many eligible lessons the closed gate is withholding, bounded.
+
+        The abstention cue must fire on ``gate-closed`` only when something
+        was actually withheld, otherwise every uncalibrated family on every
+        turn tells the model that no lesson is available -- which is true but
+        uninformative, and noise is how a cue stops being read.  This is the
+        cheap count that answers "was anything withheld", called by the Agent
+        **only when the gate is closed**, so it is never on the hot path of a
+        turn that is about to run the channel anyway.
+
+        Scope and eligibility are ``match_lessons``'s candidate stage: this
+        family, this project, a complete outcome, an active lifecycle with no
+        successor, and inside the validity window.  It deliberately does
+        **not** re-derive the provenance and control digests per row, because
+        that is O(rows) Python and this has a 1 ms budget.  It therefore
+        over-counts relative to the lane's own eligibility, and that is the
+        safe direction: an over-count can only make the cue fire on a turn
+        where the lane would also have returned nothing, while an under-count
+        would silence it on a turn where advice really was withheld.
+
+        ``limit`` caps the work: the count is taken over a ``LIMIT``
+        subquery, so a family with ten thousand lessons costs the same as one
+        with fifty.  The caller needs a boolean, not a census.
+        """
+        self._ensure_open()
+        if family not in self.PREDICTION_FAMILIES:
+            raise ValueError(f"Unknown lesson family: {family}")
+        bounded = _bounded_limit(
+            learning_ladder.LADDER_WITHHELD_CAP if limit is None else limit,
+            1_000,
+        )
+        if not bounded:
+            return 0
+        try:
+            row = self.db.execute(
+                """SELECT COUNT(*) FROM (
+                       SELECT m.id FROM memories AS m
+                       JOIN lesson_controls AS lc ON lc.memory_id = m.id
+                       WHERE m.kind='lesson' AND m.family=?
+                         AND m.outcome_status='complete'
+                         AND lc.project_id=?
+                         AND lc.lifecycle_status='active'
+                         AND lc.superseded_by IS NULL
+                         AND lc.valid_until > ?
+                       LIMIT ?)""",
+                (
+                    str(family), self._project_id(project_id), now_iso(),
+                    bounded,
+                ),
+            ).fetchone()
+        except sqlite3.DatabaseError:
+            # A count that cannot be taken must not fail the turn; zero
+            # suppresses the cue, which is the quiet direction.
+            return 0
+        return int(row[0] or 0)
+
+    def record_lesson_gate_closed(
+        self,
+        gate: Mapping[str, Any],
+        *,
+        family: str,
+        project_id: int | None,
+        withheld_candidates: int | None = None,
+    ) -> dict[str, Any]:
+        """Publish the report for a turn whose gate was closed before the lane
+        ran, and return it.
+
+        ``match_lessons`` is never called on such a turn, so without this the
+        report would still read ``idle`` from the previous turn and the cue
+        would key on stale state.  The mode stays ``idle`` -- the lane
+        genuinely did not run, and ``idle`` is an availability fact, not a
+        claim about competence -- and three keys of the shared record carry
+        what the gate said: ``gate_closed``, ``gate_closure`` (the
+        ``insufficient`` / ``calibration`` split, whose definition lives in
+        ``learning_ladder`` so the store and the skill channel cannot
+        disagree) and ``withheld_candidates``.  They are arguments to the
+        shared builder rather than keys bolted on here: a record one caller
+        widens and another does not puts the shape back in two places, which
+        is the drift the shared builder exists to prevent, and the sealed
+        holdout scorer reads this record.
+
+        The caller passes ``withheld_candidates`` from
+        ``lesson_candidate_count`` when it wants the cue to distinguish "the
+        gate is closed and there was advice it could not offer" from "the gate
+        is closed and there was nothing to offer anyway".
+        """
+        self._ensure_open()
+        record = learning_ladder.lesson_recall_record(
+            "idle",
+            family=str(family),
+            project_id=None if project_id is None else int(project_id),
+            gate_closed=not bool(gate.get("allowed")),
+            gate_closure=learning_ladder.gate_closed_reason(gate),
+            withheld_candidates=withheld_candidates,
+        )
+        self._last_lesson_recall_report = record
+        return dict(record)
+
+
+    # --- the reconciler (design 6.3) ----------------------------------------
+
+    def ladder_reconciliation_plan(
+        self, workspace: Path, *, project_id: int
+    ) -> dict[str, Any]:
+        """What ``ladder verify --apply`` would change, and a plan token.
+
+        Read-only.  The database is the record and the filesystem is
+        reconciled to it, never the other way round, so every action below
+        either moves a row to a terminal stage or adopts a document the
+        ladder has never seen.  Nothing here overwrites an operator's edit: a
+        live document whose digest has drifted is **withdrawn**, not restored.
+
+        The plan token is twelve hex characters of a keyed digest over the
+        planned actions *and* the state they were derived from, so a store
+        that moved between printing a plan and applying it produces a
+        different token and the apply refuses ``stale_plan`` -- the
+        ``graph rebuild`` and ``spine rebuild-claims`` discipline exactly.
+        """
+        self._require_ladder()
+        if not self._ladder_workspace_matches(project_id, workspace):
+            return {
+                "reason": "workspace_mismatch", "actions": [],
+                "plan_token": None, "project_id": int(project_id),
+            }
+        try:
+            live = self._ladder_live_documents(workspace)
+            staged = {
+                str(entry["name"]): entry
+                for entry in skill_library.list_staged_skills(Path(workspace))
+            }
+        except (OSError, ValueError, PermissionError):
+            # A project directory that has gone away is reported, not treated
+            # as "every document was deleted" (S-8).
+            return {
+                "reason": "workspace_unavailable", "actions": [],
+                "plan_token": None, "project_id": int(project_id),
+            }
+        rows = self.ladder_promotions(project_id=int(project_id))
+        by_name: dict[str, list[dict[str, Any]]] = {}
+        for row in rows:
+            by_name.setdefault(str(row["skill_name"]), []).append(row)
+        actions: list[dict[str, Any]] = []
+
+        # 1. Pre-M4 documents the ladder has never touched.
+        for name in sorted(self._ladder_untouched_documents(live, project_id)):
+            actions.append({
+                "action": "grandfather",
+                "skill_name": name,
+                "family": live[name].get("family"),
+                "reason": "legacy_document",
+            })
+
+        for name, entries in sorted(by_name.items()):
+            live_row = next(
+                (row for row in entries if str(row["stage"]) in LADDER_LIVE_STAGES),
+                None,
+            )
+            staged_row = next(
+                (row for row in entries if str(row["stage"]) == "staged"), None
+            )
+            document = live.get(name)
+            # 2. A row that claims the live document but has none.
+            if live_row is not None and document is None:
+                actions.append({
+                    "action": "withdraw",
+                    "promotion_id": int(live_row["id"]),
+                    "skill_name": name,
+                    "family": str(live_row["family"]),
+                    "reason": "live_document_missing",
+                })
+            # 3. A live document an operator or another path edited.  Never
+            #    silently overwritten: the row is withdrawn and the operator
+            #    keeps their bytes.
+            elif (
+                live_row is not None
+                and str(document["sha256"]) != str(live_row["approved_sha256"] or "")
+            ):
+                actions.append({
+                    "action": "withdraw",
+                    "promotion_id": int(live_row["id"]),
+                    "skill_name": name,
+                    "family": str(live_row["family"]),
+                    "reason": "live_digest_mismatch",
+                })
+            # 4. A staged row whose file is gone.  It cannot be re-staged
+            #    from the row: the record keeps the document's digest, not its
+            #    bytes, on purpose -- 32 KB per staging that nothing reads
+            #    would be a cost paid on every candidate.  The worker restages
+            #    from the proof on its next pass, which is cheap and is the
+            #    same code path that produced it.
+            if staged_row is not None and name not in staged:
+                actions.append({
+                    "action": "discard",
+                    "promotion_id": int(staged_row["id"]),
+                    "skill_name": name,
+                    "family": str(staged_row["family"]),
+                    "reason": "staged_file_missing",
+                })
+
+        # 5. A staged file with no staged row: the crash window on the other
+        #    side of staging.  Unreachable by the model either way, so the
+        #    only thing to do is tidy it.
+        for name in sorted(staged):
+            entries = by_name.get(name, [])
+            if not any(str(row["stage"]) == "staged" for row in entries):
+                actions.append({
+                    "action": "discard_file",
+                    "skill_name": name,
+                    "reason": "staged_row_missing",
+                })
+
+        # 6. ``orphan_document``: a live document the ladder has touched
+        #    before that no live row claims.  Design 7.8's first crash
+        #    direction, and R-9's deleted-row shape.
+        #
+        #    "Has touched before" is decided by the SPINE, not by the rows,
+        #    and it is the same condition ``ladder_unverified_promotions`` and
+        #    ``grandfather_ladder`` use -- one condition named once, because
+        #    the three readers disagreeing about it is what let a deleted
+        #    approved row launder a promoted artefact into the legacy bucket.
+        #    A row can be deleted; an event cannot.
+        named = self._ladder_named_in_spine()
+        for name, document in sorted(live.items()):
+            entries = by_name.get(name, [])
+            if any(str(row["stage"]) in LADDER_LIVE_STAGES for row in entries):
+                continue
+            if not entries and name not in named:
+                # Never touched at all: a pre-M4 document, which step 1
+                # grandfathers rather than treating as an orphan.
+                continue
+            actions.append({
+                "action": "orphan_document",
+                "skill_name": name,
+                "family": document.get("family"),
+                "reason": "reconciled_orphan",
+            })
+
+        # Withdrawals whose receipt never landed (item 30).  Listed, never
+        # acted on: the fix is to repair the spine, and the read path flushes
+        # the receipt itself on the next turn once it can.  ``ladder verify``
+        # shows them so an operator learns the chain needs attention.
+        pending = self.ladder_pending_withdrawals(project_id)
+        return {
+            "reason": None,
+            "project_id": int(project_id),
+            "actions": actions,
+            "pending_withdrawals": pending,
+            "plan_token": self._ladder_plan_token(project_id, actions, live, staged),
+        }
+
+    def _ladder_plan_token(
+        self,
+        project_id: int,
+        actions: Sequence[Mapping[str, Any]],
+        live: Mapping[str, Mapping[str, Any]],
+        staged: Mapping[str, Mapping[str, Any]],
+    ) -> str:
+        """Twelve hex characters binding the plan to the state it came from."""
+        material = memory_spine.canonical({
+            "project_id": int(project_id),
+            "actions": [
+                {key: value for key, value in sorted(action.items())}
+                for action in actions
+            ],
+            "live": sorted(
+                (name, str(entry["sha256"])) for name, entry in live.items()
+            ),
+            "staged": sorted(
+                (name, str(entry.get("sha256") or "")) for name, entry in staged.items()
+            ),
+        })
+        return hmac.new(
+            self._spine_key,
+            (_LADDER_PLAN_DIGEST_TAG + "\0" + material).encode("utf-8"),
+            hashlib.sha256,
+        ).hexdigest()[:12]
+
+    def reconcile_ladder(
+        self,
+        workspace: Path,
+        *,
+        project_id: int,
+        apply: bool = False,
+        plan_token: str | None = None,
+        purge_orphans: bool = False,   # retained, ignored; see the docstring
+        actor: str = "runtime",
+        conversation_id: int | None = None,
+        permission: str = "runtime",
+    ) -> dict[str, Any]:
+        """Reconcile the filesystem to the record, or say what would change.
+
+        Without ``apply`` this is exactly ``ladder_reconciliation_plan``.
+        With it, ``plan_token`` (when supplied) must equal the token the plan
+        carried, or the call refuses ``stale_plan`` and changes nothing --
+        which is the whole point of printing a token: an operator approves the
+        plan they read, not whatever the store happens to hold a minute later.
+
+        A clean run appends no event at all, the M3 ``graph rebuild``
+        precedent.  Every action that does change something appends its own
+        receipt: ``ladder.grandfathered`` for an adoption, ``ladder.withdrawn``
+        for everything else.
+
+        ``purge_orphans`` is **retained and ignored.**  It used to delete a
+        live document no row claimed; an orphan is now parked in the staging
+        root under the ``withdrawn-`` prefix unconditionally, because deleting
+        an operator's artefact to repair the store's own bookkeeping is the
+        wrong trade and because R-1 made that flag the routine exit from a
+        common state.  The keyword stays only so a caller mid-flight does not
+        break; it should be dropped from the CLI.
+        """
+        plan = self.ladder_reconciliation_plan(workspace, project_id=project_id)
+        if plan["reason"] is not None or not apply:
+            plan["applied"] = False
+            plan["changed"] = 0
+            return plan
+        if plan_token is None:
+            # R-11: every other reconciler in this family makes ``--plan``
+            # optional, and this is the one whose apply path can move an
+            # operator's live learned skill out of the live root.  The plan is
+            # what the operator read; applying without it is applying to a
+            # store they did not see.
+            return {
+                **plan, "applied": False, "changed": 0,
+                "reason": "plan_required",
+            }
+        if not hmac.compare_digest(
+            str(plan_token), str(plan["plan_token"])
+        ):
+            return {
+                **plan, "applied": False, "changed": 0, "reason": "stale_plan",
+            }
+        changed = 0
+        performed: list[dict[str, Any]] = []
+        for action in plan["actions"]:
+            kind = str(action["action"])
+            if kind == "grandfather":
+                result = self.grandfather_ladder(
+                    workspace, project_id=int(project_id), actor=actor,
+                    conversation_id=conversation_id, permission=permission,
+                )
+                changed += int(result.get("grandfathered") or 0)
+                performed.append({**action, "done": bool(result.get("grandfathered"))})
+            elif kind in {"withdraw", "discard"}:
+                result = self.withdraw_ladder_promotion(
+                    int(action["promotion_id"]), reason=str(action["reason"]),
+                    workspace=workspace, actor=actor,
+                    conversation_id=conversation_id, permission=permission,
+                )
+                changed += int(bool(result.get("withdrawn")))
+                performed.append({**action, "done": bool(result.get("withdrawn"))})
+            elif kind == "discard_file":
+                done = True
+                try:
+                    skill_library.discard_staged_skill(
+                        Path(workspace), str(action["skill_name"])
+                    )
+                except (KeyError, OSError, ValueError, PermissionError):
+                    done = False
+                changed += int(done)
+                performed.append({**action, "done": done})
+            elif kind == "orphan_document":
+                # A live document no row claims is PARKED, never deleted and
+                # never left in place (ruling 16 / the correctness review):
+                # leaving it is R-1's uncountable orphan, and deleting it
+                # throws away an operator's artefact to fix the store's own
+                # bookkeeping.  The bytes move to the staging root under the
+                # ``withdrawn-`` prefix, where nothing model-facing can reach
+                # them and a new promotion can supersede them.
+                #
+                # Item 35: when the orphan is a DELETED APPROVED row -- an
+                # approving event exists but no row and no withdrawal -- the
+                # reconciler also writes the ``ladder.withdrawn`` receipt the
+                # vanished row can no longer carry, keeping the promise this
+                # method's docstring makes and stopping the parked orphan from
+                # lingering as a spine-derived pending withdrawal.  A
+                # grandfathered orphan (a ``ladder.grandfathered`` event, no
+                # ``ladder.approved``) has no such receipt to write and is not
+                # flagged by ``_ladder_orphan_pending`` either, so it is parked
+                # exactly as before.
+                orphan_name = str(action["skill_name"])
+                approval = self._ladder_orphan_approval(orphan_name)
+                done = False
+                receipt_deferred = False
+                try:
+                    parked = skill_library.withdraw_learned_skill(
+                        Path(workspace), orphan_name
+                    )
+                    done = bool(parked.get("withdrawn"))
+                    _ladder_clear_catalog_cache()
+                except (KeyError, OSError, ValueError, PermissionError):
+                    done = False
+                if done and approval is not None:
+                    receipt_deferred = not self._append_orphan_withdrawal(
+                        int(approval["promotion_id"]), approval["family"],
+                        int(project_id), orphan_name,
+                        approval["approved_sha256"],
+                    )
+                changed += int(done)
+                performed.append({
+                    **action, "done": done,
+                    "note": (
+                        (
+                            "parked in the staging root as withdrawn-"
+                            + (
+                                "; receipt deferred, rerun ladder verify"
+                                if receipt_deferred else ""
+                            )
+                        )
+                        if done else "could not be parked; rerun ladder verify"
+                    ),
+                })
+        return {
+            **plan,
+            "applied": True,
+            "changed": changed,
+            "actions": performed,
+        }
+
     def open_prediction_count(self) -> int:
         self._ensure_open()
         return int(
@@ -5103,15 +10246,59 @@ class Memory:
                     f"UPDATE {table} SET conversation_id=NULL WHERE conversation_id=?",
                     (conversation_id,),
                 )
+            messages_removed = int(
+                self.db.execute(
+                    "SELECT COUNT(*) FROM messages WHERE conversation_id=?",
+                    (conversation_id,),
+                ).fetchone()[0]
+            )
+            memory_spine.fts_secure_delete(self.db, "message_fts")
+            # The compaction records go with the transcript they replaced, and
+            # they go BEFORE it: the span table is the only copy of those rows,
+            # so leaving it behind would turn a deleted conversation into an
+            # unreachable one rather than an erased one (design 2.10 item 1).
+            # Child first -- ``memory_compacted_spans`` holds the foreign key.
+            milestones_removed = 0
+            spans_removed = 0
+            if self._compaction_ready:
+                spans_removed = int(self.db.execute(
+                    "DELETE FROM memory_compacted_spans WHERE conversation_id=?",
+                    (conversation_id,),
+                ).rowcount or 0)
+                milestones_removed = int(self.db.execute(
+                    "DELETE FROM memory_milestones WHERE conversation_id=?",
+                    (conversation_id,),
+                ).rowcount or 0)
             for table in (
                 "training_examples",
                 "conversation_goals",
                 "presence_jobs",
+                "memory_fact_proposals",
                 "messages",
             ):
                 self.db.execute(
                     f"DELETE FROM {table} WHERE conversation_id=?",
                     (conversation_id,),
+                )
+            if self._spine_ready:
+                memory_spine.append_event(
+                    self.db,
+                    self._spine_key,
+                    kind="conversation.deleted",
+                    actor="operator",
+                    source="conversation deletion",
+                    scope=f"project:{int(row['project_id'])}" if row["project_id"] else "global",
+                    permission="operator",
+                    outcome="applied",
+                    payload={
+                        "messages_removed": messages_removed,
+                        "milestones_removed": milestones_removed,
+                        "spans_removed": spans_removed,
+                    },
+                    now=stamp,
+                    conversation_id=int(conversation_id),
+                    subject_kind="conversation",
+                    subject_id=int(conversation_id),
                 )
             deleted = self.db.execute(
                 "DELETE FROM conversations WHERE id=?",
@@ -5227,17 +10414,19 @@ class Memory:
         ).fetchall()
         return [dict(row) for row in rows]
 
-    def add_message(self, conversation_id: int, role: str, content: str) -> None:
+    def add_message(self, conversation_id: int, role: str, content: str) -> int:
+        """Persist one transcript row and return its id."""
         if role not in {"user", "assistant"}:
             raise ValueError("Persisted message role must be user or assistant")
         content = redact_secrets(str(content))
         if len(content) > 100_000:
             content = content[:99_950] + "\n...[message clipped before persistence]"
         with self._immediate_transaction():
-            self.db.execute(
+            cursor = self.db.execute(
                 "INSERT INTO messages(conversation_id, created_at, role, content) VALUES (?, ?, ?, ?)",
                 (conversation_id, now_iso(), role, content),
             )
+            message_id = int(cursor.lastrowid)
             if role == "user":
                 postal = _EXPLICIT_USER_POSTAL_CODE.search(content)
                 if postal is not None:
@@ -5248,7 +10437,153 @@ class Memory:
                         authority="operator",
                         confidence=1.0,
                         stamp=now_iso(),
+                        actor="runtime",
+                        conversation_id=int(conversation_id),
+                        permission="runtime:transcript",
                     )
+        return message_id
+
+    def record_fact_proposal(
+        self,
+        conversation_id: int,
+        assistant_message_id: int,
+        project_id: int,
+        command: str,
+        *,
+        assisted: bool,
+        reply_asked_question: bool,
+    ) -> int:
+        """Keep the runtime's own record of a project-fact proposal it showed.
+
+        A confirmation ("store it") is resolved against this record, never
+        against assistant text, so a reply that imitates the receipt can never
+        be confirmed.  The command must be a valid governed command.
+        """
+        text = str(command).strip()
+        if parse_explicit_project_fact(text) is None:
+            raise ValueError("A fact proposal must be an exact governed command")
+        for name, value in (
+            ("conversation_id", conversation_id),
+            ("assistant_message_id", assistant_message_id),
+        ):
+            if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+                raise ValueError(f"{name} must be a positive integer")
+        normalized_project = self._project_id(project_id)
+        # The digest is salted per proposal so that, after an erase blanks the
+        # command, a low-entropy value (a port number) cannot be confirmed by
+        # hashing guesses against a surviving digest.
+        salt = secrets.token_hex(16)
+        digest = hashlib.sha256(f"{salt}\n{text}".encode("utf-8")).hexdigest()
+        with self._immediate_transaction():
+            cursor = self.db.execute(
+                """INSERT INTO memory_fact_proposals(
+                       created_at, conversation_id, assistant_message_id, project_id,
+                       command, command_sha256, command_salt, assisted,
+                       reply_asked_question, status
+                   ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'shown')""",
+                (
+                    now_iso(),
+                    int(conversation_id),
+                    int(assistant_message_id),
+                    normalized_project,
+                    text,
+                    digest,
+                    salt,
+                    int(bool(assisted)),
+                    int(bool(reply_asked_question)),
+                ),
+            )
+            return int(cursor.lastrowid)
+
+    def fact_proposal_digest(self, proposal_id: int) -> str | None:
+        """The salted digest recorded for a shown proposal."""
+        self._ensure_open()
+        row = self.db.execute(
+            "SELECT command_sha256 FROM memory_fact_proposals WHERE id=?",
+            (int(proposal_id),),
+        ).fetchone()
+        return str(row[0]) if row is not None else None
+
+    def link_fact_proposal_event(self, proposal_id: int, event_id: int) -> None:
+        """Remember which spine event receipted a shown proposal, so a later
+        confirmation can point back at exactly that event."""
+        with self._immediate_transaction():
+            self.db.execute(
+                "UPDATE memory_fact_proposals SET spine_event_id=? WHERE id=? AND spine_event_id IS NULL",
+                (int(event_id), int(proposal_id)),
+            )
+
+    @staticmethod
+    def claim_key_for(subject: str, predicate: str) -> str:
+        """The claim identity a governed command would write under."""
+        return Memory._claim_identity(subject, predicate)
+
+    def pending_fact_proposal(self, conversation_id: int) -> dict[str, Any] | None:
+        """The proposal shown by the last message of a conversation, if any.
+
+        Returns ``None`` unless the newest transcript row of the conversation
+        is the assistant message that carried the proposal and a user message
+        precedes it; a crashed, cancelled, or ordinary turn in between ends
+        the offer.
+        """
+        self._ensure_open()
+        if (
+            isinstance(conversation_id, bool)
+            or not isinstance(conversation_id, int)
+            or conversation_id <= 0
+        ):
+            return None
+        row = self.db.execute(
+            """SELECT id, assistant_message_id, project_id, command, assisted,
+                      reply_asked_question, command_sha256, spine_event_id
+               FROM memory_fact_proposals
+               WHERE conversation_id=? AND status='shown'
+               ORDER BY id DESC LIMIT 1""",
+            (conversation_id,),
+        ).fetchone()
+        if row is None:
+            return None
+        newest = self.db.execute(
+            "SELECT MAX(id) FROM messages WHERE conversation_id=?",
+            (conversation_id,),
+        ).fetchone()[0]
+        if newest is None or int(newest) != int(row["assistant_message_id"]):
+            return None
+        previous = self.db.execute(
+            """SELECT content FROM messages
+               WHERE conversation_id=? AND id<? AND role='user'
+               ORDER BY id DESC LIMIT 1""",
+            (conversation_id, int(row["assistant_message_id"])),
+        ).fetchone()
+        if previous is None:
+            return None
+        return {
+            "id": int(row["id"]),
+            "assistant_message_id": int(row["assistant_message_id"]),
+            "project_id": int(row["project_id"]),
+            "command": str(row["command"]),
+            "assisted": bool(row["assisted"]),
+            "reply_asked_question": bool(row["reply_asked_question"]),
+            "previous_user_text": str(previous["content"]),
+            "command_sha256": str(row["command_sha256"]),
+            "spine_event_id": (
+                int(row["spine_event_id"]) if row["spine_event_id"] is not None else None
+            ),
+        }
+
+    def resolve_fact_proposal(
+        self, proposal_id: int, status: str, *, claim_id: int | None = None
+    ) -> None:
+        """Mark a shown proposal confirmed, refused, or expired (once)."""
+        if status not in {"confirmed", "refused", "expired"}:
+            raise ValueError("Unknown fact proposal status")
+        with self._immediate_transaction():
+            self.db.execute(
+                """UPDATE memory_fact_proposals
+                   SET status=?, resolved_at=?, claim_id=?
+                   WHERE id=? AND status='shown'""",
+                (status, now_iso(), claim_id, int(proposal_id)),
+            )
 
     def recent_messages(self, conversation_id: int, limit: int = 24) -> list[dict[str, str]]:
         self._ensure_open()
@@ -6683,8 +12018,14 @@ class Memory:
         evidence_rows: Sequence[Mapping[str, Any]],
         *,
         visible_scopes: set[str],
+        allow_superseded: bool = False,
     ) -> bool:
-        """Validate one already-fetched claim without issuing database reads."""
+        """Validate one already-fetched claim without issuing database reads.
+
+        ``allow_superseded`` admits retired versions for the temporal history
+        read; every other check (canonical backing row, evidence, privacy)
+        applies to them unchanged.
+        """
         if memory_row is None or str(memory_row["memory_kind"] or "") != "claim":
             return False
         row_keys = set(row.keys())
@@ -6705,7 +12046,11 @@ class Memory:
         except ValueError:
             return False
         status = str(row["status"] or "")
-        if status not in {"active", "disputed"}:
+        admitted_statuses = (
+            {"active", "disputed", "superseded"}
+            if allow_superseded else {"active", "disputed"}
+        )
+        if status not in admitted_statuses:
             return False
         scope = str(row["scope"] or "")
         if scope not in visible_scopes:
@@ -6734,13 +12079,16 @@ class Memory:
             or memory_created_at != created_at
         ):
             return False
-        canonical_content = _claim_memory_content(
-            subject, predicate, value, scope, created_at
-        )
-        if str(memory_row["memory_content"] or "") != canonical_content:
+        if str(memory_row["memory_content"] or "") not in backing_content_variants(
+            subject, predicate, value, scope, created_at,
+            cls._claim_identity(subject, predicate),
+        ):
             # Claims are returned from their structured fields.  If either the
             # structured row or its paired memory was modified independently,
             # fail closed instead of trusting a non-canonical reconstruction.
+            # Both legal variants are recomputed from this row alone, so a
+            # claim whose backing content carries the collision suffix stays
+            # recallable instead of reading as a corrupt projection.
             return False
         if _claim_has_sensitive_key(subject, predicate):
             # A structured claim whose subject/predicate pair names a
@@ -6816,6 +12164,7 @@ class Memory:
         rows: Sequence[Mapping[str, Any]],
         *,
         project_id: int | None = None,
+        allow_superseded: bool = False,
     ) -> set[int]:
         """Validate a bounded claim set with constant-size batched SQL reads."""
         if not rows:
@@ -6877,7 +12226,7 @@ class Memory:
             cached_eligible: Any | None = None
             if cache is not None:
                 cache_key = _claim_ordered_cache_key(
-                    "claim-eligibility",
+                    "claim-eligibility-history" if allow_superseded else "claim-eligibility",
                     (
                         tuple(sorted(visible_scopes)),
                         tuple(
@@ -6905,6 +12254,7 @@ class Memory:
                     memory_row,
                     claim_evidence,
                     visible_scopes=visible_scopes,
+                    allow_superseded=allow_superseded,
                 )
             )
             if cache is not None and cache_key is not None and cached_eligible is None:
@@ -7448,6 +12798,78 @@ class Memory:
             report["abstained"] = False
         return rows, frozenset(collected_cache_safe_ids)
 
+    def claim_recall_report(self) -> dict[str, Any]:
+        """Return a copy of the diagnostic record for the most recent claim-lane
+        recall (``current_claims``).
+
+        ``mode`` is ``idle``, ``screened``, ``project-unavailable``, ``or`` /
+        ``all-terms`` (the discovery stage that produced the pool), or one of
+        the fail-closed abstentions ``overflow``, ``identity-overflow``,
+        ``identity-conflict``, ``ambiguous``, ``corrupt-strongest``, ``error``.
+        ``abstained`` is true whenever the lane refused to answer, so an empty
+        result is never silent.
+        """
+        return dict(self._last_claim_recall_report)
+
+    def _abstain_claims(
+        self,
+        mode: str,
+        reason: str,
+        *,
+        candidates: int | None = None,
+    ) -> list[dict[str, Any]]:
+        report = self._last_claim_recall_report
+        report["mode"] = str(mode)
+        report["abstained"] = True
+        report["reason"] = str(reason)
+        if candidates is not None:
+            report["candidates"] = int(candidates)
+        return []
+
+    def _record_claim_clock_reads(self) -> None:
+        """Persist pending claim-clock read counters without blocking a read.
+
+        The read itself ran in a deferred snapshot.  Telemetry is written in a
+        separate short immediate transaction; if a concurrent writer holds the
+        lock past the short timeout the counters for this read are dropped and
+        counted, never turned into an error for the caller.
+        """
+        updates = self._pending_claim_clock_updates
+        self._pending_claim_clock_updates = []
+        if not updates:
+            return
+        if self.db.in_transaction:
+            # Never upgrade a caller's deferred snapshot into a write.
+            self._dropped_claim_clock_reads += len(updates)
+            return
+        restore_timeout = int(
+            getattr(self, "_busy_timeout_ms", DEFAULT_BUSY_TIMEOUT_MS)
+        )
+        try:
+            self.db.execute(f"PRAGMA busy_timeout={_CLAIM_CLOCK_WRITE_TIMEOUT_MS}")
+            try:
+                self.db.execute("BEGIN IMMEDIATE")
+                self.db.executemany(
+                    """INSERT INTO memory_claim_clock_statistics(
+                           claim_id, reads, stale_reads, last_effective_confidence,
+                           last_clock_status, last_read_at
+                       ) VALUES (?, 1, ?, ?, ?, ?)
+                       ON CONFLICT(claim_id) DO UPDATE SET
+                           reads=reads+1,
+                           stale_reads=stale_reads+excluded.stale_reads,
+                           last_effective_confidence=excluded.last_effective_confidence,
+                           last_clock_status=excluded.last_clock_status,
+                           last_read_at=excluded.last_read_at""",
+                    updates,
+                )
+                self.db.commit()
+            except (sqlite3.OperationalError, sqlite3.IntegrityError):
+                if self.db.in_transaction:
+                    self.db.rollback()
+                self._dropped_claim_clock_reads += len(updates)
+        finally:
+            self.db.execute(f"PRAGMA busy_timeout={restore_timeout}")
+
     def recall_report(self) -> dict[str, Any]:
         """Return a copy of the diagnostic record for the most recent lexical
         recall attempt on this store (``search`` or ``hybrid_memory_search``).
@@ -7470,50 +12892,142 @@ class Memory:
         *,
         origin: str,
         eligible: bool,
+        actor: str = "runtime",
+        conversation_id: int | None = None,
+        permission: str = "runtime",
     ) -> str:
         safe_content = redact_secrets(str(content).strip())[:8_000]
         if not safe_content:
             raise ValueError("Memory content must not be empty")
         safe_kind = _validated_nonsecret_metadata(kind, "Memory kind")[:40]
+        if not safe_kind:
+            raise ValueError("Memory kind must not be empty")
         if safe_kind in {"lesson", "claim"}:
             raise ValueError("Lessons and claims require their dedicated provenance APIs")
         safe_source = (
             redact_secrets(str(source).strip())[:2_000] if source else None
         )
+        context = self._spine_context(actor, conversation_id, permission)
         with self._immediate_transaction():
-            self.db.execute(
-                """INSERT OR IGNORE INTO memories(created_at, kind, content, source)
-                   VALUES (?, ?, ?, ?)""",
-                (now_iso(), safe_kind, safe_content, safe_source),
-            )
+            stamp = now_iso()
             row = self.db.execute(
                 """SELECT id, source FROM memories
                    WHERE kind=? AND content=?""",
                 (safe_kind, safe_content),
             ).fetchone()
-            if row is None:
-                raise RuntimeError("Memory could not be persisted")
+            created = row is None
+            if created:
+                # Check-then-insert under the write lock (design 12.6 item 1):
+                # only an absent row allocates an id and appends
+                # ``memory.created`` before the insert, which the lineage
+                # trigger requires.
+                if self._spine_ready:
+                    memory_id = memory_spine.allocate_memory_id(self.db)
+                    event_id = self._append_memory_event(
+                        "memory.created",
+                        memory_id=memory_id,
+                        payload=memory_spine.memory_event_payload(
+                            self._spine_key,
+                            {
+                                "kind": safe_kind, "content": safe_content,
+                                "source": safe_source, "family": None,
+                                "outcome_status": None, "reflection_id": None,
+                            },
+                            origin=origin,
+                            eligible=bool(eligible),
+                        ),
+                        stamp=stamp,
+                        source=safe_source,
+                        context=context,
+                    )
+                    self.db.execute(
+                        """INSERT INTO memories(
+                               id, created_at, kind, content, source, spine_event_id
+                           ) VALUES (?, ?, ?, ?, ?, ?)""",
+                        (memory_id, stamp, safe_kind, safe_content, safe_source, event_id),
+                    )
+                else:
+                    self.db.execute(
+                        """INSERT INTO memories(created_at, kind, content, source)
+                           VALUES (?, ?, ?, ?)""",
+                        (stamp, safe_kind, safe_content, safe_source),
+                    )
+                row = self.db.execute(
+                    """SELECT id, source FROM memories
+                       WHERE kind=? AND content=?""",
+                    (safe_kind, safe_content),
+                ).fetchone()
+                if row is None:
+                    raise RuntimeError("Memory could not be persisted")
+            memory_id = int(row["id"])
             stored_source = None if row["source"] is None else str(row["source"])
             if eligible and stored_source != safe_source:
                 raise ValueError(
                     "Existing memory text has different source provenance"
                 )
             existing = self.db.execute(
-                "SELECT eligible FROM ordinary_memory_provenance WHERE memory_id=?",
-                (int(row["id"]),),
+                "SELECT origin, eligible FROM ordinary_memory_provenance WHERE memory_id=?",
+                (memory_id,),
             ).fetchone()
+            before = (
+                None if existing is None
+                else (str(existing["origin"]), bool(int(existing["eligible"])))
+            )
             # A later unverified duplicate must never downgrade a trusted row.
             if eligible or existing is None or not bool(int(existing["eligible"])):
                 self._set_ordinary_memory_provenance_locked(
-                    int(row["id"]), origin=origin, eligible=eligible
+                    memory_id, origin=origin, eligible=eligible
                 )
-            self._sync_learning_quality_quarantine_locked(int(row["id"]))
+            if not created and self._spine_ready:
+                # A duplicate write is receipted with the provenance it left
+                # behind: ``applied`` only when the provenance row changed
+                # (a duplicate ``remember_verified`` upgrades eligibility in
+                # place), ``noop`` otherwise.
+                current = self.db.execute(
+                    "SELECT origin, eligible FROM ordinary_memory_provenance WHERE memory_id=?",
+                    (memory_id,),
+                ).fetchone()
+                after = (
+                    None if current is None
+                    else (str(current["origin"]), bool(int(current["eligible"])))
+                )
+                self._append_memory_event(
+                    "memory.reasserted",
+                    memory_id=memory_id,
+                    payload={
+                        "origin": None if after is None else after[0],
+                        "eligible": None if after is None else after[1],
+                        "content_digest": memory_spine.content_digest(
+                            self._spine_key, safe_content
+                        ),
+                    },
+                    stamp=stamp,
+                    source=safe_source,
+                    context=context,
+                    outcome="applied" if after != before else "noop",
+                )
+            self._sync_learning_quality_quarantine_locked(memory_id)
         return "Stored in long-term memory."
 
-    def remember(self, content: str, kind: str = "fact", source: str | None = None) -> str:
-        """Store an auditable but recall-ineligible ordinary memory by default."""
+    def remember(
+        self,
+        content: str,
+        kind: str = "fact",
+        source: str | None = None,
+        *,
+        actor: str = "runtime",
+        conversation_id: int | None = None,
+        permission: str = "runtime",
+    ) -> str:
+        """Store an auditable but recall-ineligible ordinary memory by default.
+
+        ``actor`` / ``permission`` / ``conversation_id`` are the spine receipt
+        context (the model's memory tool passes ``model`` and its admitting
+        gate); they never affect recall eligibility.
+        """
         return self._remember_ordinary(
-            content, kind, source, origin="unverified", eligible=False
+            content, kind, source, origin="unverified", eligible=False,
+            actor=actor, conversation_id=conversation_id, permission=permission,
         )
 
     def remember_verified(
@@ -7523,10 +13037,14 @@ class Memory:
         source: str | None = None,
         *,
         origin: str,
+        actor: str = "runtime",
+        conversation_id: int | None = None,
+        permission: str = "runtime",
     ) -> str:
         """Store ordinary memory only through an explicit trusted write path."""
         return self._remember_ordinary(
-            content, kind, source, origin=origin, eligible=True
+            content, kind, source, origin=origin, eligible=True,
+            actor=actor, conversation_id=conversation_id, permission=permission,
         )
 
     @staticmethod
@@ -8348,6 +13866,67 @@ class Memory:
             + int(prediction_cursor.rowcount)
         )
 
+    def _graph_claim_row_locked(self, claim_id: int) -> Any:
+        """The one claim-row shape ``memory_graph.project_claim`` consumes.
+
+        The write hook and the migration-48 backfill read the same columns in
+        the same order, so a claim projected by a live write and the same
+        claim projected by a rebuild cannot differ.
+        """
+        columns = ", ".join(memory_graph.CLAIM_ROW_COLUMNS)
+        return self.db.execute(
+            f"SELECT {columns} FROM memory_claims WHERE id=?",
+            (int(claim_id),),
+        ).fetchone()
+
+    @staticmethod
+    def _claim_scope_filter(
+        visible_scopes: Sequence[str],
+        project_scope: str | None,
+        alias: str = "c",
+        *,
+        index_scope: bool = True,
+    ) -> tuple[str, list[Any]]:
+        """The visible-scope filter with project shadowing, for a table
+        aliased ``alias``.
+
+        Project facts override a global claim identity before lexical
+        relevance, ranking, or candidate caps are applied. Otherwise a query
+        that matches only the old global value could omit the project row and
+        leak a contradicted global fact into its prompt.
+
+        The claims lane and the graph channel share this one predicate so the
+        two can never diverge: ``alias`` is ``c`` for ``memory_claims`` and
+        ``e`` for ``memory_graph_edges``, which copies the same ``scope`` and
+        ``claim_key`` columns for exactly this reason.
+
+        ``index_scope=False`` prefixes the scope test with SQLite's ``+``,
+        which changes no semantics but stops the planner choosing the scope
+        index for it.  A caller that already selects a handful of rows by
+        primary key wants the rowid path: with the scope index driving, the
+        chain-row load searched the whole scope and filtered twelve rows out
+        of 20,005 (2.86 ms); on the rowid it is 0.025 ms for identical rows.
+        The lane's own read leaves it True -- there the scope index *is* the
+        right driver, because nothing narrower is available.
+        """
+        scope_placeholders = ",".join("?" for _scope in visible_scopes)
+        prefix = "" if index_scope else "+"
+        scope_filter_sql = f"{prefix}{alias}.scope IN ({scope_placeholders})"
+        scope_filter_parameters: list[Any] = [*visible_scopes]
+        if project_scope is not None:
+            scope_filter_sql += f"""
+              AND (
+                  {alias}.scope=?
+                  OR NOT EXISTS (
+                      SELECT 1 FROM memory_claims AS project_claim
+                      WHERE project_claim.scope=?
+                        AND project_claim.claim_key={alias}.claim_key
+                        AND project_claim.status IN ('active', 'disputed')
+                  )
+              )"""
+            scope_filter_parameters.extend((project_scope, project_scope))
+        return scope_filter_sql, scope_filter_parameters
+
     @staticmethod
     def _claim_identity(subject: str, predicate: str) -> str:
         canonical = json.dumps(
@@ -8451,6 +14030,101 @@ class Memory:
         ):
             self._refit_claim_volatility_locked(normalized, stamp)
 
+    def _spine_context(
+        self,
+        actor: str,
+        conversation_id: int | None,
+        permission: str,
+    ) -> dict[str, Any]:
+        return {
+            "actor": actor if actor in memory_spine.SPINE_ACTORS else "runtime",
+            "conversation_id": (
+                int(conversation_id)
+                if isinstance(conversation_id, int) and not isinstance(conversation_id, bool)
+                and 0 < conversation_id <= 9_223_372_036_854_775_807
+                else None
+            ),
+            "permission": str(permission or "runtime")[:80],
+        }
+
+    def _append_memory_event(
+        self,
+        kind: str,
+        *,
+        memory_id: int,
+        payload: Mapping[str, Any],
+        stamp: str,
+        source: str | None,
+        context: Mapping[str, Any],
+        outcome: str = "applied",
+    ) -> int:
+        """Append one ``memory.*`` / ``lesson.*`` event inside the caller's
+        write transaction and return its id.
+
+        ``memories`` has no scope column, so every memory event is global; a
+        claim's backing row carries the claim's own event instead and never
+        receives one of these.  The actor is a receipt only: recall
+        eligibility is decided by ``ordinary_memory_provenance``.
+        """
+        return memory_spine.append_event(
+            self.db,
+            self._spine_key,
+            kind=kind,
+            actor=str(context["actor"]),
+            source=str(source or ""),
+            scope="global",
+            permission=str(context["permission"]),
+            outcome=outcome,
+            payload=payload,
+            now=stamp,
+            conversation_id=context["conversation_id"],
+            subject_kind="memory",
+            subject_id=int(memory_id),
+        )
+
+    def _append_claim_after_image_event(
+        self,
+        claim_id: int,
+        *,
+        kind: str,
+        stamp: str,
+        reason: str,
+        related_claim_id: int | None,
+        actor: str,
+        conversation_id: int | None,
+        permission: str,
+    ) -> int | None:
+        """Append a status/reassert event carrying the claim's after-image so the
+        projection can be rebuilt from the spine alone.  Only when the spine
+        exists (legacy migrations write claims before it does)."""
+        if not self._spine_ready:
+            return None
+        row = self.db.execute(
+            """SELECT id, scope, claim_key, status, valid_until, confidence, authority, source
+               FROM memory_claims WHERE id=?""",
+            (claim_id,),
+        ).fetchone()
+        if row is None:
+            return None
+        context = self._spine_context(actor, conversation_id, permission)
+        return memory_spine.append_event(
+            self.db,
+            self._spine_key,
+            kind=kind,
+            actor=context["actor"],
+            source=str(row["source"]),
+            scope=str(row["scope"]),
+            permission=context["permission"],
+            outcome="applied",
+            payload=memory_spine.claim_status_payload(
+                row, at=stamp, reason=reason, related_claim_id=related_claim_id
+            ),
+            now=stamp,
+            conversation_id=context["conversation_id"],
+            subject_kind="claim",
+            subject_id=int(claim_id),
+        )
+
     def _set_claim_status_locked(
         self,
         claim_id: int,
@@ -8459,6 +14133,10 @@ class Memory:
         stamp: str,
         reason: str,
         related_claim_id: int | None = None,
+        actor: str = "runtime",
+        conversation_id: int | None = None,
+        permission: str = "runtime",
+        spine_kind: str | None = None,
     ) -> None:
         row = self.db.execute(
             "SELECT status FROM memory_claims WHERE id=?", (claim_id,)
@@ -8471,12 +14149,37 @@ class Memory:
                SET status=?, valid_until=?, updated_at=? WHERE id=?""",
             (status, valid_until, stamp, claim_id),
         )
-        self.db.execute(
-            """INSERT INTO memory_claim_events(
-                   claim_id, created_at, status, reason, related_claim_id
-               ) VALUES (?, ?, ?, ?, ?)""",
-            (claim_id, stamp, status, reason[:200], related_claim_id),
+        if self._graph_ready:
+            # The edge copies the claim's status and interval so traversal can
+            # rank current over superseded without a join (design 4.5).  A
+            # claim the projection excluded has no edge and this is a no-op.
+            memory_graph.update_edge(
+                self.db, claim_id, status=status, valid_until=valid_until
+            )
+        kind = spine_kind or {
+            "active": "claim.reasserted",
+            "disputed": "claim.disputed",
+            "superseded": "claim.superseded",
+        }[status]
+        spine_event_id = self._append_claim_after_image_event(
+            claim_id, kind=kind, stamp=stamp, reason=reason,
+            related_claim_id=related_claim_id, actor=actor,
+            conversation_id=conversation_id, permission=permission,
         )
+        if self._spine_ready:
+            self.db.execute(
+                """INSERT INTO memory_claim_events(
+                       claim_id, created_at, status, reason, related_claim_id, spine_event_id
+                   ) VALUES (?, ?, ?, ?, ?, ?)""",
+                (claim_id, stamp, status, reason[:200], related_claim_id, spine_event_id),
+            )
+        else:
+            self.db.execute(
+                """INSERT INTO memory_claim_events(
+                       claim_id, created_at, status, reason, related_claim_id
+                   ) VALUES (?, ?, ?, ?, ?)""",
+                (claim_id, stamp, status, reason[:200], related_claim_id),
+            )
 
     def _remember_claim_locked(
         self,
@@ -8490,8 +14193,17 @@ class Memory:
         stamp: str,
         source_identity: str | None = None,
         scope: str = "global",
+        actor: str = "runtime",
+        conversation_id: int | None = None,
+        permission: str = "runtime",
     ) -> int:
         scope = _validated_claim_scope(scope)
+        _set_status = functools.partial(
+            self._set_claim_status_locked,
+            actor=actor,
+            conversation_id=conversation_id,
+            permission=permission,
+        )
         if scope == "global" and _PROJECT_CLAIM_RECORD_PREFIX in (
             f"{subject} {predicate}: {value}".casefold()
         ):
@@ -8609,6 +14321,17 @@ class Memory:
                     int(selected["memory_id"]),
                 ),
             )
+            if self._graph_ready:
+                memory_graph.update_edge(
+                    self.db, claim_id,
+                    confidence=combined_confidence,
+                    authority=promoted_authority,
+                )
+            self._append_claim_after_image_event(
+                claim_id, kind="claim.reasserted", stamp=stamp,
+                reason="matching value asserted again", related_claim_id=None,
+                actor=actor, conversation_id=conversation_id, permission=permission,
+            )
             same_source_reassertion = claim_id in same_source_claim_ids
             if same_source_reassertion:
                 competing_weight = max(
@@ -8623,7 +14346,7 @@ class Memory:
                     or new_weight > competing_weight
                     or (authority == "operator" and new_weight >= competing_weight)
                 )
-                self._set_claim_status_locked(
+                _set_status(
                     claim_id,
                     "active" if promoted else "disputed",
                     stamp=stamp,
@@ -8632,14 +14355,14 @@ class Memory:
                 for row in same_source_live:
                     other_id = int(row["id"])
                     if other_id != claim_id:
-                        self._set_claim_status_locked(
+                        _set_status(
                             other_id, "superseded", stamp=stamp,
                             reason="superseded by a newer version from the same source",
                             related_claim_id=claim_id,
                         )
                 if promoted:
                     for row in competing_live:
-                        self._set_claim_status_locked(
+                        _set_status(
                             int(row["id"]), "superseded", stamp=stamp,
                             reason="superseded by stronger matching claim",
                             related_claim_id=claim_id,
@@ -8650,7 +14373,7 @@ class Memory:
                             _CLAIM_AUTHORITY_WEIGHT[str(row["authority"])]
                             == new_weight
                         ):
-                            self._set_claim_status_locked(
+                            _set_status(
                                 int(row["id"]), "disputed", stamp=stamp,
                                 reason="equal-authority values conflict",
                                 related_claim_id=claim_id,
@@ -8658,36 +14381,35 @@ class Memory:
             elif new_weight > strongest_weight or (
                 authority == "operator" and new_weight >= strongest_weight
             ):
-                self._set_claim_status_locked(
+                _set_status(
                     claim_id, "active", stamp=stamp,
                     reason="matching claim promoted by stronger evidence",
                 )
                 for row in live:
                     other_id = int(row["id"])
                     if other_id != claim_id:
-                        self._set_claim_status_locked(
+                        _set_status(
                             other_id, "superseded", stamp=stamp,
                             reason="superseded by stronger matching claim",
                             related_claim_id=claim_id,
                         )
         else:
-            content = _bounded_persisted_text(
-                _claim_memory_content(
-                    subject, predicate, value, scope, stamp
-                ),
-                8_000,
-                "temporal claim",
+            canonical_content, keyed_content = backing_content_variants(
+                subject, predicate, value, scope, stamp, claim_key
             )
-            self.db.execute(
-                """INSERT OR IGNORE INTO memories(created_at, kind, content, source)
-                   VALUES (?, 'claim', ?, ?)""",
-                (stamp, content, f"{authority}:{source}"[:2_000]),
-            )
-            memory_row = self.db.execute(
-                "SELECT id FROM memories WHERE kind='claim' AND content=?", (content,)
-            ).fetchone()
-            if memory_row is None:
-                raise RuntimeError("Temporal claim memory could not be persisted")
+            content = canonical_content
+            if self.db.execute(
+                """SELECT 1 FROM memories AS m
+                   JOIN memory_claims AS c ON c.memory_id=m.id
+                   WHERE m.kind='claim' AND m.content=? AND c.claim_key<>?
+                   LIMIT 1""",
+                (canonical_content, claim_key),
+            ).fetchone() is not None:
+                # Another claim key already renders this exact content and owns
+                # the backing row; reusing it would violate
+                # UNIQUE(memory_claims.memory_id) and lose this fact.
+                content = keyed_content
+            backing_source = f"{authority}:{source}"[:2_000]
             competing_weight = max(
                 (
                     _CLAIM_AUTHORITY_WEIGHT[str(row["authority"])]
@@ -8713,38 +14435,126 @@ class Memory:
                     ),
                 )
                 supersedes_id = int(strongest["id"])
-            cursor = self.db.execute(
-                """INSERT INTO memory_claims(
-                       memory_id, created_at, updated_at, scope, claim_key, subject,
-                       predicate, value, value_sha256, source, authority,
-                       confidence, status, valid_from, valid_until, supersedes_id
-                   ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?)""",
-                (
-                    int(memory_row["id"]), stamp, stamp, scope, claim_key, subject,
-                    predicate, value, value_sha256, source, authority,
-                    confidence, status, stamp, supersedes_id,
-                ),
+            event_reason = (
+                "new strongest claim" if status == "active" else "conflicts with stronger claim"
             )
-            claim_id = int(cursor.lastrowid)
-            self.db.execute(
-                """INSERT INTO memory_claim_events(
-                       claim_id, created_at, status, reason, related_claim_id
-                   ) VALUES (?, ?, ?, ?, ?)""",
-                (
-                    claim_id, stamp, status,
-                    "new strongest claim" if status == "active" else "conflicts with stronger claim",
-                    supersedes_id,
-                ),
-            )
+            if self._spine_ready:
+                claim_id = memory_spine.allocate_claim_id(self.db)
+                context = self._spine_context(actor, conversation_id, permission)
+                spine_event_id = memory_spine.append_event(
+                    self.db,
+                    self._spine_key,
+                    kind="claim.created",
+                    actor=context["actor"],
+                    source=source,
+                    scope=scope,
+                    permission=context["permission"],
+                    outcome="applied",
+                    payload=memory_spine.claim_event_payload(
+                        {
+                            "claim_key": claim_key, "subject": subject,
+                            "predicate": predicate, "value": value,
+                            "value_sha256": value_sha256, "source": source,
+                            "authority": authority, "confidence": confidence,
+                            "status": status, "valid_from": stamp,
+                            "valid_until": None, "supersedes_id": supersedes_id,
+                        },
+                        at=stamp,
+                    ),
+                    now=stamp,
+                    conversation_id=context["conversation_id"],
+                    subject_kind="claim",
+                    subject_id=claim_id,
+                )
+                # The backing row carries the claim's creating event as its
+                # lineage (design 12.6 item 1): claim id -> claim.created ->
+                # backing memory row -> claim row.
+                memory_row = self.db.execute(
+                    "SELECT id FROM memories WHERE kind='claim' AND content=?", (content,)
+                ).fetchone()
+                if memory_row is None:
+                    memory_id = memory_spine.allocate_memory_id(self.db)
+                    self.db.execute(
+                        """INSERT INTO memories(
+                               id, created_at, kind, content, source, spine_event_id
+                           ) VALUES (?, ?, 'claim', ?, ?, ?)""",
+                        (memory_id, stamp, content, backing_source, spine_event_id),
+                    )
+                else:
+                    # A legacy orphan backing row with this exact content is
+                    # reused; its lineage becomes this claim's event.
+                    memory_id = int(memory_row["id"])
+                    self.db.execute(
+                        "UPDATE memories SET source=?, spine_event_id=? WHERE id=?",
+                        (backing_source, spine_event_id, memory_id),
+                    )
+                self.db.execute(
+                    """INSERT INTO memory_claims(
+                           id, memory_id, created_at, updated_at, scope, claim_key, subject,
+                           predicate, value, value_sha256, source, authority,
+                           confidence, status, valid_from, valid_until, supersedes_id,
+                           spine_event_id
+                       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?)""",
+                    (
+                        claim_id, memory_id, stamp, stamp, scope, claim_key,
+                        subject, predicate, value, value_sha256, source, authority,
+                        confidence, status, stamp, supersedes_id, spine_event_id,
+                    ),
+                )
+                self.db.execute(
+                    """INSERT INTO memory_claim_events(
+                           claim_id, created_at, status, reason, related_claim_id, spine_event_id
+                       ) VALUES (?, ?, ?, ?, ?, ?)""",
+                    (claim_id, stamp, status, event_reason, supersedes_id, spine_event_id),
+                )
+            else:
+                self.db.execute(
+                    """INSERT OR IGNORE INTO memories(created_at, kind, content, source)
+                       VALUES (?, 'claim', ?, ?)""",
+                    (stamp, content, backing_source),
+                )
+                memory_row = self.db.execute(
+                    "SELECT id FROM memories WHERE kind='claim' AND content=?", (content,)
+                ).fetchone()
+                if memory_row is None:
+                    raise RuntimeError("Temporal claim memory could not be persisted")
+                memory_id = int(memory_row["id"])
+                cursor = self.db.execute(
+                    """INSERT INTO memory_claims(
+                           memory_id, created_at, updated_at, scope, claim_key, subject,
+                           predicate, value, value_sha256, source, authority,
+                           confidence, status, valid_from, valid_until, supersedes_id
+                       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?)""",
+                    (
+                        memory_id, stamp, stamp, scope, claim_key, subject,
+                        predicate, value, value_sha256, source, authority,
+                        confidence, status, stamp, supersedes_id,
+                    ),
+                )
+                claim_id = int(cursor.lastrowid)
+                self.db.execute(
+                    """INSERT INTO memory_claim_events(
+                           claim_id, created_at, status, reason, related_claim_id
+                       ) VALUES (?, ?, ?, ?, ?)""",
+                    (claim_id, stamp, status, event_reason, supersedes_id),
+                )
+            if self._graph_ready:
+                # One edge per claim version, inside this write's own
+                # transaction (design 4.5).  An excluded claim (reserved
+                # predicate, private subject, over-long subject) projects
+                # nothing and is counted by ``verify_graph``.
+                memory_graph.project_claim(
+                    self.db, self._graph_claim_row_locked(claim_id), now=stamp
+                )
             for row in same_source_live:
-                self._set_claim_status_locked(
+                _set_status(
                     int(row["id"]), "superseded", stamp=stamp,
                     reason="superseded by a newer version from the same source",
                     related_claim_id=claim_id,
                 )
             if status == "active":
                 for row in competing_live:
-                    self._set_claim_status_locked(
+                    _set_status(
                         int(row["id"]), "superseded", stamp=stamp,
                         reason="replaced by newer authoritative claim",
                         related_claim_id=claim_id,
@@ -8752,7 +14562,7 @@ class Memory:
             elif new_weight == competing_weight:
                 for row in competing_live:
                     if _CLAIM_AUTHORITY_WEIGHT[str(row["authority"])] == new_weight:
-                        self._set_claim_status_locked(
+                        _set_status(
                             int(row["id"]), "disputed", stamp=stamp,
                             reason="equal-authority values conflict",
                             related_claim_id=claim_id,
@@ -8791,6 +14601,9 @@ class Memory:
         authority: str,
         confidence: float = 1.0,
         source_identity: str | None = None,
+        actor: str = "runtime",
+        conversation_id: int | None = None,
+        permission: str = "runtime",
     ) -> int:
         """Record a global versioned fact; authority is a closed runtime enum.
 
@@ -8834,6 +14647,9 @@ class Memory:
                 confidence=confidence, stamp=now_iso(),
                 source_identity=source_identity,
                 scope="global",
+            actor=actor,
+            conversation_id=conversation_id,
+            permission=permission,
             )
 
     def remember_explicit_project_claim(
@@ -8841,6 +14657,8 @@ class Memory:
         conversation_id: int,
         project_id: int,
         operator_prompt: str,
+        *,
+        permission: str = "operator:interactive",
     ) -> dict[str, Any]:
         """Atomically persist one exact operator-authored project fact.
 
@@ -8913,6 +14731,9 @@ class Memory:
                 stamp=stamp,
                 source_identity=f"operator:{scope}",
                 scope=scope,
+                actor="operator",
+                conversation_id=conversation_id,
+                permission=permission,
             )
             stored = self.db.execute(
                 """SELECT status FROM memory_claims
@@ -8973,8 +14794,2661 @@ class Memory:
                 "confidence": 1.0,
             }
 
+    def retract_explicit_project_claim(
+        self,
+        conversation_id: int,
+        project_id: int,
+        operator_prompt: str,
+        *,
+        permission: str = "operator:interactive",
+    ) -> dict[str, Any]:
+        """Atomically retire one exact operator-named project fact.
+
+        The live claim for the named subject and predicate becomes
+        ``superseded`` with no successor, so it is no longer current but its
+        version history is kept.  The operator command and the fixed receipt
+        commit or roll back with the status change.
+        """
+        parsed = parse_explicit_project_fact_retraction(operator_prompt)
+        if parsed is None:
+            raise ValueError("Prompt is not an explicit project fact retraction")
+        normalized_project = self._project_id(project_id)
+        scope = project_claim_scope(normalized_project)
+        if (
+            isinstance(conversation_id, bool)
+            or not isinstance(conversation_id, int)
+            or conversation_id <= 0
+        ):
+            raise ValueError("conversation_id must be a positive integer")
+        subject = parsed["subject"]
+        predicate = parsed["predicate"]
+        claim_key = self._claim_identity(subject, predicate)
+        stamp = now_iso()
+        with self._immediate_transaction():
+            project = self.db.execute(
+                """SELECT p.id, p.enabled
+                   FROM conversations AS c
+                   JOIN agent_projects AS p ON p.id=c.project_id
+                   WHERE c.id=?
+                     AND NOT EXISTS (
+                         SELECT 1 FROM screen_companion_conversations AS companion
+                         WHERE companion.conversation_id=c.id
+                     )""",
+                (conversation_id,),
+            ).fetchone()
+            if (
+                project is None
+                or int(project["id"]) != normalized_project
+                or not bool(project["enabled"])
+            ):
+                raise ValueError(
+                    "Conversation project does not exist, is disabled, or mismatched"
+                )
+            latest_event = self.db.execute(
+                """SELECT MAX(e.created_at)
+                   FROM memory_claim_events AS e
+                   JOIN memory_claims AS c ON c.id=e.claim_id
+                   WHERE c.scope=? AND c.claim_key=?""",
+                (scope, claim_key),
+            ).fetchone()[0]
+            if latest_event:
+                requested_at = _as_utc(
+                    datetime.fromisoformat(str(stamp).replace("Z", "+00:00"))
+                )
+                latest_at = _as_utc(
+                    datetime.fromisoformat(str(latest_event).replace("Z", "+00:00"))
+                )
+                if requested_at <= latest_at:
+                    stamp = (latest_at + timedelta(microseconds=1)).isoformat()
+            live = self.db.execute(
+                """SELECT id FROM memory_claims
+                   WHERE scope=? AND claim_key=?
+                     AND status IN ('active', 'disputed')
+                   ORDER BY id""",
+                (scope, claim_key),
+            ).fetchall()
+            self.db.execute(
+                """INSERT INTO messages(conversation_id, created_at, role, content)
+                   VALUES (?, ?, 'user', ?)""",
+                (conversation_id, stamp, str(operator_prompt).strip()),
+            )
+            live_ids = [int(row["id"]) for row in live]
+            if not live_ids:
+                action = "missing"
+                assistant_message = (
+                    "No active project fact matches that subject and predicate; "
+                    "nothing changed."
+                )
+            else:
+                for claim_id in live_ids:
+                    self._set_claim_status_locked(
+                        claim_id,
+                        "superseded",
+                        stamp=stamp,
+                        reason="retracted by operator",
+                        actor="operator",
+                        conversation_id=conversation_id,
+                        permission=permission,
+                        spine_kind="claim.retracted",
+                    )
+                remaining = self.db.execute(
+                    """SELECT COUNT(*) FROM memory_claims
+                       WHERE scope=? AND claim_key=?
+                         AND status IN ('active', 'disputed')""",
+                    (scope, claim_key),
+                ).fetchone()[0]
+                if int(remaining) != 0:
+                    raise RuntimeError("Project claim retraction did not resolve")
+                action = "retracted"
+                assistant_message = (
+                    f"Retracted project fact (claim record #{live_ids[-1]}). "
+                    "It is no longer current; the version history is kept."
+                )
+            assistant_cursor = self.db.execute(
+                """INSERT INTO messages(conversation_id, created_at, role, content)
+                   VALUES (?, ?, 'assistant', ?)""",
+                (conversation_id, stamp, assistant_message),
+            )
+            return {
+                "project_id": normalized_project,
+                "scope": scope,
+                "claim_ids": live_ids,
+                "action": action,
+                "assistant_message_id": int(assistant_cursor.lastrowid),
+                "assistant_message": assistant_message,
+                "subject": subject,
+                "predicate": predicate,
+            }
+
+    def erase_explicit_project_claim(
+        self,
+        conversation_id: int,
+        project_id: int,
+        operator_prompt: str,
+        *,
+        permission: str = "operator:interactive",
+    ) -> dict[str, Any]:
+        """Atomically erase every version of one exact operator-named project fact.
+
+        The claim rows, their evidence, clock statistics, observations, and
+        backing memory rows are deleted (foreign-key order), a
+        ``claim.tombstoned`` spine event names the removed ids, and every
+        earlier spine payload about the key is redacted.  The operator's own
+        transcript copies survive until their conversations are deleted; the
+        receipt says how many.  No value is echoed.
+        """
+        parsed = parse_explicit_project_fact_erasure(operator_prompt)
+        if parsed is None:
+            raise ValueError("Prompt is not an explicit project fact erasure")
+        if not self._spine_ready:
+            raise RuntimeError("The memory spine is unavailable")
+        normalized_project = self._project_id(project_id)
+        scope = project_claim_scope(normalized_project)
+        if (
+            isinstance(conversation_id, bool)
+            or not isinstance(conversation_id, int)
+            or conversation_id <= 0
+        ):
+            raise ValueError("conversation_id must be a positive integer")
+        subject = parsed["subject"]
+        predicate = parsed["predicate"]
+        claim_key = self._claim_identity(subject, predicate)
+        stamp = now_iso()
+        self._recall_cache.clear()
+        self.db.execute("PRAGMA secure_delete=ON")
+        try:
+            with self._immediate_transaction():
+                project = self.db.execute(
+                    """SELECT p.id, p.enabled
+                       FROM conversations AS c
+                       JOIN agent_projects AS p ON p.id=c.project_id
+                       WHERE c.id=?
+                         AND NOT EXISTS (
+                             SELECT 1 FROM screen_companion_conversations AS companion
+                             WHERE companion.conversation_id=c.id
+                         )""",
+                    (conversation_id,),
+                ).fetchone()
+                if (
+                    project is None
+                    or int(project["id"]) != normalized_project
+                    or not bool(project["enabled"])
+                ):
+                    raise ValueError(
+                        "Conversation project does not exist, is disabled, or mismatched"
+                    )
+                rows = self.db.execute(
+                    """SELECT id, memory_id, value FROM memory_claims
+                       WHERE scope=? AND claim_key=? ORDER BY id""",
+                    (scope, claim_key),
+                ).fetchall()
+                claim_ids = [int(row["id"]) for row in rows]
+                memory_ids = [int(row["memory_id"]) for row in rows]
+                values = {str(row["value"]) for row in rows}
+                self.db.execute(
+                    """INSERT INTO messages(conversation_id, created_at, role, content)
+                       VALUES (?, ?, 'user', ?)""",
+                    (conversation_id, stamp, str(operator_prompt).strip()),
+                )
+                if not claim_ids:
+                    assistant_message = (
+                        "No project fact matches that subject and predicate; "
+                        "nothing changed."
+                    )
+                    assistant_cursor = self.db.execute(
+                        """INSERT INTO messages(conversation_id, created_at, role, content)
+                           VALUES (?, ?, 'assistant', ?)""",
+                        (conversation_id, stamp, assistant_message),
+                    )
+                    return {
+                        "project_id": normalized_project,
+                        "scope": scope,
+                        "claim_ids": [],
+                        "action": "missing",
+                        "assistant_message_id": int(assistant_cursor.lastrowid),
+                        "assistant_message": assistant_message,
+                        "subject": subject,
+                        "predicate": predicate,
+                    }
+                placeholders = ",".join("?" for _ in claim_ids)
+                memory_placeholders = ",".join("?" for _ in memory_ids)
+                # Proposal records reference claims and carry the command text
+                # (the value included): unlink, expire, and blank them first.
+                proposal_rows = self.db.execute(
+                    "SELECT id, command FROM memory_fact_proposals WHERE project_id=?",
+                    (normalized_project,),
+                ).fetchall()
+                proposal_ids: list[int] = []
+                for proposal in proposal_rows:
+                    try:
+                        parsed_command = parse_explicit_project_fact(str(proposal["command"]))
+                    except GovernedMemoryCommandError:
+                        parsed_command = None
+                    if parsed_command is None:
+                        continue
+                    if self._claim_identity(
+                        parsed_command["subject"], parsed_command["predicate"]
+                    ) == claim_key:
+                        proposal_ids.append(int(proposal["id"]))
+                if proposal_ids:
+                    proposal_placeholders = ",".join("?" for _ in proposal_ids)
+                    self.db.execute(
+                        f"""UPDATE memory_fact_proposals
+                           SET claim_id=NULL, command='[erased project fact]',
+                               command_sha256=?, command_salt=NULL,
+                               status=CASE WHEN status='shown' THEN 'expired' ELSE status END,
+                               resolved_at=COALESCE(resolved_at, ?)
+                           WHERE id IN ({proposal_placeholders})""",
+                        ["0" * 64, stamp, *proposal_ids],
+                    )
+                self.db.execute(
+                    f"UPDATE memory_fact_proposals SET claim_id=NULL WHERE claim_id IN ({placeholders})",
+                    claim_ids,
+                )
+                fts_scrubbed = memory_spine.fts_secure_delete(self.db, "memory_fts")
+                for table in (
+                    "memory_claim_clock_statistics",
+                    "memory_claim_observations",
+                    "memory_claim_evidence",
+                    "memory_claim_events",
+                ):
+                    self.db.execute(
+                        f"DELETE FROM {table} WHERE claim_id IN ({placeholders})",
+                        claim_ids,
+                    )
+                removed_entity_ids: list[int] = []
+                if self._graph_ready:
+                    # Edges go before the claim rows they reference (the
+                    # foreign key requires it), and an entity left with no edge
+                    # in any status is swept with them, so no label of an
+                    # erased fact survives the transaction.
+                    removed_entity_ids = [
+                        int(entity_id)
+                        for entity_id in memory_graph.delete_edges(
+                            self.db, claim_ids
+                        )
+                    ]
+                self.db.execute(
+                    f"UPDATE memory_claims SET supersedes_id=NULL "
+                    f"WHERE supersedes_id IN ({placeholders})",
+                    claim_ids,
+                )
+                self.db.execute(
+                    f"DELETE FROM memory_claims WHERE id IN ({placeholders})", claim_ids
+                )
+                for table in (
+                    "memory_retrievals",
+                    "memory_statistics",
+                    "memory_embeddings",
+                    "memory_embedding_leases",
+                    "ordinary_memory_provenance",
+                ):
+                    self.db.execute(
+                        f"DELETE FROM {table} WHERE memory_id IN ({memory_placeholders})",
+                        memory_ids,
+                    )
+                self.db.execute(
+                    f"DELETE FROM memories WHERE id IN ({memory_placeholders})", memory_ids
+                )
+                transcript_copies = 0
+                for value in values:
+                    if len(value) >= 3:
+                        transcript_copies += int(
+                            self.db.execute(
+                                "SELECT COUNT(*) FROM messages WHERE instr(content, ?) > 0",
+                                (value,),
+                            ).fetchone()[0]
+                        )
+                        transcript_copies += int(
+                            self.db.execute(
+                                """SELECT COUNT(*) FROM conversation_goals
+                                   WHERE instr(goal_text, ?) > 0
+                                      OR instr(COALESCE(last_result_summary, ''), ?) > 0""",
+                                (value, value),
+                            ).fetchone()[0]
+                        )
+                removed_milestone_ids, removed_span_handles = (
+                    self._erase_milestones_naming_claim_key_locked(claim_key)
+                )
+                # Red team H-3.  ``transcript_copies`` counted ``messages`` and
+                # ``conversation_goals`` only, so an entire storage class was
+                # invisible to it: an operator was told "48 copies remain"
+                # while sixteen copies of the erased value sat inside another
+                # conversation's surviving compacted span.  That number is what
+                # a privacy decision is made on, so it must not omit a place
+                # the value actually is.  Counted AFTER the milestone erase, so
+                # only SURVIVING spans are counted -- a span this erase just
+                # destroyed is not a copy that remains.
+                transcript_copies += self._compacted_span_copies_locked(values)
+                redaction_targets = memory_spine.events_to_redact(self.db, scope, claim_key)
+                tombstone_payload: dict[str, Any] = {
+                    "at": stamp,
+                    "claim_key": claim_key,
+                    "removed_claim_ids": claim_ids,
+                    "removed_memory_ids": memory_ids,
+                    "redacted_event_ids": redaction_targets,
+                    "transcript_copies": transcript_copies,
+                }
+                # Chunked, NOT truncated.  `[:cap]` deleted milestones past
+                # the 128th while naming them in no receipt at all -- a hole
+                # in the audit trail wearing a cap's clothing, and the exact
+                # thing MEMORY_DELETED_MAX_IDS' own docstring ("writers chunk
+                # larger deletes") and this key set's comment both forbid.
+                # The first cap-sized slice rides on this tombstone; the rest
+                # follow it as additional claim.tombstoned events below, the
+                # same shape the memory.deleted path uses.  validate_payload
+                # now enforces the cap, so a future truncation cannot pass.
+                cap = memory_spine.MILESTONE_TOMBSTONE_MAX_IDS
+                milestone_overflow: list[tuple[list[int], list[str]]] = []
+                if removed_milestone_ids:
+                    tombstone_payload["removed_milestone_ids"] = (
+                        removed_milestone_ids[:cap]
+                    )
+                    tombstone_payload["removed_span_handles"] = (
+                        removed_span_handles[:cap]
+                    )
+                    for offset in range(cap, len(removed_milestone_ids), cap):
+                        milestone_overflow.append((
+                            removed_milestone_ids[offset:offset + cap],
+                            removed_span_handles[offset:offset + cap],
+                        ))
+                if removed_entity_ids:
+                    tombstone_payload["removed_entity_ids"] = removed_entity_ids
+                tombstone_id = memory_spine.append_event(
+                    self.db,
+                    self._spine_key,
+                    kind="claim.tombstoned",
+                    actor="operator",
+                    source="explicit operator project fact erasure",
+                    scope=scope,
+                    permission=str(permission)[:80],
+                    outcome="applied",
+                    payload=tombstone_payload,
+                    now=stamp,
+                    conversation_id=int(conversation_id),
+                    subject_kind="claim",
+                    subject_id=claim_ids[-1],
+                )
+                # Every milestone past the first chunk gets a receipt of its
+                # own, parented to the tombstone that opened the erase so the
+                # set can be reassembled from the chain.
+                overflow_event_ids: list[int] = []
+                for chunk_ids, chunk_handles in milestone_overflow:
+                    overflow_event_ids.append(int(memory_spine.append_event(
+                        self.db,
+                        self._spine_key,
+                        kind="claim.tombstoned",
+                        actor="operator",
+                        source="explicit operator project fact erasure (continued)",
+                        scope=scope,
+                        permission=str(permission)[:80],
+                        outcome="applied",
+                        payload={
+                            "at": stamp,
+                            "claim_key": claim_key,
+                            # The claim ids rode on the first event; repeating
+                            # them here would double-count them on replay.
+                            "removed_claim_ids": [],
+                            "removed_milestone_ids": chunk_ids,
+                            "removed_span_handles": chunk_handles,
+                        },
+                        now=stamp,
+                        conversation_id=int(conversation_id),
+                        subject_kind="claim",
+                        subject_id=claim_ids[-1],
+                        parent_event_id=int(tombstone_id),
+                    )))
+                redacted = memory_spine.redact_claim_key_events(
+                    self.db, scope, claim_key, tombstone_id
+                )
+                # Red team H-3, second half.  A destroyed span is the ONLY
+                # copy of the turns it held, so an erase that silently takes
+                # one is the largest thing this sentence can fail to mention.
+                destroyed = len(removed_span_handles)
+                compacted_note = (
+                    ""
+                    if not destroyed
+                    else (
+                        f" {destroyed} compacted span"
+                        f"{'s' if destroyed != 1 else ''} covering those turns "
+                        f"{'were' if destroyed != 1 else 'was'} deleted with it "
+                        "and cannot be rehydrated."
+                    )
+                )
+                assistant_message = (
+                    f"Erased project fact ({len(claim_ids)} version"
+                    f"{'s' if len(claim_ids) != 1 else ''} removed; tombstone #{tombstone_id})."
+                    f"{compacted_note} "
+                    f"{transcript_copies} transcript cop"
+                    f"{'ies' if transcript_copies != 1 else 'y'} remain until "
+                    "their conversations are deleted."
+                )
+                assistant_cursor = self.db.execute(
+                    """INSERT INTO messages(conversation_id, created_at, role, content)
+                       VALUES (?, ?, 'assistant', ?)""",
+                    (conversation_id, stamp, assistant_message),
+                )
+                result = {
+                    "project_id": normalized_project,
+                    "scope": scope,
+                    "claim_ids": claim_ids,
+                    "action": "erased",
+                    "tombstone_event_id": int(tombstone_id),
+                    "tombstone_overflow_event_ids": overflow_event_ids,
+                    "redacted_event_ids": redacted,
+                    "removed_entity_ids": removed_entity_ids,
+                    "transcript_copies": transcript_copies,
+                    "fts_scrubbed": fts_scrubbed,
+                    "proposal_records_blanked": len(proposal_ids),
+                    "assistant_message_id": int(assistant_cursor.lastrowid),
+                    "assistant_message": assistant_message,
+                    "subject": subject,
+                    "predicate": predicate,
+                }
+        finally:
+            # secure_delete stays on for the whole connection (set at open).
+            pass
+        self._recall_cache.clear()
+        if str(self.path) != ":memory:":
+            try:
+                self.db.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()
+            except sqlite3.OperationalError:
+                pass
+        return result
+
+    def _compacted_span_copies_locked(self, values: Sequence[str]) -> int:
+        """How many surviving compacted spans still contain an erased value.
+
+        A span is compressed, so no SQL predicate can see inside one: each
+        blob is decompressed and searched.  That is affordable here because
+        this runs on the operator's explicit erase, never on a turn, and the
+        alternative is a receipt that under-reports by an entire storage
+        class (red team H-3).
+
+        Counted per SPAN rather than per occurrence, matching what the
+        sentence says -- "copies remain" is about places the value still is,
+        and a span is one place an operator can act on with one command.
+        """
+        if not self._compaction_ready:
+            return 0
+        needles = [str(value) for value in values if len(str(value)) >= 3]
+        if not needles:
+            return 0
+        copies = 0
+        for row in self.db.execute(
+            "SELECT handle, body FROM memory_compacted_spans ORDER BY handle"
+        ).fetchall():
+            try:
+                text = memory_compaction.decompress_span(row["body"])
+            except (memory_compaction.CompactionError, ValueError, TypeError):
+                # An unreadable span is a verify problem, not a silent zero:
+                # it is reported there, and here it is counted as a place the
+                # value may still be rather than assumed clean.
+                copies += 1
+                continue
+            if any(needle in text for needle in needles):
+                copies += 1
+        return copies
+
+    def _erase_milestones_naming_claim_key_locked(
+        self, claim_key: str
+    ) -> tuple[list[int], list[str]]:
+        """Delete every milestone whose ``claim_keys`` names an erased key.
+
+        The row is DELETED and never edited, because no ``UPDATE`` is permitted
+        on either table -- a milestone is written once and a recompaction gets
+        a new ``seq`` (design 2.3, M-1/M-2).  Its span goes with it: the span
+        is the only copy of the transcript rows behind the erased fact, so
+        leaving it would defeat the erase exactly as leaving the claim key in
+        the milestone would.  ``seq`` gaps are legal and expected afterwards.
+
+        Milestones are NOT reachable from ``_memory_dependent_tables``, and
+        deliberately so (N-5): that list is derived from tables carrying a
+        ``memory_id`` column, neither M5 table has one, and hard-coding into
+        the one list M3 made derived is how a table gets silently missed.  A
+        milestone is not a dependent of a ``memories`` row -- it records a
+        historical statement -- so the erase count there stays ten.
+        """
+        if not self._compaction_ready:
+            return [], []
+        target = str(claim_key)
+        removed_ids: list[int] = []
+        removed_handles: list[str] = []
+        for row in self.db.execute(
+            "SELECT id, handle, invariants_json FROM memory_milestones ORDER BY id"
+        ).fetchall():
+            try:
+                derived = json.loads(str(row["invariants_json"]))["derived"]
+                keys = derived.get("claim_keys") or []
+            except (TypeError, ValueError, KeyError):
+                continue
+            if target not in {str(item) for item in keys}:
+                continue
+            removed_ids.append(int(row["id"]))
+            removed_handles.append(str(row["handle"]))
+        if not removed_ids:
+            return [], []
+        placeholders = ", ".join("?" for _ in removed_ids)
+        # Child first: the spans table holds the foreign key.
+        self.db.execute(
+            f"DELETE FROM memory_compacted_spans WHERE milestone_id IN ({placeholders})",
+            removed_ids,
+        )
+        self.db.execute(
+            f"DELETE FROM memory_milestones WHERE id IN ({placeholders})",
+            removed_ids,
+        )
+        return removed_ids, removed_handles
+
+    def _memory_dependent_tables(self) -> list[str]:
+        """Every live table carrying a ``memory_id`` column, minus
+        ``memory_claims``.
+
+        Derived from the live schema rather than typed out (M3 design 6.1,
+        review R10): a table added later joins the erase order automatically
+        instead of silently keeping a row that points at an erased memory.
+        ``memory_claims`` is excluded because a claim's backing row is refused
+        by ``erase_memory`` before any delete runs.  Migration scratch tables
+        never appear because the derivation reads the live schema, and they
+        are dropped before their migration commits.
+        """
+        names = [
+            str(row[0]) for row in self.db.execute(
+                """SELECT name FROM sqlite_master
+                   WHERE type='table' AND name NOT LIKE 'sqlite_%'
+                   ORDER BY name"""
+            ).fetchall()
+        ]
+        tables: list[str] = []
+        for name in names:
+            if name == "memory_claims" or '"' in name:
+                continue
+            columns = {
+                str(row[1]) for row in self.db.execute(
+                    f'PRAGMA table_info("{name}")'
+                ).fetchall()
+            }
+            if "memory_id" in columns:
+                tables.append(name)
+        return sorted(tables)
+
+    @_with_read_snapshot
+    def describe_memory(self, memory_id: int) -> dict[str, Any] | None:
+        """What ``Erase memory #<id>`` would act on, looked up by id alone.
+
+        A confirmation prompt must never say "no such memory" about a row that
+        exists.  ``list_memories`` is a listing — it hides claim backing rows
+        and stops at its limit — so a surface that confirms through it is
+        wrong for exactly the rows the erase has fixed refusals for.  This
+        reads the one row by primary key and reports what the operator needs
+        to decide, and what ``erase_memory`` will do:
+        ``is_claim_backing`` and ``is_vault_note`` are the two refusals it
+        would hit.  ``None`` means no such row, which is the third.
+
+        No content is returned, only its length: a confirmation prompt is a
+        place to name a row, not to echo it back.
+        """
+        self._ensure_open()
+        if (
+            isinstance(memory_id, bool)
+            or not isinstance(memory_id, int)
+            or not 0 < memory_id <= 9_223_372_036_854_775_807
+        ):
+            return None
+        row = self.db.execute(
+            """SELECT m.id, m.created_at, m.kind, length(m.content) AS content_length,
+                      omp.origin AS origin, omp.eligible AS eligible,
+                      (SELECT 1 FROM memory_claims AS c WHERE c.memory_id=m.id)
+                          AS claim_backed
+               FROM memories AS m
+               LEFT JOIN ordinary_memory_provenance AS omp ON omp.memory_id=m.id
+               WHERE m.id=?""",
+            (int(memory_id),),
+        ).fetchone()
+        if row is None:
+            return None
+        kind = str(row["kind"] or "")
+        return {
+            "id": int(row["id"]),
+            "kind": kind,
+            "created_at": str(row["created_at"] or ""),
+            "origin": None if row["origin"] is None else str(row["origin"]),
+            "eligible": None if row["eligible"] is None else bool(row["eligible"]),
+            "is_claim_backing": kind == "claim" or row["claim_backed"] is not None,
+            "is_vault_note": str(row["origin"] or "") == "verified_vault_note",
+            "content_length": int(row["content_length"] or 0),
+        }
+
+    def erase_memory(
+        self,
+        conversation_id: int | None,
+        memory_id: int,
+        *,
+        operator_prompt: str | None = None,
+        permission: str = "operator:interactive",
+    ) -> dict[str, Any]:
+        """Erase one ordinary memory row by its explicit id, with a receipt.
+
+        ``memories.id`` is explicit and never reused since schema 47, so it is
+        the operator-facing identity (``Erase memory #<id>``).  Three cases
+        refuse and change nothing, each with a fixed reason: no such row
+        (``missing``); a row that backs a project fact (``claim_backing`` —
+        erasing it alone would leave the claim projection inconsistent, so the
+        operator is pointed at ``Erase this project fact:``); and a row that
+        mirrors a vault note (``vault_note`` — the indexer would re-create it
+        on the next pass).
+
+        Otherwise, in one ``BEGIN IMMEDIATE`` under ``secure_delete``: the FTS
+        index is scrubbed, every table carrying a ``memory_id`` column is
+        cleared for that id (the list is derived from the live schema, never
+        typed), the row is deleted, a digest-only ``memory.deleted`` event
+        records the removal with the keyed content digest and how many
+        transcript copies remain, and the fixed receipt says so.  No content
+        is echoed.  ``conversation_id`` may be ``None`` for the CLI path, in
+        which case no transcript rows are written and the receipt text is
+        unchanged; ``operator_prompt`` is recorded as the operator's turn when
+        both it and a conversation are given.
+        """
+        self._ensure_open()
+        if not self._spine_ready:
+            raise RuntimeError("The memory spine is unavailable")
+        if (
+            isinstance(memory_id, bool)
+            or not isinstance(memory_id, int)
+            or not 0 < memory_id <= 9_223_372_036_854_775_807
+        ):
+            raise ValueError("memory_id must be a positive integer")
+        if conversation_id is not None and (
+            isinstance(conversation_id, bool)
+            or not isinstance(conversation_id, int)
+            or not 0 < conversation_id <= 9_223_372_036_854_775_807
+        ):
+            raise ValueError("conversation_id must be a positive integer")
+        stamp = now_iso()
+        self._recall_cache.clear()
+        self.db.execute("PRAGMA secure_delete=ON")
+        with self._immediate_transaction():
+            if conversation_id is not None and operator_prompt:
+                self.db.execute(
+                    """INSERT INTO messages(conversation_id, created_at, role, content)
+                       VALUES (?, ?, 'user', ?)""",
+                    (conversation_id, stamp, str(operator_prompt).strip()),
+                )
+            row = self.db.execute(
+                """SELECT m.id, m.created_at, m.kind, m.content,
+                          (SELECT omp.origin FROM ordinary_memory_provenance AS omp
+                            WHERE omp.memory_id=m.id) AS origin,
+                          (SELECT 1 FROM memory_claims AS c
+                            WHERE c.memory_id=m.id) AS claim_backed
+                   FROM memories AS m WHERE m.id=?""",
+                (memory_id,),
+            ).fetchone()
+            refusal: str | None = None
+            if row is None:
+                refusal = "missing"
+                message = f"No memory #{memory_id} exists; nothing changed."
+            elif str(row["kind"] or "") == "claim" or row["claim_backed"] is not None:
+                refusal = "claim_backing"
+                message = (
+                    f"Memory #{memory_id} backs a project fact; use "
+                    "Erase this project fact: {\u2026} (see /facts) instead."
+                )
+            elif str(row["origin"] or "") == "verified_vault_note":
+                refusal = "vault_note"
+                message = (
+                    f"Memory #{memory_id} mirrors a vault note; delete the note "
+                    "in the vault and reindex."
+                )
+            if refusal is not None:
+                assistant_message_id = None
+                if conversation_id is not None:
+                    assistant_message_id = int(self.db.execute(
+                        """INSERT INTO messages(conversation_id, created_at, role, content)
+                           VALUES (?, ?, 'assistant', ?)""",
+                        (conversation_id, stamp, message),
+                    ).lastrowid)
+                return {
+                    "memory_id": int(memory_id),
+                    "action": refusal,
+                    "kind": None if row is None else str(row["kind"] or ""),
+                    "created_at": None if row is None else str(row["created_at"] or ""),
+                    "transcript_copies": 0,
+                    "deleted_event_id": None,
+                    "fts_scrubbed": False,
+                    "dependent_rows_deleted": {},
+                    "assistant_message_id": assistant_message_id,
+                    "assistant_message": message,
+                }
+            kind = str(row["kind"] or "")
+            created_at = str(row["created_at"] or "")
+            content = str(row["content"] or "")
+            transcript_copies = 0
+            if len(content) >= 3:
+                transcript_copies += int(self.db.execute(
+                    "SELECT COUNT(*) FROM messages WHERE instr(content, ?) > 0",
+                    (content,),
+                ).fetchone()[0])
+                transcript_copies += int(self.db.execute(
+                    """SELECT COUNT(*) FROM conversation_goals
+                       WHERE instr(goal_text, ?) > 0
+                          OR instr(COALESCE(last_result_summary, ''), ?) > 0""",
+                    (content, content),
+                ).fetchone()[0])
+            fts_scrubbed = memory_spine.fts_secure_delete(self.db, "memory_fts")
+            dependent_rows_deleted: dict[str, int] = {}
+            for table in self._memory_dependent_tables():
+                cursor = self.db.execute(
+                    f'DELETE FROM "{table}" WHERE memory_id=?', (memory_id,)
+                )
+                removed = int(cursor.rowcount or 0)
+                if removed > 0:
+                    dependent_rows_deleted[table] = removed
+            self.db.execute("DELETE FROM memories WHERE id=?", (memory_id,))
+            payload = memory_spine.memory_deleted_payload(
+                self._spine_key,
+                [(int(memory_id), content)],
+                reason="explicit operator memory erasure",
+                at=stamp,
+            )
+            payload["kind"] = kind
+            payload["transcript_copies"] = transcript_copies
+            deleted_event_id = self._append_memory_event(
+                "memory.deleted",
+                memory_id=int(memory_id),
+                payload=payload,
+                stamp=stamp,
+                source="explicit operator memory erasure",
+                context=self._spine_context("operator", conversation_id, permission),
+            )
+            message = (
+                f"Erased memory #{memory_id} (kind: {kind or 'unknown'}, "
+                f"created {created_at[:10]}). {transcript_copies} transcript "
+                f"cop{'ies' if transcript_copies != 1 else 'y'} remain until "
+                "their conversations are deleted."
+            )
+            assistant_message_id = None
+            if conversation_id is not None:
+                assistant_message_id = int(self.db.execute(
+                    """INSERT INTO messages(conversation_id, created_at, role, content)
+                       VALUES (?, ?, 'assistant', ?)""",
+                    (conversation_id, stamp, message),
+                ).lastrowid)
+            result = {
+                "memory_id": int(memory_id),
+                "action": "erased",
+                "kind": kind,
+                "created_at": created_at,
+                "transcript_copies": transcript_copies,
+                "deleted_event_id": (
+                    None if deleted_event_id is None else int(deleted_event_id)
+                ),
+                "fts_scrubbed": bool(fts_scrubbed),
+                "dependent_rows_deleted": dependent_rows_deleted,
+                "assistant_message_id": assistant_message_id,
+                "assistant_message": message,
+            }
+        self._recall_cache.clear()
+        if str(self.path) != ":memory:":
+            try:
+                self.db.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()
+            except sqlite3.OperationalError:
+                pass
+        return result
+
+    def append_spine_event(
+        self,
+        kind: str,
+        *,
+        actor: str,
+        source: str,
+        scope: str,
+        permission: str,
+        outcome: str,
+        payload: Mapping[str, Any],
+        conversation_id: int | None = None,
+        subject_kind: str | None = None,
+        subject_id: int | None = None,
+        parent_event_id: int | None = None,
+    ) -> int | None:
+        """Best-effort receipt outside any claim write (proposal events).
+
+        Like clock telemetry: never inside a caller's snapshot, a short lock
+        timeout, and a dropped event is counted, never raised.
+        """
+        self._ensure_open()
+        if not self._spine_ready or self.db.in_transaction:
+            self._dropped_spine_events += 1
+            return None
+        restore_timeout = int(getattr(self, "_busy_timeout_ms", DEFAULT_BUSY_TIMEOUT_MS))
+        context = self._spine_context(actor, conversation_id, permission)
+        try:
+            self.db.execute(f"PRAGMA busy_timeout={_CLAIM_CLOCK_WRITE_TIMEOUT_MS}")
+            try:
+                self.db.execute("BEGIN IMMEDIATE")
+                event_id = memory_spine.append_event(
+                    self.db,
+                    self._spine_key,
+                    kind=kind,
+                    actor=context["actor"],
+                    source=source,
+                    scope=scope,
+                    permission=context["permission"],
+                    outcome=outcome,
+                    payload=payload,
+                    now=now_iso(),
+                    conversation_id=context["conversation_id"],
+                    subject_kind=subject_kind,
+                    subject_id=subject_id,
+                    parent_event_id=parent_event_id,
+                )
+                self.db.commit()
+                return int(event_id)
+            except (sqlite3.OperationalError, memory_spine.SpineError, ValueError):
+                if self.db.in_transaction:
+                    self.db.rollback()
+                self._dropped_spine_events += 1
+                return None
+        finally:
+            self.db.execute(f"PRAGMA busy_timeout={restore_timeout}")
+
+    @_with_read_snapshot
+    def verify_spine(self) -> dict[str, Any]:
+        """Recompute the keyed chain and the claim lineage; never repairs."""
+        self._ensure_open()
+        if not self._spine_ready:
+            return {"ok": False, "events": 0, "problems": ["spine is unavailable"]}
+        report = memory_spine.verify_spine(self.db, self._spine_key)
+        report["dropped_best_effort_events_this_process"] = int(self._dropped_spine_events)
+        # Informational only: the spine is authentic whether or not a
+        # projection drifted, so ``ok`` and the CLI exit code are unchanged by
+        # graph state.  Projection drift is a rebuild matter, exactly as for
+        # claims (M3 design 4.6).
+        counts = (
+            memory_graph.graph_counts(self.db) if self._graph_ready
+            else {"edges": 0, "entities": 0}
+        )
+        report["graph_edges"] = int(counts.get("edges") or 0)
+        report["graph_entities"] = int(counts.get("entities") or 0)
+        report["graph_ok"] = bool(self.verify_graph().get("ok"))
+        return report
+
+    @_with_read_snapshot
+    def latest_spine_event_id(
+        self, *, kind: str, subject_kind: str, subject_id: int
+    ) -> int | None:
+        """Newest event of one kind about one subject (backward lineage)."""
+        self._ensure_open()
+        if not self._spine_ready:
+            return None
+        return memory_spine.latest_event_id(
+            self.db, kind=kind, subject_kind=subject_kind, subject_id=int(subject_id)
+        )
+
+    def rebuild_claim_projection(
+        self,
+        *,
+        apply: bool = False,
+        plan: Mapping[str, Any] | None = None,
+        actor: str = "operator",
+        permission: str = "operator:cli",
+    ) -> dict[str, Any]:
+        """Replay the spine into a shadow claim projection and compare it with
+        the live rows.  ``apply=False`` is a dry run that changes nothing; its
+        report carries ``head_event_id`` and ``plan_token`` (twelve hex
+        characters over the head event id and the divergence set), which
+        bind the report to the store it described.
+
+        ``apply=True`` reconciles the live projection in place under the write
+        lock, never by table swap: rows without spine history are deleted with
+        their dependents and backing rows, field divergences are rewritten
+        from the spine, and rows the spine knows but the store lost are
+        recreated with their backing rows and replayed status events (evidence
+        is reported as lost, never invented).  ``plan`` is the dry-run report
+        the operator confirmed; without one, a dry run is taken in its own
+        snapshot before the lock.  Inside the transaction the dry run is taken
+        again and must match the plan (token, or divergence set for a plan
+        without a token), otherwise ``stale_plan`` refuses.  It also refuses,
+        rolling back with ``applied`` False and a ``refusal`` code, when the
+        chain does not verify, when the history itself is inconsistent, or
+        when a divergence survives the rebuild; on success
+        ``projection.rebuilt`` is the last event of the transaction.
+        """
+        if not apply:
+            return self._rebuild_claim_projection_dry_run()
+        return self._apply_claim_projection(
+            plan=plan, actor=actor, permission=permission
+        )
+
+    @staticmethod
+    def _claim_backing_content_builder() -> Any:
+        """Both legal backing contents for a spine after-image, canonical
+        first.  ``memory_spine`` accepts either when verifying and picks the
+        keyed one exactly when the canonical content is already bound to a
+        different claim, which is the same test the writer makes."""
+
+        def backing_content(
+            payload: Mapping[str, Any], scope: str
+        ) -> tuple[str, str]:
+            return backing_content_variants(
+                str(payload.get("subject", "")),
+                str(payload.get("predicate", "")),
+                str(payload.get("value", "")),
+                str(scope),
+                str(payload.get("original_created_at") or payload.get("valid_from") or ""),
+                str(payload.get("claim_key", "")),
+            )
+
+        return backing_content
+
+    @staticmethod
+    def _claim_divergence_signature(
+        divergences: Sequence[Mapping[str, Any]],
+    ) -> list[list[Any]]:
+        signature: set[tuple[int, str]] = set()
+        for item in divergences:
+            claim_id = item.get("claim_id")
+            try:
+                normalized = -1 if claim_id is None else int(claim_id)
+            except (TypeError, ValueError):
+                normalized = -1
+            signature.add((normalized, str(item.get("kind"))))
+        return [list(pair) for pair in sorted(signature)]
+
+    @classmethod
+    def _claim_plan_token(
+        cls,
+        head_event_id: int | None,
+        divergences: Sequence[Mapping[str, Any]],
+    ) -> str:
+        """Twelve hex characters binding a dry-run report to the store it
+        described: the head event id and the sorted (claim_id, kind) set."""
+        return memory_spine.sha256_hex(
+            memory_spine.canonical([
+                None if head_event_id is None else int(head_event_id),
+                cls._claim_divergence_signature(divergences),
+            ])
+        )[:12]
+
+    @classmethod
+    def _plan_token_of(cls, plan: Mapping[str, Any]) -> str | None:
+        token = plan.get("plan_token")
+        if isinstance(token, str) and token:
+            return token
+        if plan.get("head_event_id") is not None:
+            return cls._claim_plan_token(
+                int(plan["head_event_id"]), plan.get("divergences") or []
+            )
+        return None
+
+    def _head_event_id_locked(self) -> int | None:
+        row = self.db.execute(
+            "SELECT last_event_id FROM memory_spine_head WHERE id=1"
+        ).fetchone()
+        return None if row is None else int(row[0])
+
+    @_with_read_snapshot
+    def _rebuild_claim_projection_dry_run(self) -> dict[str, Any]:
+        self._ensure_open()
+        if not self._spine_ready:
+            return {"ok": False, "rows_live": 0, "rows_rebuilt": 0,
+                    "divergences": [{"claim_id": None, "kind": "verify",
+                                     "detail": "spine is unavailable"}],
+                    "head_event_id": None, "plan_token": None}
+        report = memory_spine.rebuild_claim_projection(
+            self.db, self._spine_key,
+            content_builder=self._claim_backing_content_builder(),
+        )
+        report["head_event_id"] = self._head_event_id_locked()
+        report["plan_token"] = self._claim_plan_token(
+            report["head_event_id"], report["divergences"]
+        )
+        return report
+
+    def _apply_claim_projection(
+        self, *, plan: Mapping[str, Any] | None, actor: str, permission: str
+    ) -> dict[str, Any]:
+        self._ensure_open()
+        report: dict[str, Any] = {
+            "ok": False, "applied": False, "refusal": None, "plan_token": None,
+            "rows_before": 0, "rows_after": 0, "divergences_fixed": 0,
+            "removed_ids": [], "removed_memory_ids": [], "recreated_ids": [],
+            "updated_ids": [], "lost_evidence_claim_ids": [], "event_id": None,
+            "divergences": [], "before": None, "after": None,
+            "verification": None,
+        }
+        if not self._spine_ready:
+            report["refusal"] = "spine_unavailable"
+            return report
+        if self.db.in_transaction:
+            # A caller's open snapshot would be committed with the rebuild.
+            report["refusal"] = "transaction_already_open"
+            return report
+        if plan is None:
+            # The plan is what the operator saw: a dry run in its own
+            # snapshot, before the write lock, never the in-lock re-run.
+            plan = self._rebuild_claim_projection_dry_run()
+        plan_token = self._plan_token_of(plan)
+        report["plan_token"] = plan_token
+        report["before"] = dict(plan)
+        report["rows_before"] = int(plan.get("rows_live") or 0)
+        report["divergences"] = list(plan.get("divergences") or [])
+        builder = self._claim_backing_content_builder()
+        context = self._spine_context(actor, None, permission)
+        self._recall_cache.clear()
+        self.db.execute("BEGIN IMMEDIATE")
+        try:
+            verification = memory_spine.verify_spine(self.db, self._spine_key)
+            report["verification"] = verification
+            # The chain must be authentic; lineage problems are what apply
+            # reconciles (an out-of-band insert is a row without an event).
+            if not bool(verification.get("chain_ok", verification.get("ok", False))):
+                report["refusal"] = "verify_failed"
+                return report
+            current = memory_spine.rebuild_claim_projection(
+                self.db, self._spine_key, content_builder=builder
+            )
+            current_token = self._claim_plan_token(
+                self._head_event_id_locked(), current["divergences"]
+            )
+            if plan_token is not None:
+                stale = plan_token != current_token
+            else:
+                stale = (
+                    self._claim_divergence_signature(plan.get("divergences") or [])
+                    != self._claim_divergence_signature(current["divergences"])
+                )
+            if stale:
+                # The store changed after the operator saw the plan.
+                report["refusal"] = "stale_plan"
+                report["divergences"] = list(current["divergences"])
+                return report
+            report["plan_token"] = plan_token or current_token
+            report["rows_before"] = int(current["rows_live"])
+            if not current["divergences"]:
+                report["ok"] = True
+                report["rows_after"] = int(current["rows_live"])
+                return report
+            def _reproject_graph() -> dict[str, Any]:
+                """Rebuild the graph from the reconciled claim rows, inside
+                this transaction and before the receipt is appended, so the
+                claim receipt can say the graph followed (design 4.5)."""
+                if not self._graph_ready:
+                    return {}
+                memory_graph.reproject(self.db, now=now_iso())
+                return {"graph_reprojected": True}
+
+            applied = memory_spine.apply_claim_projection(
+                self.db,
+                self._spine_key,
+                plan,
+                content_builder=builder,
+                now=now_iso(),
+                actor=context["actor"],
+                permission=context["permission"],
+                post_apply=_reproject_graph,
+            )
+            after = memory_spine.rebuild_claim_projection(
+                self.db, self._spine_key, content_builder=builder
+            )
+            report["after"] = after
+            if after["divergences"]:
+                report["refusal"] = "residual_divergence"
+                report["divergences"] = list(after["divergences"])
+                return report
+            self.db.commit()
+        except memory_spine.SpineError as exc:
+            code = str(getattr(exc, "code", "") or "").strip()
+            report["refusal"] = code or str(exc).split(":", 1)[0].strip() or "spine_error"
+            return report
+        except sqlite3.Error:
+            report["refusal"] = "write_conflict"
+            return report
+        finally:
+            if self.db.in_transaction:
+                self.db.rollback()
+        report["ok"] = True
+        report["applied"] = True
+        report["divergences"] = []
+        report["rows_after"] = int(applied.get("rows_after", after["rows_live"]))
+        for key in (
+            "divergences_fixed", "removed_ids", "removed_memory_ids",
+            "recreated_ids", "updated_ids", "lost_evidence_claim_ids", "event_id",
+        ):
+            if key in applied:
+                report[key] = applied[key]
+        self._recall_cache.clear()
+        if str(self.path) != ":memory:":
+            try:
+                self.db.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()
+            except sqlite3.OperationalError:
+                pass
+        return report
+
+    @_with_read_snapshot
+    def rebuild_memory_projection(self) -> dict[str, Any]:
+        """Replay ``memory.*`` / ``lesson.*`` events into a shadow keyed by
+        memory id and compare digests, provenance, and lesson provenance with
+        the live rows (dry run; details name digests and fields, never
+        content).  Claim backing rows are lineage-checked only."""
+        self._ensure_open()
+        if not self._spine_ready:
+            return {"ok": False, "rows_live": 0, "rows_rebuilt": 0,
+                    "divergences": [{"memory_id": None, "kind": "verify",
+                                     "detail": "spine is unavailable"}],
+                    "verification": None}
+        return memory_spine.rebuild_memory_projection(self.db, self._spine_key)
+
+    @_with_read_snapshot
+    def verify_graph(self) -> dict[str, Any]:
+        """Check the temporal graph against the claim rows it projects; never
+        repairs.  Problem details name fields, never values."""
+        self._ensure_open()
+        # Delegate unconditionally: the module already reports a store with no
+        # graph as ``ready`` False with no problems, and it reads the live
+        # tables rather than the cached open-time flag, so a table dropped out
+        # of band after this store was opened is reported honestly.  Inventing
+        # a problem of kind "graph" here would put a kind outside
+        # ``VERIFY_PROBLEM_KINDS`` into a caller's report.
+        return memory_graph.verify_graph(self.db)
+
+    def rebuild_graph_projection(
+        self,
+        *,
+        apply: bool = False,
+        plan: Mapping[str, Any] | None = None,
+        actor: str = "operator",
+        permission: str = "operator:cli",
+    ) -> dict[str, Any]:
+        """Compare the graph with the projection it is derived from.
+
+        ``apply=False`` is a dry run that changes nothing; its report carries
+        ``head_event_id`` and ``plan_token``, which bind it to the store it
+        described.  ``apply=True`` reconciles in place under the write lock —
+        extra edges deleted, missing and field-divergent ones re-projected,
+        orphan entities swept, new entity ids allocated only for entities that
+        do not exist — re-runs the dry run inside the transaction, rolls back
+        on residue, and appends ``projection.rebuilt {projection: "graph"}``.
+        ``plan`` is the dry-run report the operator confirmed; a mismatch
+        refuses with ``stale_plan``.
+        """
+        if not apply:
+            return self._rebuild_graph_projection_dry_run()
+        return self._apply_graph_projection(
+            plan=plan, actor=actor, permission=permission
+        )
+
+    @staticmethod
+    def _graph_divergence_signature(
+        report: Mapping[str, Any] | Sequence[Mapping[str, Any]],
+    ) -> list[list[Any]]:
+        """The module's own (claim_id, entity_id, kind) set, so a plan token
+        can never disagree with what ``verify_graph`` calls a divergence."""
+        source = (
+            report if isinstance(report, Mapping) else {"divergences": list(report)}
+        )
+        return [list(item) for item in memory_graph.divergence_signature(source)]
+
+    @classmethod
+    def _graph_plan_token(
+        cls,
+        head_event_id: int | None,
+        report: Mapping[str, Any] | Sequence[Mapping[str, Any]],
+    ) -> str:
+        """Twelve hex characters binding a graph dry run to the store it
+        described: the head event id and the sorted divergence set."""
+        return memory_spine.sha256_hex(
+            memory_spine.canonical([
+                "graph",
+                None if head_event_id is None else int(head_event_id),
+                cls._graph_divergence_signature(report),
+            ])
+        )[:12]
+
+    @_with_read_snapshot
+    def _rebuild_graph_projection_dry_run(self) -> dict[str, Any]:
+        self._ensure_open()
+        # Same rule as ``verify_graph``: the module owns the shape, including
+        # the ``ready`` False report for a store with no graph.
+        report = memory_graph.rebuild_graph_projection(self.db)
+        report["head_event_id"] = self._head_event_id_locked()
+        report["plan_token"] = self._graph_plan_token(
+            report["head_event_id"], report
+        )
+        return report
+
+    def _apply_graph_projection(
+        self, *, plan: Mapping[str, Any] | None, actor: str, permission: str
+    ) -> dict[str, Any]:
+        self._ensure_open()
+        report: dict[str, Any] = {
+            "ok": False, "applied": False, "refusal": None, "plan_token": None,
+            "edges_before": 0, "edges_after": 0, "divergences_fixed": 0,
+            "removed_ids": [], "removed_entity_ids": [], "recreated_ids": [],
+            "updated_ids": [], "event_id": None, "divergences": [],
+            "before": None, "after": None,
+        }
+        if not self._graph_ready:
+            report["refusal"] = "graph_unavailable"
+            return report
+        if self.db.in_transaction:
+            # A caller's open snapshot would be committed with the rebuild.
+            report["refusal"] = "transaction_already_open"
+            return report
+        if plan is None:
+            # The plan is what the operator saw: a dry run in its own
+            # snapshot, before the write lock, never the in-lock re-run.
+            plan = self._rebuild_graph_projection_dry_run()
+        plan_token = plan.get("plan_token")
+        if not isinstance(plan_token, str) or not plan_token:
+            plan_token = (
+                None if plan.get("head_event_id") is None
+                else self._graph_plan_token(int(plan["head_event_id"]), plan)
+            )
+        report["plan_token"] = plan_token
+        report["before"] = dict(plan)
+        report["divergences"] = list(plan.get("divergences") or [])
+        context = self._spine_context(actor, None, permission)
+        self._recall_cache.clear()
+        self.db.execute("BEGIN IMMEDIATE")
+        applied: dict[str, Any] = {}
+        try:
+            current = memory_graph.rebuild_graph_projection(self.db)
+            current_token = self._graph_plan_token(
+                self._head_event_id_locked(), current
+            )
+            if plan_token is not None:
+                stale = plan_token != current_token
+            else:
+                stale = (
+                    self._graph_divergence_signature(plan.get("divergences") or [])
+                    != self._graph_divergence_signature(current)
+                )
+            if stale:
+                # The store changed after the operator saw the plan.
+                report["refusal"] = "stale_plan"
+                report["divergences"] = list(current["divergences"])
+                return report
+            report["plan_token"] = plan_token or current_token
+            report["edges_before"] = int(current.get("edges_live") or 0)
+            if not current["divergences"]:
+                report["ok"] = True
+                report["edges_after"] = int(current.get("edges_live") or 0)
+                return report
+            applied = memory_graph.apply_graph_projection(
+                self.db,
+                self._spine_key,
+                plan,
+                now=now_iso(),
+                actor=context["actor"],
+                permission=context["permission"],
+            )
+            after = memory_graph.rebuild_graph_projection(self.db)
+            report["after"] = after
+            if after["divergences"]:
+                report["refusal"] = "residual_divergence"
+                report["divergences"] = list(after["divergences"])
+                return report
+            self.db.commit()
+        except memory_spine.SpineError as exc:
+            code = str(getattr(exc, "code", "") or "").strip()
+            report["refusal"] = code or str(exc).split(":", 1)[0].strip() or "spine_error"
+            return report
+        except sqlite3.Error:
+            report["refusal"] = "write_conflict"
+            return report
+        finally:
+            if self.db.in_transaction:
+                self.db.rollback()
+        report["ok"] = True
+        report["applied"] = True
+        report["divergences"] = []
+        for key in (
+            "edges_after", "divergences_fixed", "removed_ids",
+            "removed_entity_ids", "recreated_ids", "updated_ids", "event_id",
+        ):
+            if key in applied:
+                report[key] = applied[key]
+        self._recall_cache.clear()
+        if str(self.path) != ":memory:":
+            try:
+                self.db.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()
+            except sqlite3.OperationalError:
+                pass
+        return report
+
     @_with_recall_cache
-    @_with_immediate_snapshot
+    @_with_read_snapshot
+    def subject_claim_history(
+        self,
+        subject: str,
+        *,
+        project_id: int | None = None,
+        limit: int = 6,
+    ) -> list[dict[str, Any]]:
+        """Superseded versions of every claim key about one subject, newest
+        first, through the screened read path (design 12.6 item 6).
+
+        A secret in the subject refuses (``ValueError``); a private
+        identifier, a missing or disabled project, or a candidate overflow
+        abstains with ``[]``.  Project keys shadow the global key, look-alike
+        subjects are excluded by the identity rule, values that carry a secret
+        or private identifier are dropped, and every row must still pass the
+        recall-material check with ``superseded`` admitted.  Ordering is
+        ``valid_until DESC, id DESC``; at most ``limit`` (six) entries and
+        three per key.  Entries carry ``status`` superseded, ``superseded_at``,
+        and ``retracted`` (True when the key has no current value).  Only
+        ``Erase`` removes a value from this history; ``Forget`` keeps it.
+        """
+        self._ensure_open()
+        raw_subject = str(subject)
+        if len(raw_subject) > MAX_SEARCH_QUERY_CHARS:
+            raise ValueError(
+                f"Claim subject exceeds {MAX_SEARCH_QUERY_CHARS} characters"
+            )
+        if contains_secret(raw_subject):
+            raise ValueError("Potential secret detected; claim history refused")
+        if contains_private_identifier(raw_subject):
+            return []
+        limit = _bounded_limit(limit, 6)
+        subject_fold = " ".join(raw_subject.casefold().split())
+        subject_terms = _memory_tokens(
+            raw_subject, meaningful_only=True, cache_allowed=False
+        )
+        if not limit or not subject_fold or not subject_terms:
+            return []
+        project_scope = None
+        if project_id is not None:
+            normalized_project = self._project_id(project_id)
+            project = self.db.execute(
+                "SELECT enabled FROM agent_projects WHERE id=?",
+                (normalized_project,),
+            ).fetchone()
+            if project is None or not bool(project["enabled"]):
+                return []
+            project_scope = project_claim_scope(normalized_project)
+        visible_scopes = (
+            ("global",) if project_scope is None else ("global", project_scope)
+        )
+        scope_placeholders = ",".join("?" for _scope in visible_scopes)
+        parameters: list[Any] = [*visible_scopes]
+        subject_sql = ""
+        if subject_fold.isascii():
+            # SQLite's lower() folds ASCII only; other subjects are screened
+            # in Python below under the same candidate bound.
+            subject_sql = " AND instr(lower(c.subject), ?) > 0"
+            parameters.append(subject_fold)
+        parameters.append(MAX_MEMORY_SEARCH_CANDIDATES + 1)
+        rows = self.db.execute(
+            f"""SELECT c.id AS claim_id, c.memory_id, c.scope, c.claim_key,
+                       c.created_at, c.updated_at, c.subject, c.predicate, c.value,
+                       c.value_sha256, c.source, c.authority, c.confidence, c.status,
+                       c.valid_from, c.valid_until, c.supersedes_id
+                FROM memory_claims AS c
+                WHERE c.scope IN ({scope_placeholders})
+                  AND c.status='superseded'{subject_sql}
+                ORDER BY c.valid_until DESC, c.id DESC
+                LIMIT ?""",
+            parameters,
+        ).fetchall()
+        if len(rows) > MAX_MEMORY_SEARCH_CANDIDATES:
+            return []
+        requested_terms = set(subject_terms)
+        candidates: list[dict[str, Any]] = []
+        for row in rows:
+            item = dict(row)
+            row_subject = str(item["subject"])
+            if subject_fold not in " ".join(row_subject.casefold().split()):
+                continue
+            row_terms = _memory_tokens(
+                row_subject, meaningful_only=True, cache_allowed=False
+            )
+            if not row_terms or not requested_terms.issubset(set(row_terms)):
+                continue
+            head = row_terms[0]
+            if head not in requested_terms and _claim_subject_identity_conflict(
+                head, requested_terms
+            ):
+                continue
+            value = str(item["value"])
+            if contains_secret(value) or contains_private_identifier(value):
+                continue
+            candidates.append(item)
+        if not candidates:
+            return []
+        if project_scope is not None:
+            # A project key shadows the global key's whole history, whatever
+            # the status of the project rows.
+            global_keys = sorted({
+                str(item["claim_key"]) for item in candidates
+                if str(item["scope"]) != project_scope
+            })
+            shadowed: set[str] = set()
+            for offset in range(0, len(global_keys), 400):
+                chunk = global_keys[offset:offset + 400]
+                placeholders = ",".join("?" for _key in chunk)
+                shadowed.update(
+                    str(found[0]) for found in self.db.execute(
+                        f"""SELECT DISTINCT claim_key FROM memory_claims
+                            WHERE scope=? AND claim_key IN ({placeholders})""",
+                        [project_scope, *chunk],
+                    ).fetchall()
+                )
+            candidates = [
+                item for item in candidates
+                if str(item["scope"]) == project_scope
+                or str(item["claim_key"]) not in shadowed
+            ]
+        eligible_ids = self._claim_rows_recall_eligible(
+            candidates, project_id=project_id, allow_superseded=True
+        )
+        candidates = [
+            item for item in candidates if int(item["claim_id"]) in eligible_ids
+        ]
+        keys = list(dict.fromkeys(
+            (str(item["scope"]), str(item["claim_key"])) for item in candidates
+        ))
+        current_keys: set[tuple[str, str]] = set()
+        for offset in range(0, len(keys), 400):
+            chunk = keys[offset:offset + 400]
+            placeholders = ",".join("(?, ?)" for _pair in chunk)
+            current_keys.update(
+                (str(found["scope"]), str(found["claim_key"]))
+                for found in self.db.execute(
+                    f"""SELECT scope, claim_key FROM memory_claims
+                        WHERE status IN ('active', 'disputed')
+                          AND (scope, claim_key) IN ({placeholders})""",
+                    [value for pair in chunk for value in pair],
+                ).fetchall()
+            )
+        results: list[dict[str, Any]] = []
+        per_key: dict[tuple[str, str], int] = {}
+        for item in candidates:
+            key = (str(item["scope"]), str(item["claim_key"]))
+            if per_key.get(key, 0) >= 3:
+                continue
+            per_key[key] = per_key.get(key, 0) + 1
+            item.pop("claim_key", None)
+            item.pop("value_sha256", None)
+            item["status"] = "superseded"
+            item["superseded_at"] = str(
+                item.get("valid_until") or item.get("updated_at") or ""
+            )
+            item["retracted"] = key not in current_keys
+            results.append(item)
+            if len(results) >= limit:
+                break
+        return results
+
+    def lesson_recall_report(self) -> dict[str, Any]:
+        """A copy of the diagnostic record for the most recent lesson read.
+
+        ``mode`` is the sixteen-value closed set of
+        ``learning_ladder.LESSON_RECALL_MODES`` (M4 design 5.4), ``exit`` names
+        the row of ``learning_ladder.LESSON_EXITS`` the lane took, and
+        ``abstained`` is true for the twelve modes that mean the lane refused,
+        so an empty list is never silent.  The record is written
+        **before** both raises in ``match_lessons``, so a caller that catches
+        the ``ValueError`` still learns why: ``screened`` for a secret in the
+        query, ``family-unsupported`` for an unknown family.
+
+        ``superseded_shadowed`` counts rows that were in the candidate pool
+        and failed their reuse controls for a lifecycle reason -- superseded,
+        contradicted, quarantined or expired.  It is the operator-visible
+        answer to "why did my lesson go quiet", and it is never shown to the
+        model.
+        """
+        return dict(self._last_lesson_recall_report)
+
+    def _lesson_exit(
+        self, report: Mapping[str, Any], exit_key: str, started: float
+    ) -> dict[str, Any]:
+        """Publish the diagnostic record for one exit of ``match_lessons``.
+
+        ``exit_key`` names a row of ``learning_ladder.LESSON_EXITS``, which
+        owns the mode, the reason sub-code and whether the exit cues.  The
+        store supplies only the counters it accumulated, so there is exactly
+        one place in the tree where an exit means something.
+        """
+        record = learning_ladder.lesson_recall_record(
+            exit_key,
+            family=report["family"],
+            project_id=report["project_id"],
+            candidates=int(report["candidates"]),
+            anchored=int(report["anchored"]),
+            in_project=int(report["in_project"]),
+            eligible=int(report["eligible"]),
+            returned=int(report["returned"]),
+            superseded_shadowed=int(report["superseded_shadowed"]),
+            elapsed_ms=round((time.monotonic() - started) * 1000.0, 3),
+        )
+        self._last_lesson_recall_report = record
+        return record
+
+    def _lesson_abstain(
+        self, report: Mapping[str, Any], exit_key: str, started: float
+    ) -> list[dict[str, Any]]:
+        """Record one refusal and return the empty list the lane already
+        returned.  Purely additive: the caller's behaviour is unchanged."""
+        self._lesson_exit(report, exit_key, started)
+        return []
+
+    def graph_recall_report(self) -> dict[str, Any]:
+        """A copy of the diagnostic record for the most recent graph read.
+
+        ``mode`` is the closed set of design 5.6 and ``abstained`` is true
+        whenever the channel refused, so an empty chain list is never silent.
+        """
+        return dict(self._last_graph_recall_report)
+
+    def _graph_abstain(
+        self,
+        report: dict[str, Any],
+        mode: str,
+        reason: str,
+        started: float,
+    ) -> dict[str, Any]:
+        report["mode"] = str(mode)
+        report["abstained"] = True
+        report["reason"] = str(reason)
+        report["elapsed_ms"] = round((time.monotonic() - started) * 1000.0, 3)
+        self._last_graph_recall_report = report
+        return {"rows": [], "overflow": [], "report": dict(report)}
+
+    # --- typed-invariant compaction (schema 50) ---------------------------
+    #
+    # Ownership, so a later reader does not have to reconstruct it:
+    # ``memory_compaction`` owns every pure decision -- what a turn is, where a
+    # span may be cut, the canonical form, both digests, the invariants and the
+    # summary.  This file owns the SQL, the transaction, the receipt, and the
+    # judgement calls a pure function is not allowed to make: whether the spine
+    # verified, whether a conversation is in scope, and whether the rebuild
+    # equivalence holds (design 11.18 -- two sources, one comparison, done by
+    # the layer allowed to have an opinion).
+
+    def _compaction_message_rows(
+        self, conversation_id: int
+    ) -> list[Any]:
+        """Every persisted turn of one conversation, as ``MessageRow``s."""
+        return [
+            memory_compaction.MessageRow(
+                id=int(row["id"]),
+                conversation_id=int(row["conversation_id"]),
+                created_at=str(row["created_at"]),
+                role=str(row["role"]),
+                content=str(row["content"]),
+            )
+            for row in self.db.execute(
+                """SELECT id, conversation_id, created_at, role, content
+                   FROM messages WHERE conversation_id=? ORDER BY id""",
+                (int(conversation_id),),
+            )
+        ]
+
+    def _held_back_message_ids(self, conversation_id: int) -> list[int]:
+        """Message ids a live fact proposal references (H-2).
+
+        These stay live and the candidate region is partitioned around them.
+        The proposal row is the anti-forgery record a ``store it`` confirmation
+        resolves against, so it is never deleted, nulled, or stripped of its
+        foreign key -- and the key is why an unpartitioned delete would abort
+        with ``IntegrityError`` in the first place.
+        """
+        return [
+            int(row[0])
+            for row in self.db.execute(
+                """SELECT assistant_message_id FROM memory_fact_proposals
+                   WHERE conversation_id=? AND assistant_message_id IS NOT NULL""",
+                (int(conversation_id),),
+            )
+        ]
+
+    def _span_busy_reason(self, conversation_id: int) -> str | None:
+        """Why this conversation may not be compacted right now, or ``None``.
+
+        Every read is existence-guarded: ``long_horizon_plans`` is created
+        lazily by ``long_horizon``, not by ``_migrate``, so an unguarded query
+        raises ``OperationalError`` on a store that never ran a workflow (L-4).
+        ``approvals`` has no ``conversation_id`` column and is joined by scope.
+        """
+        scope = f"conversation:{int(conversation_id)}"
+        if self.db.execute(
+            "SELECT 1 FROM approvals WHERE scope=? AND status='pending' LIMIT 1",
+            (scope,),
+        ).fetchone() is not None:
+            return "approval_pending"
+        if self.db.execute(
+            """SELECT 1 FROM presence_jobs WHERE conversation_id=?
+               AND status IN ('queued', 'running') LIMIT 1""",
+            (int(conversation_id),),
+        ).fetchone() is not None:
+            return "job_active"
+        if _sqlite_table_exists(self.db, "long_horizon_plans"):
+            if self.db.execute(
+                """SELECT 1 FROM long_horizon_plans WHERE conversation_id=?
+                   AND status IN ('active', 'paused') LIMIT 1""",
+                (int(conversation_id),),
+            ).fetchone() is not None:
+                return "workflow_active"
+        return None
+
+    def _conversation_scope(self, conversation_id: int) -> int | None:
+        """The conversation's project at READ time, never a denormalised copy
+        (M-18): a conversation can be moved between projects."""
+        row = self.db.execute(
+            "SELECT project_id FROM conversations WHERE id=?",
+            (int(conversation_id),),
+        ).fetchone()
+        return None if row is None else int(row[0] or 1)
+
+    def _compaction_events(
+        self, conversation_id: int, after: int, through: int | None = None
+    ) -> tuple[Any, ...]:
+        """Spine events for one conversation in ``(after, through]``.
+
+        The SELECT is built from ``memory_compaction.SPINE_EVENT_COLUMNS`` so
+        the column ORDER cannot drift from the reader's: core's own rebuild hit
+        a ``TypeError`` on a connection without a row factory, and this store
+        would never have reproduced it because ``Memory`` sets ``sqlite3.Row``.
+        """
+        columns = ", ".join(memory_compaction.SPINE_EVENT_COLUMNS)
+        if through is None:
+            rows = self.db.execute(
+                f"""SELECT {columns} FROM memory_spine_events
+                    WHERE conversation_id=? AND id > ? ORDER BY id""",
+                (int(conversation_id), int(after)),
+            ).fetchall()
+        else:
+            rows = self.db.execute(
+                f"""SELECT {columns} FROM memory_spine_events
+                    WHERE conversation_id=? AND id > ? AND id <= ? ORDER BY id""",
+                (int(conversation_id), int(after), int(through)),
+            ).fetchall()
+        return memory_compaction.spine_event_rows(rows)
+
+    def _previous_watermark(self, conversation_id: int) -> int:
+        """The newest milestone's ``through`` for this conversation, 0 if none.
+
+        ``after`` for the next milestone, so the ranges stay disjoint and
+        gap-free (N-3).
+        """
+        row = self.db.execute(
+            """SELECT id, invariants_json FROM memory_milestones
+               WHERE conversation_id=? ORDER BY seq DESC LIMIT 1""",
+            (int(conversation_id),),
+        ).fetchone()
+        if row is None:
+            # No previous milestone is not a failure: the first span starts at
+            # zero by definition.
+            return 0
+        try:
+            derived = json.loads(str(row["invariants_json"]))["derived"]
+            return int(derived["event_range"]["through"])
+        except (TypeError, ValueError, KeyError) as error:
+            # Red team M-7.  This used to fall back to 0, which is the most
+            # dangerous value available: it makes the NEXT milestone claim
+            # every event from the beginning of the conversation, overlapping
+            # every range already written, and nothing downstream detects it
+            # because overlapping ranges still replay.  An unreadable previous
+            # milestone means the watermark is unknown, and an unknown
+            # watermark refuses.
+            raise memory_spine.SpineError(
+                f"milestone {int(row['id'])} has an unreadable event range; "
+                "refusing to compute a watermark from it (run compaction "
+                "verify)",
+                code="watermark_unreadable",
+            ) from error
+
+    @classmethod
+    def _compaction_plan_token(cls, plan: Mapping[str, Any]) -> str:
+        """Twelve hex binding a dry run to the store it described: the
+        conversation, every span's identity digest, and the held-back set."""
+        return memory_spine.sha256_hex(
+            memory_spine.canonical([
+                "compaction",
+                int(plan.get("conversation_id") or 0),
+                [str(span["span_unkeyed_sha256"]) for span in plan.get("spans") or []],
+                sorted(int(item) for item in plan.get("held_back_messages") or []),
+            ])
+        )[:12]
+
+    def compact_conversation(
+        self,
+        conversation_id: int,
+        *,
+        keep_turns: int | None = None,
+        min_span_chars: int | None = None,
+        max_span_chars: int | None = None,
+        apply: bool = False,
+        plan_token: str | None = None,
+    ) -> dict[str, Any]:
+        """Plan or apply one compaction pass over a conversation.
+
+        Dry run by default, returning the plan and a token that binds it to the
+        store it described; ``apply=True`` requires that token and refuses
+        ``stale_plan`` if the store moved.  There is no model author and no
+        summariser argument: M5 ships neither (M-16).
+        """
+        if not apply:
+            return self._compact_conversation_dry_run(
+                conversation_id, keep_turns=keep_turns,
+                min_span_chars=min_span_chars, max_span_chars=max_span_chars,
+            )
+        return self._apply_compaction(
+            conversation_id, keep_turns=keep_turns,
+            min_span_chars=min_span_chars, max_span_chars=max_span_chars,
+            plan_token=plan_token,
+        )
+
+    def _compaction_settings(
+        self,
+        keep_turns: int | None,
+        min_span_chars: int | None,
+        max_span_chars: int | None,
+    ) -> dict[str, int]:
+        """Module constants, never environment: half A ships no
+        ``JARVIS_COMPACTION_*`` surface at all, and therefore no flag anyone
+        can leave on by accident."""
+        return {
+            "keep_turns": (memory_compaction.DEFAULT_KEEP_TURNS
+                           if keep_turns is None else max(0, int(keep_turns))),
+            "min_span_chars": (memory_compaction.DEFAULT_MIN_SPAN_CHARS
+                               if min_span_chars is None
+                               else max(0, int(min_span_chars))),
+            "max_span_chars": (memory_compaction.DEFAULT_MAX_SPAN_CHARS
+                               if max_span_chars is None
+                               else max(1, int(max_span_chars))),
+            "max_span_messages": memory_compaction.MAX_SPAN_MESSAGES,
+        }
+
+    @_with_read_snapshot
+    def _compact_conversation_dry_run(
+        self,
+        conversation_id: int,
+        *,
+        keep_turns: int | None = None,
+        min_span_chars: int | None = None,
+        max_span_chars: int | None = None,
+    ) -> dict[str, Any]:
+        self._ensure_open()
+        settings = self._compaction_settings(
+            keep_turns, min_span_chars, max_span_chars
+        )
+        report: dict[str, Any] = {
+            "conversation_id": int(conversation_id),
+            "applied": False,
+            "refusal": None,
+            "refusal_detail": None,
+            "plan_token": None,
+            "spans": [],
+            "skipped": [],
+            "held_back_messages": [],
+            "candidate_rows": 0,
+            "candidate_chars": 0,
+            **settings,
+        }
+        refusal = self._compaction_refusal()
+        if refusal is not None:
+            report["refusal"] = refusal
+            return report
+        if self._conversation_scope(conversation_id) is None:
+            report["refusal"] = "error"
+            report["refusal_detail"] = "no such conversation"
+            return report
+        rows = self._compaction_message_rows(conversation_id)
+        plan = memory_compaction.plan_spans(
+            int(conversation_id),
+            rows,
+            proposal_message_ids=self._held_back_message_ids(conversation_id),
+            busy_reason=self._span_busy_reason(conversation_id),
+            **settings,
+        )
+        by_id = {int(row.id): row for row in rows}
+        report["candidate_rows"] = plan.candidate_rows
+        report["candidate_chars"] = plan.candidate_chars
+        report["held_back_messages"] = [
+            int(item) for item in plan.held_back_message_ids
+        ]
+        report["skipped"] = [
+            {"first_message_id": item.first_message_id,
+             "last_message_id": item.last_message_id,
+             "message_count": item.message_count,
+             "source_chars": item.source_chars,
+             "reason": item.reason}
+            for item in plan.skipped
+        ]
+        if plan.refusal is not None:
+            report["refusal"] = plan.refusal
+            report["refusal_detail"] = plan.refusal_detail
+            return report
+        seq = memory_compaction.next_seq(self.db, int(conversation_id))
+        after = self._previous_watermark(conversation_id)
+        for bounds in plan.spans:
+            span = self._build_span(bounds, by_id, seq=seq, after=after)
+            report["spans"].append({
+                "seq": span.seq,
+                "handle": span.handle,
+                "first_message_id": span.first_message_id,
+                "last_message_id": span.last_message_id,
+                "message_count": span.message_count,
+                "source_chars": span.source_chars,
+                "stored_bytes": span.stored_bytes,
+                "summary_chars": span.summary_chars,
+                "span_unkeyed_sha256": span.span_unkeyed_sha256,
+                "screened": span.screened,
+                "event_range": span.event_range,
+                "reduction_ratio": span.reduction_ratio,
+            })
+            after = int(span.event_range["through"])
+            seq += 1
+        report["plan_token"] = self._compaction_plan_token(report)
+        return report
+
+    def _build_span(
+        self, bounds: Any, by_id: Mapping[int, Any], *, seq: int, after: int
+    ) -> Any:
+        """One sub-region's whole record, built by ``memory_compaction``.
+
+        ``CompactionPlan.spans`` carries ``SpanBounds`` -- the ids, not the
+        rows -- so this layer supplies the messages from the list it already
+        read.  Selecting by the bounds' own ``message_ids`` rather than by a
+        range keeps the N-1 discipline even here: a range lookup over a global
+        id sequence would pull in another conversation's interleaved rows.
+
+        The watermark is computed per sub-region (N-3): ``through`` is the
+        largest event id for this conversation at or before THIS sub-region's
+        own last message.  One pass-wide watermark would give every event to
+        whichever milestone happened to be written first and leave the rest
+        with an empty range -- a false statement that replays false identically
+        and so passes a rebuild check.
+        """
+        messages = [
+            by_id[int(message_id)]
+            for message_id in bounds.message_ids
+            if int(message_id) in by_id
+        ]
+        events = self._compaction_events(bounds.conversation_id, after)
+        return memory_compaction.build_compacted_span(
+            span=bounds,
+            messages=messages,
+            events=events,
+            after=int(after),
+            seq=int(seq),
+            key=self._spine_key,
+        )
+
+    def _compaction_refusal(self) -> str | None:
+        """The fail-closed preconditions shared by every compaction entry."""
+        if not self._compaction_ready:
+            return "schema_too_old"
+        if not self._spine_ready:
+            return "spine_unverified"
+        try:
+            if not self.verify_spine()["ok"]:
+                return "spine_unverified"
+        except memory_spine.SpineError:
+            return "spine_unverified"
+        if not self._spine_key:
+            return "key_unavailable"
+        return None
+
+    def _apply_compaction(
+        self,
+        conversation_id: int,
+        *,
+        keep_turns: int | None,
+        min_span_chars: int | None,
+        max_span_chars: int | None,
+        plan_token: str | None,
+    ) -> dict[str, Any]:
+        self._ensure_open()
+        if self.db.in_transaction:
+            plan = {"conversation_id": int(conversation_id), "applied": False,
+                    "refusal": "transaction_already_open", "spans": []}
+            return plan
+        plan = self._compact_conversation_dry_run(
+            conversation_id, keep_turns=keep_turns,
+            min_span_chars=min_span_chars, max_span_chars=max_span_chars,
+        )
+        if plan["refusal"] is not None or not plan["spans"]:
+            return plan
+        if plan_token is not None and plan_token != plan["plan_token"]:
+            plan["refusal"] = "stale_plan"
+            return plan
+        settings = self._compaction_settings(
+            keep_turns, min_span_chars, max_span_chars
+        )
+        stamp = now_iso()
+        written: list[dict[str, Any]] = []
+        self._recall_cache.clear()
+        try:
+            return self._apply_compaction_locked(
+                conversation_id, plan, settings, stamp, written
+            )
+        except sqlite3.Error as error:
+            # Design 2.9: any ``sqlite3.Error`` aborts and reports, and a
+            # locked database never turns a turn into a crash.  The
+            # transaction context manager has already rolled back, so nothing
+            # is half-written; what must not happen is the traceback escaping
+            # into a caller that was only asking to tidy a transcript.
+            plan["refusal"] = "error"
+            plan["refusal_detail"] = type(error).__name__
+            return plan
+
+    def _apply_compaction_locked(
+        self,
+        conversation_id: int,
+        plan: dict[str, Any],
+        settings: dict[str, int],
+        stamp: str,
+        written: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        with self._immediate_transaction():
+            # Re-resolve under the lock and refuse ``stale_span`` if the store
+            # moved between the snapshot and the write (M-17's TOCTOU).
+            live_rows = self._compaction_message_rows(conversation_id)
+            current = memory_compaction.plan_spans(
+                int(conversation_id),
+                live_rows,
+                proposal_message_ids=self._held_back_message_ids(conversation_id),
+                busy_reason=self._span_busy_reason(conversation_id),
+                **settings,
+            )
+            live_by_id = {int(row.id): row for row in live_rows}
+            if current.refusal is not None:
+                plan["refusal"] = current.refusal
+                plan["refusal_detail"] = current.refusal_detail
+                return plan
+            seq = memory_compaction.next_seq(self.db, int(conversation_id))
+            after = self._previous_watermark(conversation_id)
+            rebuilt: list[Any] = []
+            for bounds in current.spans:
+                span = self._build_span(bounds, live_by_id, seq=seq, after=after)
+                rebuilt.append(span)
+                after = int(span.event_range["through"])
+                seq += 1
+            if [item.span_unkeyed_sha256 for item in rebuilt] != [
+                str(item["span_unkeyed_sha256"]) for item in plan["spans"]
+            ]:
+                plan["refusal"] = "stale_span"
+                return plan
+            # The FTS scrub configures SUBSEQUENT deletions, so it goes BEFORE
+            # them, matching ``delete_conversation`` (M-4).
+            memory_spine.fts_secure_delete(self.db, "message_fts")
+            for span in rebuilt:
+                event_id = memory_spine.append_event(
+                    self.db,
+                    self._spine_key,
+                    kind=memory_compaction.COMPACTION_SPINE_KIND,
+                    actor="operator",
+                    source="transcript compaction",
+                    scope=(f"project:{self._conversation_scope(conversation_id)}"),
+                    permission="operator:cli",
+                    outcome="applied",
+                    payload=span.spine_payload(at=stamp),
+                    now=stamp,
+                    conversation_id=int(conversation_id),
+                    subject_kind="conversation",
+                    subject_id=int(conversation_id),
+                )
+                milestone = span.milestone_row(
+                    created_at=stamp, spine_event_id=int(event_id)
+                )
+                columns = ", ".join(milestone)
+                placeholders = ", ".join("?" for _ in milestone)
+                cursor = self.db.execute(
+                    f"INSERT INTO memory_milestones({columns}) "
+                    f"VALUES ({placeholders})",
+                    tuple(milestone.values()),
+                )
+                milestone_id = int(cursor.lastrowid)
+                row = span.span_row(milestone_id=milestone_id)
+                columns = ", ".join(row)
+                placeholders = ", ".join("?" for _ in row)
+                self.db.execute(
+                    f"INSERT INTO memory_compacted_spans({columns}) "
+                    f"VALUES ({placeholders})",
+                    tuple(row.values()),
+                )
+                # ``conversation_id`` is not optional on this DELETE and is not
+                # defensive tidiness (N-1).  ``messages.id`` is one global
+                # sequence, so an unscoped range names the live rows of every
+                # other conversation whose ids interleave -- rows that exist in
+                # no span blob.  Measured on this host: a 60-conversation store
+                # gives one conversation an id range spanning 49,922 rows of
+                # which 834 are its own.
+                predicate, parameters = span.range_predicate()
+                self.db.execute(
+                    f"DELETE FROM messages WHERE {predicate}", parameters
+                )
+                written.append({
+                    "seq": span.seq, "handle": span.handle,
+                    "milestone_id": milestone_id, "spine_event_id": int(event_id),
+                    "message_count": span.message_count,
+                    "source_chars": span.source_chars,
+                    "stored_bytes": span.stored_bytes,
+                })
+        self._recall_cache.clear()
+        plan["applied"] = True
+        plan["written"] = written
+        return plan
+
+    @_with_read_snapshot
+    def conversation_milestones(
+        self,
+        conversation_id: int,
+        *,
+        project_id: int | None = None,
+        before_message_id: int | None = None,
+        limit: int = 6,
+        char_budget: int = memory_compaction.COMPACTED_HISTORY_LIMIT,
+    ) -> dict[str, Any]:
+        """Milestone summaries covering history the caller is about to drop.
+
+        Never raises: every failure is a mode.  The read runs in one deferred
+        snapshot and never takes the write lock, so a concurrent writer can
+        never turn a foreground turn into an error.
+        """
+        blank = {"rows": [], "overflow": False, "report": {"mode": "none"}}
+        try:
+            self._ensure_open()
+            if not self._compaction_ready:
+                blank["report"] = {"mode": "none"}
+                return blank
+            scope = self._conversation_scope(conversation_id)
+            if scope is None or (
+                project_id is not None and int(project_id) != scope
+            ):
+                return {"rows": [], "overflow": False,
+                        "report": {"mode": "project-unavailable"}}
+            deadline = time.monotonic() + (
+                memory_compaction.DEFAULT_READ_BUDGET_MS / 1000.0
+            )
+            # ``before_message_id`` carries ``conversation_id`` alongside the
+            # range: message ids are global and interleave (N-1).
+            # Red team M-6.  The scan was unbounded, so a conversation with
+            # 3,011 milestones did not merely go slow -- the 10 ms deadline
+            # expired part-way through and the call returned ZERO rows.  That
+            # is the silent scale cliff M1 shipped and a whole phase went into
+            # repairing: the store answering "nothing" when it means "too
+            # many".  The SQL is bounded instead, and the bound is generous
+            # enough that skipped rows (a milestone whose span is gone) cannot
+            # starve the page.
+            scan_limit = max(1, int(limit)) * 4 + 8
+            if before_message_id is None:
+                cursor = self.db.execute(
+                    """SELECT * FROM memory_milestones WHERE conversation_id=?
+                       ORDER BY seq DESC LIMIT ?""",
+                    (int(conversation_id), scan_limit + 1),
+                )
+            else:
+                cursor = self.db.execute(
+                    """SELECT * FROM memory_milestones
+                       WHERE conversation_id=? AND last_message_id < ?
+                       ORDER BY seq DESC LIMIT ?""",
+                    (int(conversation_id), int(before_message_id),
+                     scan_limit + 1),
+                )
+            # One query for span existence over the whole bounded page,
+            # instead of one per scanned row.  The set is small by
+            # construction because the scan itself is bounded.
+            candidates = cursor.fetchall()
+            page_handles = [str(item["handle"]) for item in candidates]
+            live_handles: set[str] = set()
+            if page_handles:
+                placeholders = ", ".join("?" for _ in page_handles)
+                live_handles = {
+                    str(item[0]) for item in self.db.execute(
+                        f"SELECT handle FROM memory_compacted_spans "
+                        f"WHERE handle IN ({placeholders})",
+                        page_handles,
+                    )
+                }
+            rows: list[dict[str, Any]] = []
+            partial = False
+            scanned = 0
+            beyond_scan = False
+            for row in candidates:
+                scanned += 1
+                if scanned > scan_limit:
+                    # More milestones exist than this page will consider.  Say
+                    # so; do not return an empty page and let the caller read
+                    # it as "no history".
+                    beyond_scan = True
+                    break
+                if time.monotonic() > deadline:
+                    return {"rows": [], "overflow": True,
+                            "report": {"mode": "budget-exceeded"}}
+                if str(row["handle"]) not in live_handles:
+                    # The milestone outlived its span: a real state after an
+                    # erase, reported as such and never as an error.
+                    partial = True
+                    continue
+                try:
+                    # Parsed ONCE per row.  Parsing the same blob a second
+                    # time for ``observed`` doubled the JSON cost of the
+                    # whole scan, which at 3,011 milestones was measurable.
+                    invariants = json.loads(str(row["invariants_json"]))
+                    derived = invariants["derived"]
+                except (TypeError, ValueError, KeyError):
+                    partial = True
+                    continue
+                rows.append({
+                    "seq": int(row["seq"]),
+                    "handle": str(row["handle"]),
+                    "summary": str(row["summary"]),
+                    "message_ids": derived.get("message_ids") or {},
+                    "claim_keys": list(derived.get("claim_keys") or []),
+                    "files_touched": list(
+                        (invariants.get("observed") or {}).get(
+                            "files_touched") or []
+                    ),
+                    # Design item 11.19, one layer upstream of the renderer's
+                    # fix.  ``or "complete"`` manufactured the STRONGEST value
+                    # in the closed set out of an absence, on the one surface
+                    # that reaches a model: the closed set absorbed the
+                    # unknown, the model was told the span completed, and the
+                    # renderer's ``outcome_missing`` counter could never leave
+                    # zero because it never saw a silent row.  The absence is
+                    # propagated instead; ``render_compacted_history_block``
+                    # maps anything outside ``DERIVED_OUTCOMES`` to
+                    # ``unstated`` and counts it.
+                    "outcome": derived.get("outcome"),
+                })
+            rows.reverse()
+            kept, overflow = memory_compaction.fit_history_rows(
+                rows, char_budget=int(char_budget), max_rows=int(limit)
+            )
+            # Screen AFTER the trim, not during the scan.  H-6 requires the
+            # screen on every row this call RETURNS, which is what this is;
+            # screening every row it merely SCANNED cost 21 of the 24 ms
+            # measured at 3,011 milestones, because ``screen_endpoint`` ran
+            # twice per scanned row instead of twice per returned one.
+            # Screening only ever drops entries, so a row can only get
+            # smaller and the budget ``fit_history_rows`` enforced still holds.
+            for entry in kept:
+                claim_keys, _dropped = memory_compaction.screen_entries(
+                    entry["claim_keys"]
+                )
+                files_touched, _dropped = memory_compaction.screen_entries(
+                    entry["files_touched"]
+                )
+                entry["claim_keys"] = list(claim_keys)
+                entry["files_touched"] = list(files_touched)
+            if not kept:
+                mode = "partial" if (partial or beyond_scan) else "none"
+            else:
+                mode = "partial" if (partial or beyond_scan) else "complete"
+            return {"rows": kept,
+                    "overflow": bool(overflow or partial or beyond_scan),
+                    "report": {"mode": mode}}
+        except sqlite3.Error:
+            return {"rows": [], "overflow": False, "report": {"mode": "error"}}
+
+    @_with_read_snapshot
+    def rehydrate(
+        self, handle: str, *, project_id: int | None = None
+    ) -> dict[str, Any]:
+        """The exact original rows of one compacted span, or a closed refusal.
+
+        Scope is resolved here, and an out-of-scope handle raises
+        ``unknown_handle`` rather than a distinct code: a scope-specific
+        refusal is a cross-project existence oracle (M-15).
+        """
+        self._ensure_open()
+        if not self._compaction_ready:
+            raise memory_compaction.RehydrationError(
+                "compaction tables are absent", code="store_unavailable"
+            )
+        parsed = memory_compaction.try_parse_handle(str(handle))
+        if parsed is None:
+            raise memory_compaction.RehydrationError(
+                "handle is malformed", code="malformed_handle"
+            )
+        if project_id is not None:
+            scope = self._conversation_scope(parsed.conversation_id)
+            if scope is None or int(project_id) != scope:
+                raise memory_compaction.RehydrationError(
+                    "no such handle", code="unknown_handle"
+                )
+        return memory_compaction.rehydrate(self.db, self._spine_key, str(handle))
+
+    def verify_compaction(self) -> dict[str, Any]:
+        """Compaction health, with the chain qualifier resolved here.
+
+        ``memory_compaction.verify_compaction`` confirms every receipt is
+        present and every recorded digest matches its record, and it never
+        verifies the chain those records live on -- correctly, because a pure
+        function cannot know.  A forged chain leaves all of those facts true,
+        so a bare ``ok`` renders a clean compaction line over a spine that does
+        not verify.  ``Memory`` owns ``verify_spine``, so the wrapper answers
+        the question rather than passing it to an operator surface where the
+        reader would supply the optimistic answer.  ``chain_verified`` is never
+        ``None`` from here.
+        """
+        self._ensure_open()
+        return memory_compaction.verify_compaction(
+            self.db, self._spine_key, spine_ok=self._spine_chain_ok()
+        )
+
+    def _spine_chain_ok(self) -> bool:
+        """Whether the keyed chain verifies, as a plain bool that never
+        raises: a broken spine is the case this exists to report."""
+        if not self._spine_ready:
+            return False
+        try:
+            return bool(self.verify_spine()["ok"])
+        except (memory_spine.SpineError, sqlite3.Error):
+            return False
+
+    def rebuild_milestones(
+        self, *, include_derived: bool = False
+    ) -> dict[str, Any]:
+        """Re-derive every milestone's ``derived`` from the spine and JUDGE it.
+
+        Design 11.18: the equivalence is computed HERE, from invariant rows
+        this method fetches itself, against digests ``memory_compaction``
+        derived from the spine.  Two sources, one comparison.  An equality
+        computed inside a single call that reads both sides cannot fail, and a
+        gate that cannot fail is not a gate -- a defect populating the stored
+        side from the rebuilt value would make E-2 pass unconditionally.
+
+        ``rebuild_equivalence_derived`` is ``None`` with a ``reason`` whenever
+        it cannot honestly be a ratio: nothing derived, nothing to compare, or
+        a partial derivation.  It is never a flattering ``1.0`` over an empty
+        or incomplete set.
+        """
+        self._ensure_open()
+        # ONE spine verification, shared by both calls: the rebuild and the
+        # verifier must be describing the same store, and verifying twice
+        # invites them to disagree.
+        spine_ok = self._spine_chain_ok()
+        report = memory_compaction.rebuild_milestones(
+            self.db, self._spine_key,
+            spine_ok=spine_ok, include_derived=True,
+        )
+        # Red team H-1.  The gate used to be computed without ever asking the
+        # component whose job is to say whether the DATA is intact, so a store
+        # with every span blob deleted -- a restore that lost the entire
+        # compacted transcript -- returned ok=True, equivalence 1.0.  E-2
+        # exists to catch a system that is wrong; a gate that cannot fail for
+        # the reason it was built to detect is not a gate.  This is the
+        # equality-by-construction problem one level up, and the answer is the
+        # same: the judgement consults a second, independent source.
+        verification = memory_compaction.verify_compaction(
+            self.db, self._spine_key, spine_ok=spine_ok
+        )
+        report["verify_ok"] = bool(verification.get("ok"))
+        report["verify_problems"] = list(verification.get("problems") or [])
+        report["verify_refusal"] = verification.get("refusal")
+        report["rebuild_equivalence_derived"] = None
+        report["equivalence_reason"] = None
+        report["ok"] = False
+        derived = report.get("derived")
+        skipped = list(report.get("derived_skipped") or [])
+        if derived is None:
+            report["equivalence_reason"] = (
+                report.get("refusal") or "not_derived"
+            )
+            if not include_derived:
+                report.pop("derived", None)
+            return report
+        if skipped:
+            # A ratio over a partial set is the same failure as a ratio over an
+            # empty one, one row later.
+            report["equivalence_reason"] = "partial_derivation"
+            if not include_derived:
+                report.pop("derived", None)
+                report.pop("derived_skipped", None)
+            return report
+        if not derived:
+            report["equivalence_reason"] = "nothing_derived"
+            if not include_derived:
+                report.pop("derived", None)
+                report.pop("derived_skipped", None)
+            return report
+        matched = 0
+        mismatched: list[int] = []
+        for milestone_id, block in derived.items():
+            stored = self._stored_derived_block(int(milestone_id))
+            if stored is None:
+                mismatched.append(int(milestone_id))
+                continue
+            if memory_compaction.derived_digest(stored) == str(
+                block.get("rebuilt_sha256") or ""
+            ):
+                matched += 1
+            else:
+                mismatched.append(int(milestone_id))
+        total = matched + len(mismatched)
+        report["equivalence_mismatched"] = sorted(mismatched)
+        if not report["verify_ok"]:
+            # A store the verifier calls broken produces NO equivalence
+            # number, not a passing one with a caveat beside it: the figure is
+            # what everything downstream quotes, and it would be quoted out of
+            # its qualifier within one hop.
+            report["rebuild_equivalence_derived"] = None
+            report["equivalence_reason"] = "store_unverified"
+            report["ok"] = False
+            if not include_derived:
+                report.pop("derived", None)
+                report.pop("derived_skipped", None)
+            return report
+        report["rebuild_equivalence_derived"] = (
+            None if total == 0 else matched / total
+        )
+        report["equivalence_reason"] = None if total else "nothing_derived"
+        report["ok"] = bool(
+            total
+            and not mismatched
+            and report.get("chain_verified") is True
+            and report.get("refusal") is None
+        )
+        if not include_derived:
+            report.pop("derived", None)
+            report.pop("derived_skipped", None)
+        return report
+
+    def _stored_derived_block(self, milestone_id: int) -> dict[str, Any] | None:
+        """This layer's OWN read of one milestone's stored ``derived`` block.
+
+        Deliberately not taken from the rebuild's result: the whole point of
+        11.18 is that the two sides of the comparison come from two places.
+        """
+        row = self.db.execute(
+            "SELECT invariants_json FROM memory_milestones WHERE id=?",
+            (int(milestone_id),),
+        ).fetchone()
+        if row is None:
+            return None
+        try:
+            block = json.loads(str(row[0]))["derived"]
+        except (TypeError, ValueError, KeyError):
+            return None
+        return block if isinstance(block, dict) else None
+
+    # ``@_with_recall_cache`` FIRST, then ``@_with_read_snapshot``: M3's
+    # channel 3 is memoised per store, and the pair is load-bearing in that
+    # order.  Do not insert anything between a decorator and the function it
+    # decorates -- an M5 insertion anchored on ``@_with_read_snapshot`` landed
+    # a whole method block here and silently moved the memo onto an unrelated
+    # helper.  Nothing failed, because the behaviour is memo-identical and only
+    # latency moves.  Anchor future insertions on a line matching
+    # ``^(@|class |def )`` and put new code AFTER a decorated function.
+    @_with_recall_cache
+    @_with_read_snapshot
+    def graph_chains(
+        self,
+        query: str = "",
+        *,
+        project_id: int | None = None,
+        subjects: Sequence[str] = (),
+        seed_claims: Sequence[Mapping[str, Any]] = (),
+        temporal: bool = False,
+        as_of: str | None = None,
+        lane_mode: str | None = None,
+        limit: int | None = None,
+    ) -> dict[str, Any]:
+        """Channel 3: bounded chains of stored facts, both directions, as of
+        now or as of a past version.
+
+        Everything here is deterministic Python over indexed reads in one
+        deferred snapshot: no model call, no write lock.  The query screens are
+        the claims lane's; the whole call shares one deadline
+        (``memory_graph.TIME_BUDGET_MS``), taken once here and checked in the
+        traversal loop, before the screen phase, and after every screened row;
+        every returned row passes ``_claim_rows_recall_eligible`` and the
+        widened endpoint screen on **both** its subject and its value.
+
+        ``lane_mode`` is ``claim_recall_report()["mode"]``.  A lane that
+        abstained for a security reason silences the channel; ``identity-
+        overflow`` and ``identity-conflict`` are identity floors, so the graph
+        keeps running but with non-exact resolution disabled and answers only
+        from exactly spelled names (design 2.3d).
+
+        Returns ``{"rows", "overflow", "report"}``; a locked database or any
+        ``sqlite3.Error`` degrades to no rows with ``report.mode == "error"``.
+        """
+        self._ensure_open()
+        started = time.monotonic()
+        deadline = started + float(memory_graph.TIME_BUDGET_MS) / 1000.0
+        report = _blank_graph_recall_report("idle")
+        report["lane_mode"] = None if lane_mode is None else str(lane_mode)
+        self._last_graph_recall_report = report
+        if not self._graph_ready:
+            return self._graph_abstain(
+                report, "error", "graph projection is unavailable", started
+            )
+        raw_query = str(query)
+        if len(raw_query) > MAX_SEARCH_QUERY_CHARS:
+            raise ValueError(
+                f"Graph chain query exceeds {MAX_SEARCH_QUERY_CHARS} characters"
+            )
+        if contains_secret(raw_query):
+            raise ValueError("Potential secret detected; graph chain search refused")
+        if contains_private_identifier(raw_query):
+            return self._graph_abstain(
+                report, "screened", "private identifier in query", started
+            )
+        if _memory_query_targets_authority_evasion(raw_query):
+            return self._graph_abstain(
+                report, "screened", "authority evasion in query", started
+            )
+        lane = str(lane_mode or "")
+        if lane in _LANE_SILENCING_MODES:
+            # Design 10.7 item 5: a lane-silenced call reports ``screened``,
+            # except ``project-unavailable``, which reports itself -- it is in
+            # the closed mode set of 5.6 and it says something different to an
+            # operator ("this project is gone") than a screen does.
+            return self._graph_abstain(
+                report,
+                "project-unavailable" if lane == "project-unavailable" else "screened",
+                f"claims lane abstained: {lane}",
+                started,
+            )
+        project_scope = None
+        if project_id is not None:
+            normalized_project = self._project_id(project_id)
+            project = self.db.execute(
+                "SELECT enabled FROM agent_projects WHERE id=?",
+                (normalized_project,),
+            ).fetchone()
+            if project is None or not bool(project["enabled"]):
+                return self._graph_abstain(
+                    report, "project-unavailable",
+                    "project missing or disabled", started,
+                )
+            project_scope = project_claim_scope(normalized_project)
+        visible_scopes = (
+            ("global",) if project_scope is None else ("global", project_scope)
+        )
+        # Design 10.3 item 1: no lane mode disables non-exact resolution any
+        # more.  The rule lives in one place with its own test; the security
+        # abstentions above still silence the channel outright.
+        exact_only = memory_graph.lane_forces_exact_only(lane)
+        row_cap = _bounded_limit(
+            int(memory_graph.CHAIN_ROW_CAP if limit is None else limit),
+            int(memory_graph.CHAIN_ROW_CAP),
+        )
+        named_subjects = [
+            str(item) for item in (subjects or ()) if str(item).strip()
+        ]
+        # A question names a handful of subjects; a crafted one can name many,
+        # and every extra start is another frontier root, another look-alike
+        # floor and another traversal.  Bound it here rather than trusting the
+        # caller, and say in the report how many were dropped so a truncated
+        # read is never silent.
+        subjects_dropped = max(0, len(named_subjects) - MAX_GRAPH_START_SUBJECTS)
+        if subjects_dropped:
+            named_subjects = named_subjects[:MAX_GRAPH_START_SUBJECTS]
+        seeds = [item for item in (seed_claims or ()) if isinstance(item, Mapping)]
+        # A named subject the main lane found nothing for keeps the existing
+        # "say the asked fact is not recorded instead of substituting" rule:
+        # its hop-1 rows are tagged ``match: subject`` (design 5.8).
+        seed_subject_keys = {
+            memory_graph.entity_key(str(item.get("subject") or "")) for item in seeds
+        }
+        match_subject_keys = [
+            key for key in (
+                memory_graph.entity_key(name) for name in named_subjects
+            )
+            if key and key not in seed_subject_keys
+        ]
+        try:
+            # The graph reads edges through the claims lane's own scope and
+            # shadowing predicate, aliased to the edge table, so the two lanes
+            # can never disagree about what a project shadows (design 5.2).
+            edge_scope_sql, edge_scope_parameters = self._claim_scope_filter(
+                visible_scopes, project_scope, alias="e"
+            )
+            walk = memory_graph.graph_walk(
+                self.db,
+                visible_scopes=visible_scopes,
+                query=raw_query,
+                scope_sql=edge_scope_sql,
+                scope_params=edge_scope_parameters,
+                project_scope=project_scope,
+                subjects=named_subjects,
+                seed_claims=seeds,
+                temporal=bool(temporal),
+                as_of=None if as_of is None else str(as_of),
+                exact_only=exact_only,
+                deadline=deadline,
+            )
+            claim_ids = [
+                int(item) for item in (walk.get("claim_ids") or ())
+            ][:int(memory_graph.SCREENED_ROW_CAP)]
+            claim_rows: dict[int, dict[str, Any]] = {}
+            if claim_ids:
+                # The id list is the narrow term here (at most
+                # SCREENED_ROW_CAP of them), so the rowid path is the right
+                # one -- see _claim_scope_filter's note on ``index_scope``.
+                scope_filter_sql, scope_filter_parameters = self._claim_scope_filter(
+                    visible_scopes, project_scope, index_scope=False
+                )
+                placeholders = ",".join("?" for _claim_id in claim_ids)
+                candidates = [
+                    dict(row) for row in self.db.execute(
+                        f"""SELECT c.id AS claim_id, c.memory_id, c.scope,
+                                   c.claim_key, c.created_at, c.updated_at,
+                                   c.subject, c.predicate, c.value,
+                                   c.value_sha256, c.source, c.authority,
+                                   c.confidence, c.status, c.valid_from,
+                                   c.valid_until
+                            FROM memory_claims AS c
+                            WHERE c.id IN ({placeholders})
+                              AND {scope_filter_sql}""",
+                        [*claim_ids, *scope_filter_parameters],
+                    ).fetchall()
+                ]
+                eligible = self._claim_rows_recall_eligible(
+                    candidates,
+                    project_id=project_id,
+                    allow_superseded=bool(temporal) or as_of is not None,
+                )
+                claim_rows = {
+                    int(item["claim_id"]): item
+                    for item in candidates
+                    if int(item["claim_id"]) in eligible
+                }
+            assembled = memory_graph.assemble_rows(
+                walk,
+                claim_rows,
+                limit=row_cap,
+                deadline=deadline,
+                started=started,
+                screen=screen_endpoint,
+                match_subject_keys=match_subject_keys,
+            )
+        except sqlite3.Error:
+            return self._graph_abstain(
+                report, "error", "database busy or unreadable", started
+            )
+        rows = list(assembled.get("rows") or [])
+        self._mark_retracted_chain_rows(rows, claim_rows)
+        report.update(dict(assembled.get("report") or {}))
+        report["channel"] = "graph"
+        report["lane_mode"] = None if lane_mode is None else str(lane_mode)
+        # Set after the merge so the walk's report can never mask it.
+        report["subjects_dropped"] = subjects_dropped
+        # The operator should still hear that the main lane could not tell
+        # which stored subject the question named, whenever the graph answered
+        # anyway (design 2.3d, 5.9).  Since 10.3 item 1 that no longer depends
+        # on the graph having been restricted to exact names, so it is read
+        # from the lane mode directly.
+        report["lane_abstained"] = bool(
+            lane in {"identity-overflow", "identity-conflict"}
+            and str(report.get("mode") or "") == "complete"
+        )
+        report["abstained"] = str(report.get("mode") or "") not in {"complete"}
+        report["elapsed_ms"] = round((time.monotonic() - started) * 1000.0, 3)
+        self._last_graph_recall_report = report
+        return {
+            "rows": rows,
+            "overflow": list(assembled.get("overflow") or []),
+            "report": dict(report),
+        }
+
+    def _mark_retracted_chain_rows(
+        self,
+        rows: Sequence[dict[str, Any]],
+        claim_rows: Mapping[int, Mapping[str, Any]],
+    ) -> None:
+        """Flag a superseded chain row whose key has no current value.
+
+        ``Forget`` leaves a key with history and nothing current, and the cue
+        has to say so or a temporal answer reads as merely out of date rather
+        than retracted (design 3.2).  The walk cannot know it — the answer is
+        in ``memory_claims``, not in the graph — so it is computed here, in
+        one batched query over the keys of the rows being returned.
+        """
+        superseded = [
+            row for row in rows if str(row.get("status") or "") == "superseded"
+        ]
+        if not superseded:
+            return
+        by_claim_id = {
+            int(claim_id): (
+                str(claim.get("scope") or ""), str(claim.get("claim_key") or "")
+            )
+            for claim_id, claim in claim_rows.items()
+        }
+        keyed: list[tuple[dict[str, Any], tuple[str, str]]] = []
+        for row in superseded:
+            claim_id = row.get("claim_id")
+            if not isinstance(claim_id, int) or isinstance(claim_id, bool):
+                continue
+            key = by_claim_id.get(int(claim_id))
+            if key is not None and key[1]:
+                keyed.append((row, key))
+        if not keyed:
+            return
+        distinct = list(dict.fromkeys(key for _row, key in keyed))
+        current: set[tuple[str, str]] = set()
+        for offset in range(0, len(distinct), 400):
+            chunk = distinct[offset:offset + 400]
+            placeholders = ",".join("(?, ?)" for _pair in chunk)
+            current.update(
+                (str(found["scope"]), str(found["claim_key"]))
+                for found in self.db.execute(
+                    f"""SELECT scope, claim_key FROM memory_claims
+                        WHERE status IN ('active', 'disputed')
+                          AND (scope, claim_key) IN ({placeholders})""",
+                    [value for pair in chunk for value in pair],
+                ).fetchall()
+            )
+        for row, key in keyed:
+            if key not in current:
+                row["retracted"] = True
+
+    @_with_read_snapshot
+    def spine_tail(self, limit: int = 20) -> list[dict[str, Any]]:
+        """Recent spine events, payload keys only."""
+        self._ensure_open()
+        if not self._spine_ready:
+            return []
+        return memory_spine.recent_events(self.db, limit=limit)
+
+    @_with_recall_cache
     def current_claims(
         self,
         query: str = "",
@@ -8985,8 +17459,37 @@ class Memory:
         as_of: str | None = None,
         project_id: int | None = None,
     ) -> list[dict[str, Any]]:
-        """Return current claims with optional shadow/enforced confidence aging."""
+        """Return current claims with optional shadow/enforced confidence aging.
+
+        The read runs in one deferred snapshot and never takes the write lock.
+        Clock telemetry is persisted afterwards, best-effort, so a concurrent
+        writer can never turn a foreground read into an error.
+        """
+        self._pending_claim_clock_updates = []
+        items = self._current_claims_read(
+            query,
+            limit,
+            clock_mode=clock_mode,
+            stale_threshold=stale_threshold,
+            as_of=as_of,
+            project_id=project_id,
+        )
+        self._record_claim_clock_reads()
+        return items
+
+    @_with_read_snapshot
+    def _current_claims_read(
+        self,
+        query: str = "",
+        limit: int = 8,
+        *,
+        clock_mode: str = "disabled",
+        stale_threshold: float = 0.70,
+        as_of: str | None = None,
+        project_id: int | None = None,
+    ) -> list[dict[str, Any]]:
         self._ensure_open()
+        self._last_claim_recall_report = _blank_claim_recall_report("or")
         raw_query = str(query)
         if len(raw_query) > MAX_SEARCH_QUERY_CHARS:
             raise ValueError(
@@ -8998,7 +17501,7 @@ class Memory:
             # Claim retrieval is an information-returning boundary.  Queries
             # containing email addresses or other private identifiers must not
             # be allowed to use that identifier as an authority anchor.
-            return []
+            return self._abstain_claims("screened", "private identifier in query")
         clock_mode = str(clock_mode).strip().casefold()
         if clock_mode not in {"disabled", "shadow", "enforce"}:
             raise ValueError("Claim clock mode must be disabled, shadow, or enforce")
@@ -9021,32 +17524,18 @@ class Memory:
                 (normalized_project,),
             ).fetchone()
             if project is None or not bool(project["enabled"]):
-                return []
+                return self._abstain_claims(
+                    "project-unavailable", "project missing or disabled"
+                )
             project_scope = project_claim_scope(normalized_project)
         visible_scopes = (
             ("global",)
             if project_scope is None
             else ("global", project_scope)
         )
-        scope_placeholders = ",".join("?" for _scope in visible_scopes)
-        scope_filter_sql = f"c.scope IN ({scope_placeholders})"
-        scope_filter_parameters: list[Any] = [*visible_scopes]
-        if project_scope is not None:
-            # Project facts override a global claim identity before lexical
-            # relevance, ranking, or candidate caps are applied. Otherwise a
-            # query that matches only the old global value could omit the
-            # project row and leak a contradicted global fact into its prompt.
-            scope_filter_sql += """
-              AND (
-                  c.scope=?
-                  OR NOT EXISTS (
-                      SELECT 1 FROM memory_claims AS project_claim
-                      WHERE project_claim.scope=?
-                        AND project_claim.claim_key=c.claim_key
-                        AND project_claim.status IN ('active', 'disputed')
-                  )
-              )"""
-            scope_filter_parameters.extend((project_scope, project_scope))
+        scope_filter_sql, scope_filter_parameters = self._claim_scope_filter(
+            visible_scopes, project_scope
+        )
         query_terms = _claim_query_terms(raw_query)
         raw_query_terms = _memory_tokens(raw_query, meaningful_only=True)
         raw_query_term_set = set(raw_query_terms)
@@ -9061,7 +17550,9 @@ class Memory:
         if raw_query.strip() and (
             not query_terms or _memory_query_targets_authority_evasion(raw_query)
         ):
-            return []
+            return self._abstain_claims(
+                "screened", "no usable query terms or authority evasion"
+            )
         terms = _memory_like_terms(
             raw_query,
             _memory_candidate_terms(raw_query),
@@ -9083,26 +17574,52 @@ class Memory:
             parameters.extend(terms)
             parameters.extend(terms)
         parameters.append(MAX_MEMORY_SEARCH_CANDIDATES + 1)
-        rows = self.db.execute(
-            f"""SELECT c.id AS claim_id, c.memory_id, c.scope, c.claim_key,
+        candidate_select_sql = f"""SELECT c.id AS claim_id, c.memory_id, c.scope, c.claim_key,
                        c.created_at, c.updated_at,
                        c.subject, c.predicate, c.value, c.value_sha256,
                        c.source, c.authority,
                        c.confidence, c.status
                 FROM memory_claims AS c
                 WHERE {scope_filter_sql}
-                  AND c.status IN ('active', 'disputed'){relevance_sql}
-                ORDER BY {relevance_order_sql}CASE authority
+                  AND c.status IN ('active', 'disputed')"""
+        candidate_order_sql = f"""ORDER BY {relevance_order_sql}CASE authority
                              WHEN 'operator' THEN 4 WHEN 'verified' THEN 3
                              WHEN 'learned' THEN 2 ELSE 1 END DESC,
                          updated_at DESC, id DESC
-                LIMIT ?""",
+                LIMIT ?"""
+        rows = self.db.execute(
+            f"{candidate_select_sql}{relevance_sql}\n                {candidate_order_sql}",
             parameters,
         ).fetchall()
+        discovery_mode = "or" if terms else "all"
+        if len(rows) > MAX_MEMORY_SEARCH_CANDIDATES and len(terms) > 1:
+            # One everyday term (a predicate every subject shares) overflowed
+            # the bounded pool.  Narrow to rows that contain every term before
+            # abstaining, so a unique subject still answers an exact lookup.
+            # Conflict detection then sees only full-match rows, which is the
+            # conservative direction: partial matches could only add anchors.
+            all_terms_sql = " AND (" + " AND ".join(
+                "instr(lower(subject || ' ' || predicate || ' ' || value), ?) > 0"
+                for _term in terms
+            ) + ")"
+            rows = self.db.execute(
+                f"{candidate_select_sql}{all_terms_sql}\n                {candidate_order_sql}",
+                parameters,
+            ).fetchall()
+            discovery_mode = "all-terms"
         if len(rows) > MAX_MEMORY_SEARCH_CANDIDATES:
             # A bounded recency window must never hide an older, stronger
             # conflicting identity and expose a newer weak substitute.
-            return []
+            return self._abstain_claims(
+                "overflow",
+                "candidate pool exceeds the bound after narrowing",
+                candidates=len(rows),
+            )
+        self._last_claim_recall_report.update(
+            mode=discovery_mode,
+            candidates=len(rows),
+            discovery_terms=len(terms),
+        )
         items = [dict(row) for row in rows]
         if project_scope is not None:
             project_claim_keys = {
@@ -9119,14 +17636,13 @@ class Memory:
                 )
             ]
         if query_terms:
-            # Validate every bounded candidate before any persisted claim field
-            # is admitted to the per-store cache.  Invalid rows still take part
-            # in structural ranking and can shadow a weaker answer; they simply
-            # use the pure, uncached token path so out-of-band corruption cannot
-            # extend a credential/private value's lifetime in process memory.
-            eligible_candidate_ids = self._claim_rows_recall_eligible(
-                items, project_id=project_id
-            )
+            # Rank structurally first over the pure, uncached token path, then
+            # validate only the strongest tier and the selected rows.  No
+            # persisted field of an unvalidated row is admitted to the per-store
+            # cache, and a corrupt strongest candidate still forces abstention
+            # below.  This keeps the privacy scan proportional to the answer,
+            # not to every claim that shares one everyday term.
+            eligible_candidate_ids: set[int] = set()
 
             def claim_field_tokens(
                 item: Mapping[str, Any],
@@ -9188,13 +17704,17 @@ class Memory:
                     ],
                 ).fetchall()
                 if len(identity_chunk) > MAX_MEMORY_SEARCH_CANDIDATES:
-                    return []
+                    return self._abstain_claims(
+                        "identity-overflow", "identity candidates exceed the bound"
+                    )
                 for identity_row in identity_chunk:
                     identity_rows_by_id.setdefault(
                         int(identity_row["claim_id"]), identity_row
                     )
                 if len(identity_rows_by_id) > MAX_MEMORY_SEARCH_CANDIDATES:
-                    return []
+                    return self._abstain_claims(
+                        "identity-overflow", "identity candidates exceed the bound"
+                    )
             if project_scope is not None:
                 project_identity_keys = {
                     str(row["claim_key"])
@@ -9267,7 +17787,9 @@ class Memory:
                 len(raw_named_subject_heads) > 1
                 and not explicit_multi_fact_query
             ):
-                return []
+                return self._abstain_claims(
+                    "identity-conflict", "query names more than one stored subject"
+                )
             # Two-anchor questions often ask for two independent facts (for
             # example, "tone and port"), so one exact anchor per claim is still
             # useful. Longer requests must match at least two non-metadata terms.
@@ -9346,7 +17868,9 @@ class Memory:
                 )
             }
             if len(named_subject_heads) > 1 and not explicit_multi_fact_query:
-                return []
+                return self._abstain_claims(
+                    "identity-conflict", "query names more than one stored subject"
+                )
             candidate_query_matches = {
                 claim_id: claim_terms_match(
                     items_by_claim_id[claim_id],
@@ -9625,7 +18149,9 @@ class Memory:
                     identity_conflict
                     for _score, _item, _count, identity_conflict in blocking_tier
                 ):
-                    return []
+                    return self._abstain_claims(
+                        "identity-conflict", "strongest tier has an identity conflict"
+                    )
                 selection_relevance = (
                     structural_items[0][0][:1]
                     if len(query_term_set) <= 2
@@ -9635,13 +18161,26 @@ class Memory:
                     pair for pair in structural_items
                     if pair[0][:len(selection_relevance)] == selection_relevance
                 ]
+                validation_rows = {
+                    int(item["claim_id"]): item
+                    for _score, item, _count, _identity_conflict in (
+                        *blocking_tier,
+                        *selected_structural,
+                    )
+                }
+                eligible_candidate_ids = self._claim_rows_recall_eligible(
+                    list(validation_rows.values()), project_id=project_id
+                )
                 eligible_ids = eligible_candidate_ids
                 strongest_claim_ids = {
                     int(item["claim_id"])
                     for _score, item, _count, _identity_conflict in blocking_tier
                 }
                 if not strongest_claim_ids.issubset(eligible_ids):
-                    return []
+                    return self._abstain_claims(
+                        "corrupt-strongest",
+                        "strongest candidate failed integrity or privacy checks",
+                    )
                 scored_items = [
                     (score, item, matched_count)
                     for score, item, matched_count, identity_conflict
@@ -9701,7 +18240,9 @@ class Memory:
                             len(distinct_subjects) > 1
                             and not fully_qualified_constellation
                         ):
-                            return []
+                            return self._abstain_claims(
+                                "ambiguous", "equal-strength claims about different subjects"
+                            )
 
             # Compare current candidates only with their own canonical history.
             # Cap work per claim identity, and fail closed for an identity whose
@@ -9763,7 +18304,7 @@ class Memory:
                             historical_tokens
                         )
             except sqlite3.DatabaseError:
-                return []
+                return self._abstain_claims("error", "claim history read failed")
 
             relevant_items: list[
                 tuple[tuple[int, int, int, int, str, int], dict[str, Any]]
@@ -9806,6 +18347,7 @@ class Memory:
         for item in items:
             item.pop("claim_key", None)
         items = items[:limit]
+        self._last_claim_recall_report["returned"] = len(items)
         if clock_mode == "disabled":
             return items
         for item in items:
@@ -9896,21 +18438,8 @@ class Memory:
                     item["stored_status"] = "active"
                     item["status"] = "stale"
             stale_read = int(not immutable and effective < stale_threshold)
-            self.db.execute(
-                """INSERT INTO memory_claim_clock_statistics(
-                       claim_id, reads, stale_reads, last_effective_confidence,
-                       last_clock_status, last_read_at
-                   ) VALUES (?, 1, ?, ?, ?, ?)
-                   ON CONFLICT(claim_id) DO UPDATE SET
-                       reads=reads+1,
-                       stale_reads=stale_reads+excluded.stale_reads,
-                       last_effective_confidence=excluded.last_effective_confidence,
-                       last_clock_status=excluded.last_clock_status,
-                       last_read_at=excluded.last_read_at""",
-                (
-                    int(item["claim_id"]), stale_read, effective, clock_status,
-                    read_at,
-                ),
+            self._pending_claim_clock_updates.append(
+                (int(item["claim_id"]), stale_read, effective, clock_status, read_at)
             )
         return items
 
@@ -11282,13 +19811,32 @@ class Memory:
         reflection_id: int,
     ) -> dict[str, Any] | None:
         """Return canonical source material only for one internally exact chain."""
-        row = self.db.execute(
+        lesson = self.db.execute(
+            """SELECT id, kind, content, source, family, outcome_status, reflection_id
+               FROM memories WHERE id=?""",
+            (int(memory_id),),
+        ).fetchone()
+        if lesson is None or str(lesson["kind"]) != "lesson":
+            return None
+        return self._lesson_provenance_material_from_fields(
+            lesson, prediction_id, reflection_id
+        )
+
+    def _lesson_provenance_material_from_fields(
+        self,
+        lesson: Mapping[str, Any],
+        prediction_id: int,
+        reflection_id: int,
+    ) -> dict[str, Any] | None:
+        """The provenance material for a lesson row given as its fields
+        (``id``, ``kind``, ``content``, ``source``, ``family``,
+        ``outcome_status``, ``reflection_id``), so the digest can be computed
+        before the row exists: its ``lesson.created`` event must carry the
+        digest and must precede the insert."""
+        if str(lesson["kind"]) != "lesson":
+            return None
+        chain = self.db.execute(
             """SELECT
-                   m.id AS memory_id, m.kind AS lesson_kind,
-                   m.content AS lesson_content, m.source AS lesson_source,
-                   m.family AS lesson_family,
-                   m.outcome_status AS lesson_outcome_status,
-                   m.reflection_id AS lesson_reflection_id,
                    r.id AS reflection_id, r.created_at AS reflection_created_at,
                    r.task_id AS reflection_task_id,
                    r.conversation_id AS reflection_conversation_id,
@@ -11309,14 +19857,23 @@ class Memory:
                    p.actual_steps AS prediction_actual_steps,
                    p.evidence_ok AS prediction_evidence_ok,
                    p.failure_class AS prediction_failure_class
-               FROM memories AS m
-               JOIN reflections AS r ON r.id=?
+               FROM reflections AS r
                JOIN task_predictions AS p ON p.id=?
-               WHERE m.id=?""",
-            (int(reflection_id), int(prediction_id), int(memory_id)),
+               WHERE r.id=?""",
+            (int(prediction_id), int(reflection_id)),
         ).fetchone()
-        if row is None or str(row["lesson_kind"]) != "lesson":
+        if chain is None:
             return None
+        row: dict[str, Any] = {name: chain[name] for name in chain.keys()}
+        row.update({
+            "memory_id": int(lesson["id"]),
+            "lesson_kind": str(lesson["kind"]),
+            "lesson_content": lesson["content"],
+            "lesson_source": lesson["source"],
+            "lesson_family": lesson["family"],
+            "lesson_outcome_status": lesson["outcome_status"],
+            "lesson_reflection_id": lesson["reflection_id"],
+        })
         durable_text = "\n".join((
             str(row["lesson_content"] or ""),
             str(row["reflection_summary"] or ""),
@@ -11634,8 +20191,20 @@ class Memory:
         family: str,
         outcome_status: str,
         reflection_id: int,
+        actor: str = "runtime",
+        conversation_id: int | None = None,
+        permission: str = "runtime",
     ) -> int:
-        """Persist a reflection-derived lesson with controlled provenance."""
+        """Persist a reflection-derived lesson with controlled provenance.
+
+        The row is on the memory spine as ``lesson.created`` carrying the
+        provenance digest (computed from the row's fields before the insert);
+        lessons have no ordinary provenance row, so ``origin`` and
+        ``eligible`` are ``None`` in the payload and the digest is what the
+        rebuild verifies.  A duplicate that binds another prediction to the
+        same text appends ``memory.reasserted``.  The actor context is a
+        receipt only.
+        """
         if family not in self.PREDICTION_FAMILIES:
             raise ValueError(f"Unknown lesson family: {family}")
         if outcome_status not in {"complete", "incomplete", "failed"}:
@@ -11694,23 +20263,76 @@ class Memory:
             f"prediction:{int(prediction['id'])}"
         )
         content_sha256 = hashlib.sha256(safe.encode("utf-8")).hexdigest()
+        context = self._spine_context(actor, conversation_id, permission)
         with self._immediate_transaction():
-            self.db.execute(
-                """INSERT OR IGNORE INTO memories(
-                       created_at, kind, content, source, family,
-                       outcome_status, reflection_id
-                   ) VALUES (?, 'lesson', ?, ?, ?, ?, ?)""",
-                (
-                    now_iso(), safe, source, family, outcome_status,
-                    normalized_reflection,
-                ),
-            )
+            stamp = now_iso()
             row = self.db.execute(
                 """SELECT id, source, family, outcome_status, reflection_id
                    FROM memories
                    WHERE kind='lesson' AND content=?""",
                 (safe,),
             ).fetchone()
+            created = row is None
+            expected_provenance_sha256: str | None = None
+            if created:
+                fields = {
+                    "kind": "lesson", "content": safe, "source": source,
+                    "family": family, "outcome_status": outcome_status,
+                    "reflection_id": int(normalized_reflection),
+                }
+                if self._spine_ready:
+                    memory_id = memory_spine.allocate_memory_id(self.db)
+                    # The provenance digest is computed from the row's fields
+                    # before the row exists: the lesson event must carry it
+                    # and must precede the insert (lineage trigger).
+                    material = self._lesson_provenance_material_from_fields(
+                        {"id": memory_id, **fields},
+                        int(prediction["id"]),
+                        int(normalized_reflection),
+                    )
+                    if material is None:
+                        raise ValueError("Verified lesson provenance chain is inconsistent")
+                    expected_provenance_sha256 = self._lesson_provenance_digest(material)
+                    event_id = self._append_memory_event(
+                        "lesson.created",
+                        memory_id=memory_id,
+                        payload=memory_spine.memory_event_payload(
+                            self._spine_key, fields, origin=None, eligible=None,
+                            provenance_sha256=expected_provenance_sha256,
+                        ),
+                        stamp=stamp,
+                        source=source,
+                        context=context,
+                    )
+                    self.db.execute(
+                        """INSERT INTO memories(
+                               id, created_at, kind, content, source, family,
+                               outcome_status, reflection_id, spine_event_id
+                           ) VALUES (?, ?, 'lesson', ?, ?, ?, ?, ?, ?)""",
+                        (
+                            memory_id, stamp, safe, source, family, outcome_status,
+                            normalized_reflection, event_id,
+                        ),
+                    )
+                else:
+                    self.db.execute(
+                        """INSERT INTO memories(
+                               created_at, kind, content, source, family,
+                               outcome_status, reflection_id
+                           ) VALUES (?, 'lesson', ?, ?, ?, ?, ?)""",
+                        (
+                            stamp, safe, source, family, outcome_status,
+                            normalized_reflection,
+                        ),
+                    )
+                row = self.db.execute(
+                    """SELECT id, source, family, outcome_status, reflection_id
+                       FROM memories
+                       WHERE kind='lesson' AND content=?""",
+                    (safe,),
+                ).fetchone()
+            provenance_inserted = False
+            provenance_sha256 = ""
             if row is not None and (
                 str(row["family"] or "") != family
                 or str(row["outcome_status"] or "") != outcome_status
@@ -11729,6 +20351,13 @@ class Memory:
                 if material is None:
                     raise ValueError("Verified lesson provenance chain is inconsistent")
                 provenance_sha256 = self._lesson_provenance_digest(material)
+                if (
+                    expected_provenance_sha256 is not None
+                    and provenance_sha256 != expected_provenance_sha256
+                ):
+                    raise RuntimeError(
+                        "Verified lesson provenance digest changed after insert"
+                    )
                 existing = self.db.execute(
                     """SELECT memory_id, reflection_id, content_sha256,
                               provenance_sha256
@@ -11747,6 +20376,7 @@ class Memory:
                             provenance_sha256,
                         ),
                     )
+                    provenance_inserted = True
                 elif (
                     int(existing["memory_id"]) != int(row["id"])
                     or int(existing["reflection_id"]) != int(normalized_reflection)
@@ -11795,6 +20425,25 @@ class Memory:
                     or str(existing_control["control_sha256"]) != control_sha256
                 ):
                     raise ValueError("Lesson is already bound to different reuse controls")
+                if not created and self._spine_ready:
+                    # A duplicate lesson text bound to another prediction:
+                    # ``applied`` iff a provenance row was added.
+                    self._append_memory_event(
+                        "memory.reasserted",
+                        memory_id=int(row["id"]),
+                        payload={
+                            "origin": None,
+                            "eligible": None,
+                            "content_digest": memory_spine.content_digest(
+                                self._spine_key, safe
+                            ),
+                            "provenance_sha256": provenance_sha256,
+                        },
+                        stamp=stamp,
+                        source=source,
+                        context=context,
+                        outcome="applied" if provenance_inserted else "noop",
+                    )
         if row is None:
             raise RuntimeError("Verified lesson could not be persisted")
         lesson_id = int(row["id"])
@@ -11808,6 +20457,7 @@ class Memory:
         )
         return lesson_id
 
+
     @_with_read_snapshot
     def match_lessons(
         self,
@@ -11817,14 +20467,30 @@ class Memory:
         limit: int = 3,
         project_id: int | None = None,
     ) -> list[dict[str, Any]]:
-        """Match fresh proven lessons inside one project, or fail closed."""
+        """Match fresh proven lessons inside one project, or fail closed.
+
+        Every exit records why in ``lesson_recall_report()`` (M4 design 5.4).
+        The record is written before both raises, so a caller that catches the
+        ``ValueError`` can still read the reason.  Nothing else about this
+        method changed in M4: the screens, the candidate cap, the ranking
+        parameters, the substitution refusals and the eligible-prefix rule are
+        the strongest read discipline in the store and are untouched.
+        """
+        started = time.monotonic()
+        report = learning_ladder.lesson_recall_record("idle")
+        report["family"] = str(family)
+        self._last_lesson_recall_report = report
         evaluation_at = now_iso()
         if family not in self.PREDICTION_FAMILIES:
+            self._lesson_exit(report, "family_unsupported", started)
             raise ValueError(f"Unknown lesson family: {family}")
         if contains_secret(str(query)):
+            self._lesson_exit(report, "secret_query", started)
             raise ValueError("Potential secret detected; lesson matching refused")
         if contains_private_identifier(str(query)):
-            return []
+            return self._lesson_abstain(
+                report, "private_identifier_query", started
+            )
         if project_id is None:
             enabled_projects = self.db.execute(
                 "SELECT id FROM agent_projects WHERE enabled=1 ORDER BY id LIMIT 2"
@@ -11833,13 +20499,18 @@ class Memory:
                 # A missing scope is unambiguous only before the operator creates
                 # another enabled project. Never silently fall back to project 1
                 # in a multi-project database.
-                return []
+                return self._lesson_abstain(
+                    report, "project_ambiguous", started
+                )
             normalized_project = int(enabled_projects[0]["id"])
         else:
             normalized_project = self._project_id(project_id)
+        report["project_id"] = int(normalized_project)
         limit = _bounded_limit(limit, 10)
         if _memory_query_targets_authority_evasion(str(query)):
-            return []
+            return self._lesson_abstain(
+                report, "authority_evasion", started
+            )
         discovery_terms = [
             term for term in _memory_tokens(str(query), meaningful_only=True)
             if term not in _LESSON_QUERY_METADATA_TERMS
@@ -11858,7 +20529,9 @@ class Memory:
             or re.search(r"\b[A-Z][a-z]+[A-Z][A-Za-z0-9]*\b", str(query))
         )
         if not limit or not discovery_terms:
-            return []
+            return self._lesson_abstain(
+                report, "no_discovery_terms", started
+            )
         # An explicit alphanumeric identifier is a hard target for lesson
         # retrieval.  Use it for the bounded SQL candidate set rather than
         # allowing generic recovery words to overflow the pool and hide the
@@ -11950,7 +20623,9 @@ class Memory:
                     len(chunk_rows) > candidate_limit
                     or len(chunk_shadow_rows) > candidate_limit
                 ):
-                    return []
+                    return self._lesson_abstain(
+                        report, "chunk_overflow", started
+                    )
                 for row in chunk_rows:
                     collected_rows.setdefault(int(row["id"]), row)
                 for row in chunk_shadow_rows:
@@ -11959,11 +20634,16 @@ class Memory:
                     len(collected_rows) > candidate_limit
                     or len(collected_shadow_rows) > candidate_limit
                 ):
-                    return []
+                    return self._lesson_abstain(
+                        report, "pool_overflow", started
+                    )
         except sqlite3.DatabaseError:
-            return []
+            return self._lesson_abstain(
+                report, "database_error", started
+            )
         rows = list(collected_rows.values())
         shadow_rows = list(collected_shadow_rows.values())
+        report["candidates"] = len(rows) + len(shadow_rows)
         discovery_variant_sets = [
             set(_memory_term_variants(term))
             for term in (
@@ -11982,12 +20662,15 @@ class Memory:
                 for variants in discovery_variant_sets
             ):
                 advice_anchored_rows.append(row)
+        report["anchored"] = len(advice_anchored_rows)
         requested_family_rows = [
             row for row in advice_anchored_rows
             if str(row["family"] or "") == family
         ]
         if not requested_family_rows:
-            return []
+            return self._lesson_abstain(
+                report, "no_anchor", started
+            )
         requested_family_rows = _memory_resolve_sibling_identities(
             list(requested_family_rows),
             str(query),
@@ -11997,9 +20680,13 @@ class Memory:
             explicit_subject_identity=True,
         )
         if not requested_family_rows:
-            return []
+            return self._lesson_abstain(
+                report, "unknown_identity", started
+            )
         if not query_terms:
-            return []
+            return self._lesson_abstain(
+                report, "no_query_terms", started
+            )
         query_variant_sets = [
             set(_memory_term_variants(term)) for term in query_terms
         ]
@@ -12051,13 +20738,18 @@ class Memory:
             ):
                 # A stronger exact target exists under a different task family.
                 # Do not replace it with weaker advice from the requested family.
-                return []
+                return self._lesson_abstain(
+                    report, "cross_family_stronger", started
+                )
         in_project_rows = [
             row for row in requested_family_rows
             if int(row["lesson_project_id"] or -1) == normalized_project
         ]
         if not in_project_rows:
-            return []
+            return self._lesson_abstain(
+                report, "out_of_project", started
+            )
+        report["in_project"] = len(in_project_rows)
         in_project_signatures = {
             " ".join(_memory_tokens(
                 str(row["improvement_content"]), meaningful_only=False
@@ -12082,22 +20774,34 @@ class Memory:
                     or family_shadow_score(row) == len(query_terms)
                 )
             ):
-                return []
+                return self._lesson_abstain(
+                    report, "cross_project_stronger", started
+                )
         rows = requested_family_rows
-        eligible_rows = [
-            row for row in rows
-            if (
-                str(row["outcome_status"] or "") == "complete"
-                and self._lesson_provenance_validation(int(row["id"]))[0]
-                and self._lesson_control_validation(
-                    int(row["id"]),
-                    project_id=normalized_project,
-                    as_of=evaluation_at,
-                )[0]
+        eligible_rows = []
+        for row in rows:
+            # The same short-circuit order as before the M4 instrumentation:
+            # outcome status, then provenance, then controls.  Only the
+            # control reason is newly kept, so a lesson the operator retired
+            # or that aged out is reportable instead of vanishing silently.
+            if str(row["outcome_status"] or "") != "complete":
+                continue
+            if not self._lesson_provenance_validation(int(row["id"]))[0]:
+                continue
+            control_ok, control_reason = self._lesson_control_validation(
+                int(row["id"]),
+                project_id=normalized_project,
+                as_of=evaluation_at,
             )
-        ]
+            if control_ok:
+                eligible_rows.append(row)
+            elif control_reason in _LESSON_LIFECYCLE_SHADOW_REASONS:
+                report["superseded_shadowed"] += 1
         if not eligible_rows:
-            return []
+            return self._lesson_abstain(
+                report, "none_eligible", started
+            )
+        report["eligible"] = len(eligible_rows)
         eligible_token_union = set().union(*(
             set(_memory_tokens(
                 str(row["improvement_content"]), meaningful_only=False
@@ -12126,7 +20830,9 @@ class Memory:
                 and term not in eligible_token_union
             }
             if shared and unique and family_shadow_score(row) >= best_eligible_score:
-                return []
+                return self._lesson_abstain(
+                    report, "ineligible_shadow", started
+                )
         ranked = _rank_memory_rows(
             list(rows),
             query_terms,
@@ -12184,7 +20890,20 @@ class Memory:
             eligible_prefix.append(item)
             if len(eligible_prefix) >= limit:
                 break
-        return eligible_prefix
+        report["returned"] = len(eligible_prefix)
+        if eligible_prefix:
+            self._lesson_exit(report, "rows_returned", started)
+            return eligible_prefix
+        if not ranked:
+            # Nothing cleared the ranker's own floors: the store looked and
+            # found nothing relevant, which is not a refusal and does not cue.
+            return self._lesson_abstain(report, "ranker_floor", started)
+        # The best ranked row is ineligible, so the lane returns nothing
+        # rather than substituting the weaker eligible row beneath it.  This
+        # is a different path from "every candidate is ineligible".
+        return self._lesson_abstain(
+            report, "ineligible_prefix", started
+        )
 
     def record_lesson_applications(
         self,
@@ -12203,6 +20922,109 @@ class Memory:
             if normalized not in bounded_ids:
                 bounded_ids.append(normalized)
         stamp = now_iso()
+        try:
+            self._record_lesson_applications_locked(
+                normalized_prediction, family, bounded_ids, stamp
+            )
+        except (sqlite3.Error, memory_spine.SpineError) as exc:
+            # S-3: the worker holds the write lock.  The turn degrades to a
+            # recorded non-fatal outcome rather than failing, and every
+            # ValueError this method raises -- an already-resolved prediction,
+            # another family, an ineligible lesson -- is untouched, because
+            # those are caller bugs and the ladder's proof depends on them
+            # still being refused.
+            #
+            # ``SpineError`` joins it for ruling 27: this runs on the turn
+            # path, and a chain that will not accept the ``lesson.applied``
+            # receipt must cost the turn its receipt, never the turn itself.
+            # The proof then refuses ``proof_unbacked``, which is the correct
+            # fail-closed consequence.
+            self._record_degraded_write(
+                "apply_lessons", type(exc).__name__,
+                reason=(
+                    "spine_unverified"
+                    if isinstance(exc, memory_spine.SpineError)
+                    else "store_locked"
+                ),
+            )
+
+    def _append_lesson_applied_receipt(
+        self,
+        prediction_id: int,
+        family: str,
+        project_id: int,
+        lesson_ids: Sequence[int],
+        stamp: str,
+    ) -> None:
+        """One digest-only receipt for the turn's applications (ruling 21).
+
+        ``lesson_applications`` is the single input that decides whether a
+        document is promoted, and before this it was the only such input with
+        no receipt: ``proof_sha256`` is computed *over* whatever rows are
+        there, so it was self-consistent with a forged set.  The event binds
+        the **identity** of the rows -- ``(id, prediction_id, memory_id)`` --
+        which are immutable from insert; the verdict stays live, re-derived by
+        the proof's own clauses, because the row's ``successful`` column is
+        still NULL at this instant and digesting it would disagree with every
+        later re-check.
+
+        The digest covers every application row for this prediction after the
+        insert, not just the ones this call added, so the newest event for a
+        prediction always describes the legitimate current set and two calls
+        in one turn stay consistent.  Appended inside the caller's
+        transaction; a store whose spine does not carry the kind writes
+        nothing and the proof check stays inert until it does.
+        """
+        if not self._spine_ready or _LESSON_APPLIED_KIND not in memory_spine.SPINE_KINDS:
+            return
+        rows = self.db.execute(
+            """SELECT id, prediction_id, memory_id FROM lesson_applications
+               WHERE prediction_id=? ORDER BY id""",
+            (int(prediction_id),),
+        ).fetchall()
+        if not rows:
+            return
+        memory_spine.append_event(
+            self.db,
+            self._spine_key,
+            kind=_LESSON_APPLIED_KIND,
+            actor="runtime",
+            source="lesson application",
+            scope="global",
+            permission="runtime",
+            outcome="applied",
+            payload={
+                "at": stamp,
+                "family": str(family),
+                "project_id": int(project_id),
+                "prediction_id": int(prediction_id),
+                "lesson_ids": sorted({int(value) for value in lesson_ids})[:10],
+                "count": len(rows),
+                "applications_digest": memory_spine.lesson_applications_digest(
+                    self._spine_key,
+                    [
+                        (
+                            int(row["id"]), int(row["prediction_id"]),
+                            int(row["memory_id"]),
+                        )
+                        for row in rows
+                    ],
+                ),
+            },
+            now=stamp,
+            subject_kind="lesson",
+            # The rank-1 lesson: the first id the caller passed, which is the
+            # row whose ``rank`` column is 1.
+            subject_id=int(lesson_ids[0]),
+        )
+
+    def _record_lesson_applications_locked(
+        self,
+        normalized_prediction: int,
+        family: str,
+        bounded_ids: list[int],
+        stamp: str,
+    ) -> None:
         with self._immediate_transaction():
             prediction = self.db.execute(
                 """SELECT family, origin, created_at, resolved_at, actual_status,
@@ -12276,6 +21098,12 @@ class Memory:
                         memory_id, family, rank,
                     ),
                 )
+            # One receipt for the turn, inside the same transaction as the
+            # rows it binds, so a row can never exist without its event
+            # (ruling 21).
+            self._append_lesson_applied_receipt(
+                normalized_prediction, family, project_id, bounded_ids, stamp
+            )
 
     @staticmethod
     def _strategy_observation_material(
@@ -16817,18 +25645,39 @@ class Memory:
             capitalized_subject_identity=True,
         )[:limit]
 
-    def list_memories(self, limit: int = 20) -> list[dict[str, Any]]:
+    def list_memories(
+        self, limit: int = 20, *, with_ids: bool = False
+    ) -> list[dict[str, Any]]:
+        """Newest ordinary memories, newest first.
+
+        ``with_ids`` adds the operator-facing ``id`` (explicit and never
+        reused since schema 47, so it names a row for ``Erase memory #<id>``)
+        together with the ordinary provenance ``origin`` and ``eligible``,
+        which the listing surfaces print beside the preview.
+        """
         self._ensure_open()
         limit = _bounded_limit(limit, 1_000)
         if not limit:
             return []
-        rows = self.db.execute(
-            """SELECT created_at, kind, content, source
-               FROM memories
-               WHERE kind <> 'claim'
-               ORDER BY id DESC LIMIT ?""",
-            (limit,),
-        ).fetchall()
+        if with_ids:
+            rows = self.db.execute(
+                """SELECT m.id, m.created_at, m.kind, m.content, m.source,
+                          omp.origin AS origin, omp.eligible AS eligible
+                   FROM memories AS m
+                   LEFT JOIN ordinary_memory_provenance AS omp
+                     ON omp.memory_id=m.id
+                   WHERE m.kind <> 'claim'
+                   ORDER BY m.id DESC LIMIT ?""",
+                (limit,),
+            ).fetchall()
+        else:
+            rows = self.db.execute(
+                """SELECT created_at, kind, content, source
+                   FROM memories
+                   WHERE kind <> 'claim'
+                   ORDER BY id DESC LIMIT ?""",
+                (limit,),
+            ).fetchall()
         return [dict(row) for row in rows]
 
     @_with_read_snapshot
@@ -18099,6 +26948,9 @@ class Memory:
         authority: str,
         confidence: float,
         stamp: str,
+        actor: str = "operator",
+        conversation_id: int | None = None,
+        permission: str = "operator",
     ) -> int:
         self.db.execute(
             """INSERT INTO preferences(
@@ -18118,6 +26970,7 @@ class Memory:
             "user", f"preference:{name}", value,
             source=source, authority=authority,
             confidence=confidence, stamp=stamp,
+            actor=actor, conversation_id=conversation_id, permission=permission,
         )
         return int(row["id"])
 
@@ -18128,6 +26981,9 @@ class Memory:
         *,
         source: str = "user",
         confidence: float = 1.0,
+        actor: str = "operator",
+        conversation_id: int | None = None,
+        permission: str = "operator",
     ) -> int:
         name = _validated_nonsecret_metadata(name, "Preference name").casefold()
         value = redact_secrets(str(value).strip())
@@ -18156,6 +27012,9 @@ class Memory:
                 authority=authority,
                 confidence=confidence,
                 stamp=stamp,
+                actor=actor,
+                conversation_id=conversation_id,
+                permission=permission,
             )
 
     def list_preferences(self) -> list[dict[str, Any]]:

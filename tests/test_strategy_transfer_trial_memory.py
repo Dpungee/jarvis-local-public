@@ -19,6 +19,7 @@ from jarvis.strategy_transfer_trial import (
     arm_for_slot,
     strategy_transfer_runtime_sha256,
 )
+from tests.legacy_store_fixture import strip_spine
 
 
 def _digest(text: str) -> str:
@@ -163,9 +164,9 @@ class StrategyTransferTrialMemoryTests(unittest.TestCase):
         )
 
     def test_v39_migration_and_deterministic_balanced_blocks(self) -> None:
-        self.assertEqual(SCHEMA_VERSION, 44)
+        self.assertEqual(SCHEMA_VERSION, 50)
         with Memory(Path(":memory:")) as memory:
-            self.assertEqual(memory.db.execute("PRAGMA user_version").fetchone()[0], 44)
+            self.assertEqual(memory.db.execute("PRAGMA user_version").fetchone()[0], SCHEMA_VERSION)
             for table in (
                 "strategy_transfer_trial_manifests",
                 "strategy_transfer_trial_assignments",
@@ -454,12 +455,13 @@ class StrategyTransferTrialMemoryTests(unittest.TestCase):
                 connection.execute(
                     "CREATE TABLE strategy_transfer_trial_manifests(stale TEXT)"
                 )
+                strip_spine(connection)
                 connection.execute("PRAGMA user_version=38")
             finally:
                 connection.close()
             with Memory(database) as recovered:
                 self.assertEqual(
-                    recovered.db.execute("PRAGMA user_version").fetchone()[0], 44
+                    recovered.db.execute("PRAGMA user_version").fetchone()[0], SCHEMA_VERSION
                 )
                 columns = {
                     str(row["name"])

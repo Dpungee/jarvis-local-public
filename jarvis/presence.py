@@ -42,6 +42,7 @@ from .cli import _ForegroundLease
 from .companion_indicator import start_indicator_process, stop_indicator_process
 from .config import Config, create_project_workspace, resolve_project_workspace
 from .feature_onboarding import FeatureOnboardingConflict, FeatureOnboardingStore
+from . import learning_ladder
 from .memory import Memory
 from .memory_embeddings import EmbeddingError, run_memory_index_batch
 from .model_client import model_conversation_scope, user_model_error_message
@@ -1698,7 +1699,22 @@ class PresenceRuntime:
                 raise ValueError("Conversation does not exist")
             if memory.is_screen_companion_conversation(conversation_id):
                 raise ValueError("Conversation is internal")
-            return memory.recent_messages(conversation_id, limit=200)
+            try:
+                rows = memory.db.execute(
+                    "SELECT role, content, created_at FROM messages "
+                    "WHERE conversation_id=? ORDER BY id DESC LIMIT 200",
+                    (int(conversation_id),),
+                ).fetchall()
+            except sqlite3.Error:
+                return memory.recent_messages(conversation_id, limit=200)
+            return [
+                {
+                    "role": str(row["role"]),
+                    "content": str(row["content"]),
+                    "created_at": str(row["created_at"] or "")[:40],
+                }
+                for row in reversed(rows)
+            ]
 
     def conversations(self) -> list[dict[str, Any]]:
         with Memory(self.config.data_dir / "jarvis.db") as memory:
@@ -1706,6 +1722,260 @@ class PresenceRuntime:
                 row for row in memory.list_conversations(limit=60)
                 if not memory.is_screen_companion_conversation(int(row["id"]))
             ][:50]
+
+    def rename_conversation(self, conversation_id: int, title: str) -> dict[str, Any]:
+        """Retitle one operator conversation; internal Companion chats stay hidden."""
+        safe_title = " ".join(safe_presence_text(title, 120).split())
+        if not safe_title:
+            raise ValueError("Title must not be empty")
+        with Memory(self.config.data_dir / "jarvis.db") as memory:
+            if not memory.conversation_exists(conversation_id):
+                raise LookupError("Conversation does not exist")
+            if memory.is_screen_companion_conversation(conversation_id):
+                raise ValueError("Conversation is internal")
+            memory.db.execute(
+                "UPDATE conversations SET title=? WHERE id=?",
+                (safe_title, int(conversation_id)),
+            )
+        self.emit(
+            "conversation_renamed",
+            conversation_id=int(conversation_id),
+            title=safe_title,
+        )
+        return {"conversation_id": int(conversation_id), "title": safe_title}
+
+    @staticmethod
+    def _row_value(row: Any, key: str) -> Any:
+        try:
+            return row[key]
+        except (KeyError, IndexError, TypeError):
+            return None
+
+    def _memory_row(self, row: Any) -> dict[str, Any]:
+        return {
+            "created_at": str(self._row_value(row, "created_at") or "")[:40],
+            "kind": safe_presence_text(self._row_value(row, "kind") or "", 40),
+            "content": safe_presence_text(self._row_value(row, "content") or "", 2_000),
+            "source": safe_presence_text(self._row_value(row, "source") or "", 200),
+        }
+
+    def recent_memories(self, limit: int = 30) -> list[dict[str, Any]]:
+        """Newest non-claim memories, redacted and bounded for display."""
+        bound = max(1, min(int(limit), 200))
+        with Memory(self.config.data_dir / "jarvis.db") as memory:
+            rows = memory.list_memories(limit=bound)
+        return [self._memory_row(row) for row in rows]
+
+    def learning_ladder(self, limit: int = 20) -> dict[str, Any]:
+        """Read-only view of the learning ladder (VTMF M4 design 6.4).
+
+        The `ladder status` payload plus the last few ladder events.  Three
+        things are deliberately absent and must stay absent:
+
+        * the **confirmation code** of a staged promotion.  It is read out of
+          the row only by ``ladder list``, ``ladder show`` and ``/ladder``; a
+          browser payload is not one of them (S-1).  The row readers omit it
+          unless asked, so this method simply never asks -- a payload builder
+          that holds the value and must remember to drop it is the shape that
+          leaks.
+        * ``proof_sha256``, ``staged_sha256`` and ``coverage_digest``.
+          Publishing digests beside a promotion id is exactly what made draft
+          1's token derivable (Q-11, H-4).
+        * any write route.  Approval is a typed command; a browser button that
+          promotes a skill is the affordance this design exists to prevent.
+        """
+        bound = max(1, min(int(limit), 100))
+        with Memory(self.config.data_dir / "jarvis.db") as memory:
+            promotions = [
+                {
+                    "id": int(row.get("id") or 0),
+                    "family": str(row.get("family") or ""),
+                    "skill_name": str(row.get("skill_name") or ""),
+                    "stage": str(row.get("stage") or ""),
+                    "stage_reason": row.get("stage_reason"),
+                    "created_at": row.get("created_at"),
+                    "approved_at": row.get("approved_at"),
+                    "reuse_count": row.get("reuse_count"),
+                    "context_count": row.get("context_count"),
+                }
+                for row in memory.ladder_promotions()
+            ]
+            families = []
+            for family in sorted(learning_ladder.LADDER_FAMILIES):
+                gate = memory.calibration_gate(
+                    family, **learning_ladder.LADDER_GATE_THRESHOLDS
+                )
+                verdict = memory.calibration_ledger_monotonicity(family)
+                families.append({
+                    "family": family,
+                    "gate_allowed": bool(gate.get("allowed")),
+                    "attempts": gate.get("attempts"),
+                    "brier": gate.get("brier"),
+                    "calibration_error": gate.get("calibration_error"),
+                    "epochs": int(verdict.get("epochs") or 0),
+                    "monotone": bool(verdict.get("monotone")),
+                    "newest_regressed": bool(verdict.get("newest_regressed")),
+                    "currently_regressed": bool(verdict.get("currently_regressed")),
+                    "consecutive_regressed": int(
+                        verdict.get("consecutive_regressed") or 0
+                    ),
+                    "lift_pp": verdict.get("lift_pp"),
+                    "applied_n": verdict.get("applied_n"),
+                    "unapplied_n": verdict.get("unapplied_n"),
+                })
+            events = memory.spine_tail(limit=200) if hasattr(
+                memory, "spine_tail"
+            ) else []
+        ladder_events = [
+            {
+                "kind": str(event.get("kind") or ""),
+                "at": event.get("created_at") or event.get("at"),
+                "actor": event.get("actor"),
+                "subject_id": event.get("subject_id"),
+            }
+            for event in events
+            if str(event.get("kind") or "").startswith("ladder.")
+        ][-bound:]
+        legacy = sum(
+            1 for row in promotions if row["stage"] == "unapproved_legacy"
+        )
+        return {
+            "families": families,
+            "promotions": promotions,
+            "events": ladder_events,
+            "legacy_documents": legacy,
+            # Rendered verbatim by the panel, in the words `ladder status` and
+            # `jarvis doctor` use, so three surfaces cannot describe the same
+            # state differently (design 6.3, 6.4, S-4).
+            "legacy_notice": (
+                f"{legacy} legacy skills live without approval" if legacy else ""
+            ),
+        }
+
+    def search_memory(self, query: str, limit: int = 20) -> dict[str, Any]:
+        """Ordinary memory search plus the recall diagnostic, both bounded.
+
+        ``Memory.search`` already refuses secret-shaped and private-identifier
+        queries by returning nothing; the report explains an abstention.
+        """
+        text = " ".join(str(query).split())
+        if not text:
+            raise ValueError("Search query must not be empty")
+        if len(text) > 500:
+            raise ValueError("Search query exceeds 500 characters")
+        bound = max(1, min(int(limit), 50))
+        with Memory(self.config.data_dir / "jarvis.db") as memory:
+            rows = memory.search(text, limit=bound)
+            accessor = getattr(memory, "recall_report", None)
+            report = accessor() if callable(accessor) else accessor
+        return {
+            "query": safe_presence_text(text, 500),
+            "results": [self._memory_row(row) for row in rows],
+            "report": (
+                safe_presence_network_payload(dict(report))
+                if isinstance(report, dict) else None
+            ),
+        }
+
+    def activity(self, limit: int = 200) -> list[dict[str, Any]]:
+        """Bounded, redacted audit rows; details are summarised, never raw."""
+        bound = max(1, min(int(limit), 500))
+        with Memory(self.config.data_dir / "jarvis.db") as memory:
+            rows = memory.list_activity(limit=bound)
+        result: list[dict[str, Any]] = []
+        for row in rows:
+            details = ""
+            raw_details = self._row_value(row, "details_json")
+            if raw_details:
+                try:
+                    decoded = json.loads(str(raw_details))
+                except (TypeError, ValueError):
+                    decoded = None
+                if isinstance(decoded, dict):
+                    parts = []
+                    for key, value in list(decoded.items())[:8]:
+                        if value in (None, "", [], {}):
+                            continue
+                        rendered = (
+                            value if isinstance(value, (str, int, float))
+                            else json.dumps(value, ensure_ascii=False)
+                        )
+                        parts.append(
+                            f"{safe_presence_text(key, 40)}: "
+                            f"{safe_presence_text(rendered, 160)}"
+                        )
+                    details = " · ".join(parts)
+                elif decoded is not None:
+                    details = safe_presence_text(
+                        json.dumps(decoded, ensure_ascii=False), 300
+                    )
+            task_id = self._row_value(row, "task_id")
+            result.append({
+                "id": int(self._row_value(row, "id") or 0),
+                "created_at": str(self._row_value(row, "created_at") or "")[:40],
+                "category": safe_presence_text(self._row_value(row, "category") or "", 40),
+                "action": safe_presence_text(self._row_value(row, "action") or "", 120),
+                "status": safe_presence_text(self._row_value(row, "status") or "", 30),
+                "task_id": int(task_id) if isinstance(task_id, int) else None,
+                "details": details[:400],
+            })
+        return result
+
+    def queue_task(
+        self,
+        prompt: str,
+        project_id: int | None = None,
+        model: str = "auto",
+    ) -> int:
+        """Queue one background task for the Jarvis worker."""
+        text = str(prompt).strip()
+        if not text:
+            raise ValueError("Task prompt must not be empty")
+        if len(text) > MAX_PROMPT_CHARS:
+            raise ValueError(f"Task prompt exceeds the {MAX_PROMPT_CHARS}-character limit")
+        profile = str(model or "auto").strip().casefold()
+        if profile not in MODEL_OVERRIDES:
+            raise ValueError("Model profile must be auto, fast, reasoning, coding, or deep")
+        with Memory(self.config.data_dir / "jarvis.db") as memory:
+            task_id = memory.add_task(
+                text,
+                project_id=project_id,
+                requested_model=None if profile == "auto" else profile,
+            )
+        self.emit(
+            "task_queued",
+            task_id=int(task_id),
+            project_id=project_id,
+            message="Background task queued",
+        )
+        return int(task_id)
+
+    def set_learning_topic_enabled(self, topic_id: int, enabled: bool) -> bool:
+        with Memory(self.config.data_dir / "jarvis.db") as memory:
+            return bool(memory.set_learning_topic_enabled(int(topic_id), bool(enabled)))
+
+    def set_backlog_enabled(self, backlog_id: int, enabled: bool) -> bool:
+        with Memory(self.config.data_dir / "jarvis.db") as memory:
+            return bool(memory.set_backlog_enabled(int(backlog_id), bool(enabled)))
+
+    def preferences(self) -> list[dict[str, Any]]:
+        with Memory(self.config.data_dir / "jarvis.db") as memory:
+            rows = memory.list_preferences()
+        return [
+            {
+                "id": int(self._row_value(row, "id") or 0),
+                "updated_at": str(self._row_value(row, "updated_at") or "")[:40],
+                "name": safe_presence_text(self._row_value(row, "name") or "", 100),
+                "value": safe_presence_text(self._row_value(row, "value") or "", 500),
+                "source": safe_presence_text(self._row_value(row, "source") or "", 100),
+                "confidence": float(self._row_value(row, "confidence") or 0.0),
+            }
+            for row in rows
+        ]
+
+    def set_preference(self, name: str, value: str) -> int:
+        with Memory(self.config.data_dir / "jarvis.db") as memory:
+            return int(memory.set_preference(str(name), str(value), source="user"))
 
     def approvals(self) -> list[dict[str, Any]]:
         with Memory(self.config.data_dir / "jarvis.db") as memory:
@@ -3986,6 +4256,42 @@ class PresenceRequestHandler(BaseHTTPRequestHandler):
                     }
                 )
                 return
+            if path == "/api/memory/recent":
+                query = parse_qs(parsed.query)
+                raw_limit = str(query.get("limit", ["30"])[0])
+                if re.fullmatch(r"[1-9][0-9]{0,2}", raw_limit) is None or int(raw_limit) > 200:
+                    raise ValueError("limit must be between 1 and 200")
+                self._json({
+                    "memories": self.server.runtime.recent_memories(limit=int(raw_limit)),
+                })
+                return
+            if path == "/api/memory/ladder":
+                # Additive and READ-ONLY (design 6.4).  Same auth as the
+                # other memory routes; no POST counterpart exists, and
+                # none may be added: approval is a typed command.
+                query = parse_qs(parsed.query)
+                raw_limit = str(query.get("limit", ["20"])[0])
+                if (
+                    re.fullmatch(r"[1-9][0-9]{0,2}", raw_limit) is None
+                    or int(raw_limit) > 100
+                ):
+                    raise ValueError("limit must be between 1 and 100")
+                self._json(
+                    self.server.runtime.learning_ladder(limit=int(raw_limit))
+                )
+                return
+            if path == "/api/activity":
+                query = parse_qs(parsed.query)
+                raw_limit = str(query.get("limit", ["200"])[0])
+                if re.fullmatch(r"[1-9][0-9]{0,2}", raw_limit) is None or int(raw_limit) > 500:
+                    raise ValueError("limit must be between 1 and 500")
+                self._json({
+                    "activity": self.server.runtime.activity(limit=int(raw_limit)),
+                })
+                return
+            if path == "/api/preferences":
+                self._json({"preferences": self.server.runtime.preferences()})
+                return
             if path == "/api/approvals":
                 persistent = getattr(
                     self.server.runtime, "persistent_approvals", lambda: []
@@ -4179,6 +4485,70 @@ class PresenceRequestHandler(BaseHTTPRequestHandler):
                     raise ValueError("state must be running, paused, or stopped")
                 self.server.runtime.set_control(state, str(payload.get("reason") or ""))
                 self._json({"state": state})
+                return
+            if path == "/api/memory/search":
+                raw_limit = payload.get("limit", 20)
+                if (
+                    isinstance(raw_limit, bool)
+                    or not isinstance(raw_limit, int)
+                    or not 1 <= raw_limit <= 50
+                ):
+                    raise ValueError("limit must be between 1 and 50")
+                self._json(self.server.runtime.search_memory(
+                    str(payload.get("q") or ""), limit=raw_limit
+                ))
+                return
+            if path == "/api/tasks":
+                raw_project = payload.get("project_id")
+                project_id = (
+                    None if raw_project is None
+                    else self._positive_id(raw_project, "project_id")
+                )
+                task_id = self.server.runtime.queue_task(
+                    str(payload.get("prompt") or ""),
+                    project_id=project_id,
+                    model=str(payload.get("model") or "auto"),
+                )
+                self._json({"task_id": task_id}, HTTPStatus.CREATED)
+                return
+            schedule_match = re.fullmatch(
+                r"/api/schedule/(learning|backlog)/([1-9][0-9]{0,18})/(enable|disable)",
+                path,
+            )
+            if schedule_match:
+                target_id = self._positive_id(int(schedule_match.group(2)), "id")
+                enabled = schedule_match.group(3) == "enable"
+                changed = (
+                    self.server.runtime.set_learning_topic_enabled(target_id, enabled)
+                    if schedule_match.group(1) == "learning"
+                    else self.server.runtime.set_backlog_enabled(target_id, enabled)
+                )
+                if not changed:
+                    self._error(HTTPStatus.NOT_FOUND, "Scheduled item was not found")
+                else:
+                    self._json({"changed": True, "enabled": enabled})
+                return
+            if path == "/api/preferences":
+                preference_id = self.server.runtime.set_preference(
+                    str(payload.get("name") or ""), str(payload.get("value") or "")
+                )
+                self._json({"preference_id": preference_id}, HTTPStatus.CREATED)
+                return
+            rename_match = re.fullmatch(
+                r"/api/conversations/([1-9][0-9]{0,18})/rename", path
+            )
+            if rename_match:
+                conversation_id = self._positive_id(
+                    int(rename_match.group(1)), "conversation_id"
+                )
+                try:
+                    result = self.server.runtime.rename_conversation(
+                        conversation_id, str(payload.get("title") or "")
+                    )
+                except LookupError as exc:
+                    self._error(HTTPStatus.NOT_FOUND, str(exc))
+                else:
+                    self._json(result)
                 return
             if path == "/api/feature-onboarding/decision":
                 capability_id = payload.get("capability_id")

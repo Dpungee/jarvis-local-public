@@ -1,0 +1,25 @@
+{
+  "_comment": [
+    "The offline fallback. Reported under the name longmemeval-shape, NEVER as",
+    "LongMemEval: a synthetic run is not a run of the benchmark it is shaped",
+    "like."
+  ],
+  "n_cases": 25,
+  "sampling": {
+    "strategy": "generated",
+    "key": "question_type",
+    "seed": 20260904
+  },
+  "runtime": {
+    "JARVIS_COMPACTION_ENABLED": false,
+    "JARVIS_MEMORY_EMBEDDINGS": "disabled",
+    "JARVIS_CONTEXT_LENGTH": 32768
+  },
+  "model": {
+    "answer": "claude-cli:claude-sonnet-4-5",
+    "judge": "claude-cli:claude-sonnet-4-5",
+    "allowed_model_prefixes": [
+      "claude-cli:claude-sonnet"
+    ]
+  }
+}

@@ -43,6 +43,19 @@ const state = {
   networkDefenseIncidents: new Map(),
   pendingDeleteConversationId: null,
   pageStartedAt: Date.now() / 1000,
+  theme: "system",
+  density: "comfortable",
+  scale: "normal",
+  notifications: false,
+  pinnedConversations: new Set(),
+  unread: new Map(),
+  chatSearch: "",
+  lastActivityAt: Date.now(),
+  lastStatus: null,
+  paletteIndex: 0,
+  paletteItems: [],
+  renameConversationId: null,
+  workspaceMode: "home",
 };
 
 const networkAlertStorageKey = "jarvis.network.first-observed-alerts.v1";
@@ -154,12 +167,890 @@ function deleteRequest(path) {
   return api(path, {method: "DELETE"});
 }
 
-function toast(message) {
+function toast(message, kind = "info") {
   const node = $("toast");
   node.textContent = String(message);
-  node.classList.add("show");
+  const tone = ["success", "error", "warning"].includes(kind) ? ` ${kind}` : "";
+  node.className = `toast show${tone}`;
   clearTimeout(node._timer);
   node._timer = setTimeout(() => node.classList.remove("show"), 3200);
+}
+
+// ---------------------------------------------------------------------------
+// Appearance: theme / density / text size (persisted per browser)
+// ---------------------------------------------------------------------------
+
+const themeMedia = typeof window !== "undefined" && window.matchMedia
+  ? window.matchMedia("(prefers-color-scheme: light)")
+  : null;
+
+function resolvedTheme(preference) {
+  if (preference === "light" || preference === "dark") return preference;
+  return themeMedia && themeMedia.matches ? "light" : "dark";
+}
+
+function applyTheme(preference = state.theme) {
+  state.theme = ["system", "light", "dark"].includes(preference) ? preference : "system";
+  document.documentElement.setAttribute("data-theme", resolvedTheme(state.theme));
+  try { localStorage.setItem("jarvis.presence.theme", state.theme); } catch (_) {}
+  const button = $("theme-toggle");
+  if (button) button.title = `Theme: ${state.theme} · click to switch`;
+}
+
+function cycleTheme() {
+  const order = ["system", "dark", "light"];
+  applyTheme(order[(order.indexOf(state.theme) + 1) % order.length]);
+  const detail = state.theme === "system" ? ` (${resolvedTheme("system")})` : "";
+  toast(`Theme: ${state.theme}${detail}`);
+}
+
+function applyDensity(value = state.density) {
+  state.density = value === "compact" ? "compact" : "comfortable";
+  document.documentElement.setAttribute("data-density", state.density);
+  try { localStorage.setItem("jarvis.presence.density", state.density); } catch (_) {}
+}
+
+function applyScale(value = state.scale) {
+  state.scale = value === "large" ? "large" : "normal";
+  document.documentElement.setAttribute("data-scale", state.scale);
+  try { localStorage.setItem("jarvis.presence.scale", state.scale); } catch (_) {}
+}
+
+function loadAppearance() {
+  let theme = "system";
+  let density = "comfortable";
+  let scale = "normal";
+  try {
+    theme = localStorage.getItem("jarvis.presence.theme") || theme;
+    density = localStorage.getItem("jarvis.presence.density") || density;
+    scale = localStorage.getItem("jarvis.presence.scale") || scale;
+    state.notifications = localStorage.getItem("jarvis.presence.notifications") === "1";
+  } catch (_) {}
+  applyTheme(theme);
+  applyDensity(density);
+  applyScale(scale);
+  if (themeMedia && themeMedia.addEventListener) {
+    themeMedia.addEventListener("change", () => applyTheme());
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Small formatting helpers
+// ---------------------------------------------------------------------------
+
+function relativeTime(value, now = Date.now()) {
+  const stamp = typeof value === "number" ? value * 1000 : Date.parse(String(value || ""));
+  if (!Number.isFinite(stamp)) return "";
+  const delta = Math.max(0, now - stamp);
+  const minutes = Math.floor(delta / 60000);
+  if (minutes < 1) return "just now";
+  if (minutes < 60) return `${minutes}m ago`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `${hours}h ago`;
+  const days = Math.floor(hours / 24);
+  if (days < 7) return `${days}d ago`;
+  return new Date(stamp).toLocaleDateString();
+}
+
+function formatMessageTime(value) {
+  const stamp = value === undefined || value === null || value === ""
+    ? Date.now()
+    : (typeof value === "number" ? value * 1000 : Date.parse(String(value)));
+  if (!Number.isFinite(stamp)) return "";
+  const date = new Date(stamp);
+  const today = new Date();
+  const sameDay = date.toDateString() === today.toDateString();
+  const time = date.toLocaleTimeString([], {hour: "2-digit", minute: "2-digit"});
+  return sameDay ? time : `${date.toLocaleDateString([], {month: "short", day: "numeric"})} ${time}`;
+}
+
+function formatMetricDuration(milliseconds) {
+  const value = Number(milliseconds);
+  if (!Number.isFinite(value) || value < 0) return "";
+  if (value < 1000) return `${Math.round(value)} ms`;
+  if (value < 60000) return `${(value / 1000).toFixed(1)}s`;
+  const minutes = Math.floor(value / 60000);
+  return `${minutes}m ${Math.round((value % 60000) / 1000)}s`;
+}
+
+function copyToClipboard(text) {
+  if (typeof navigator !== "undefined" && navigator.clipboard && navigator.clipboard.writeText) {
+    return navigator.clipboard.writeText(String(text || ""));
+  }
+  return Promise.reject(new Error("Clipboard is unavailable in this browser."));
+}
+
+// ---------------------------------------------------------------------------
+// Safe markdown rendering (built from DOM nodes and text only)
+// ---------------------------------------------------------------------------
+
+function splitTableRow(line) {
+  let trimmed = String(line).trim();
+  if (trimmed.startsWith("|")) trimmed = trimmed.slice(1);
+  if (trimmed.endsWith("|")) trimmed = trimmed.slice(0, -1);
+  return trimmed.split("|").map((cell) => cell.trim());
+}
+
+function markdownBlocks(text) {
+  // Patterns live inside the function so it stays self-contained.
+  const fencePattern = /^\s*(`{3,}|~{3,})\s*([A-Za-z0-9_+.#-]*)\s*$/;
+  const headingPattern = /^(#{1,6})\s+(.*?)\s*#*\s*$/;
+  const rulePattern = /^\s*([-*_])(?:\s*\1){2,}\s*$/;
+  const bulletPattern = /^(\s*)[-*+]\s+(.*)$/;
+  const numberedPattern = /^(\s*)(\d{1,3})[.)]\s+(.*)$/;
+  const quotePattern = /^\s*>\s?(.*)$/;
+  const tableSeparatorPattern = /^\s*\|?\s*:?-{2,}:?\s*(\|\s*:?-{2,}:?\s*)*\|?\s*$/;
+  const taskPattern = /^\[([ xX])\]\s+(.*)$/;
+  const lines = String(text || "").replace(/\r\n?/g, "\n").split("\n");
+  const blocks = [];
+  let paragraph = [];
+  const flush = () => {
+    if (paragraph.length) {
+      blocks.push({type: "paragraph", text: paragraph.join("\n").replace(/^\n+|\n+$/g, "")});
+      paragraph = [];
+    }
+  };
+  let index = 0;
+  while (index < lines.length) {
+    const line = lines[index];
+    const fence = fencePattern.exec(line);
+    if (fence) {
+      flush();
+      const marker = fence[1][0];
+      const code = [];
+      index += 1;
+      while (index < lines.length) {
+        const closing = fencePattern.exec(lines[index]);
+        if (closing && closing[1][0] === marker && !closing[2]) { index += 1; break; }
+        code.push(lines[index]);
+        index += 1;
+      }
+      blocks.push({type: "code", lang: fence[2].toLowerCase(), text: code.join("\n")});
+      continue;
+    }
+    if (!line.trim()) { flush(); index += 1; continue; }
+    const heading = headingPattern.exec(line);
+    if (heading) { flush(); blocks.push({type: "heading", level: heading[1].length, text: heading[2]}); index += 1; continue; }
+    if (rulePattern.test(line)) { flush(); blocks.push({type: "hr"}); index += 1; continue; }
+    if (quotePattern.test(line)) {
+      flush();
+      const quoted = [];
+      while (index < lines.length) {
+        const quote = quotePattern.exec(lines[index]);
+        if (!quote) break;
+        quoted.push(quote[1]);
+        index += 1;
+      }
+      blocks.push({type: "quote", text: quoted.join("\n").trim()});
+      continue;
+    }
+    if (bulletPattern.test(line) || numberedPattern.test(line)) {
+      flush();
+      const ordered = numberedPattern.test(line);
+      const items = [];
+      while (index < lines.length) {
+        const current = lines[index];
+        const match = ordered ? numberedPattern.exec(current) : bulletPattern.exec(current);
+        if (match) {
+          const indent = match[1].replace(/\t/g, "    ").length;
+          const body = ordered ? match[3] : match[2];
+          const task = taskPattern.exec(body);
+          items.push({indent: Math.floor(indent / 2), text: task ? task[2] : body, checked: task ? task[1].toLowerCase() === "x" : null});
+          index += 1;
+          continue;
+        }
+        if (items.length && current.trim() && /^(\s{2,}|\t)/.test(current)) {
+          items[items.length - 1].text += `\n${current.trim()}`;
+          index += 1;
+          continue;
+        }
+        break;
+      }
+      blocks.push({type: "list", ordered, items});
+      continue;
+    }
+    if (line.includes("|") && index + 1 < lines.length && tableSeparatorPattern.test(lines[index + 1])) {
+      flush();
+      const rows = [splitTableRow(line)];
+      index += 2;
+      while (index < lines.length && lines[index].includes("|") && lines[index].trim()) {
+        rows.push(splitTableRow(lines[index]));
+        index += 1;
+      }
+      blocks.push({type: "table", rows});
+      continue;
+    }
+    paragraph.push(line);
+    index += 1;
+  }
+  flush();
+  return blocks;
+}
+
+function renderInline(container, text) {
+  const pattern = /(`+)([^`\n]+?)\1|\*\*([^*\n]+?)\*\*|(?<![A-Za-z0-9*])\*([^*\n]+?)\*(?![A-Za-z0-9*])|~~([^~\n]+?)~~/g;
+  const value = String(text || "");
+  let cursor = 0;
+  let match;
+  const flushText = (run) => {
+    if (!run) return;
+    const span = document.createElement("span");
+    renderLinkedText(span, run);
+    container.append(span);
+  };
+  while ((match = pattern.exec(value)) !== null) {
+    flushText(value.slice(cursor, match.index));
+    if (match[2] !== undefined) {
+      const code = document.createElement("code");
+      code.className = "md-code";
+      code.textContent = match[2];
+      container.append(code);
+    } else if (match[3] !== undefined) {
+      const strong = document.createElement("strong");
+      strong.className = "md-strong";
+      renderInline(strong, match[3]);
+      container.append(strong);
+    } else if (match[4] !== undefined) {
+      const em = document.createElement("em");
+      em.className = "md-em";
+      renderInline(em, match[4]);
+      container.append(em);
+    } else if (match[5] !== undefined) {
+      const del = document.createElement("del");
+      del.className = "md-del";
+      renderInline(del, match[5]);
+      container.append(del);
+    }
+    cursor = pattern.lastIndex;
+  }
+  flushText(value.slice(cursor));
+}
+
+function makeCodeBlock(language, code) {
+  const block = document.createElement("div");
+  block.className = "code-block";
+  const head = document.createElement("div");
+  head.className = "code-head";
+  const label = document.createElement("span");
+  label.textContent = language || "code";
+  const copy = document.createElement("button");
+  copy.type = "button";
+  copy.className = "code-copy";
+  copy.textContent = "Copy";
+  copy.addEventListener("click", () => {
+    copyToClipboard(code).then(() => {
+      copy.textContent = "Copied";
+      copy.classList.add("copied");
+      setTimeout(() => { copy.textContent = "Copy"; copy.classList.remove("copied"); }, 1500);
+    }).catch((error) => toast(error.message || "Copy failed", "error"));
+  });
+  head.append(label, copy);
+  const pre = document.createElement("pre");
+  const node = document.createElement("code");
+  node.textContent = String(code || "");
+  pre.append(node);
+  block.append(head, pre);
+  return block;
+}
+
+function renderList(container, block) {
+  const tag = block.ordered ? "ol" : "ul";
+  const root = document.createElement(tag);
+  root.className = block.ordered ? "md-ol" : "md-ul";
+  const stack = [{indent: 0, list: root}];
+  for (const item of block.items || []) {
+    while (stack.length > 1 && item.indent < stack[stack.length - 1].indent) stack.pop();
+    let current = stack[stack.length - 1];
+    if (item.indent > current.indent) {
+      const kids = current.list.children;
+      const parent = kids[kids.length - 1];
+      if (parent) {
+        const nested = document.createElement(tag);
+        nested.className = root.className;
+        parent.append(nested);
+        stack.push({indent: item.indent, list: nested});
+        current = stack[stack.length - 1];
+      }
+    }
+    const li = document.createElement("li");
+    li.className = "md-li";
+    if (item.checked !== null && item.checked !== undefined) {
+      li.classList.add("md-task");
+      const box = document.createElement("input");
+      box.type = "checkbox";
+      box.checked = Boolean(item.checked);
+      box.disabled = true;
+      const label = document.createElement("span");
+      renderInline(label, item.text);
+      li.append(box, label);
+    } else {
+      renderInline(li, item.text);
+    }
+    current.list.append(li);
+  }
+  container.append(root);
+}
+
+function renderTable(container, rows) {
+  const wrap = document.createElement("div");
+  wrap.className = "md-table-wrap";
+  const table = document.createElement("table");
+  table.className = "md-table";
+  (rows || []).forEach((row, rowIndex) => {
+    const tr = document.createElement("tr");
+    for (const cell of row) {
+      const td = document.createElement(rowIndex === 0 ? "th" : "td");
+      renderInline(td, cell);
+      tr.append(td);
+    }
+    table.append(tr);
+  });
+  wrap.append(table);
+  container.append(wrap);
+}
+
+function renderMarkdown(container, text) {
+  container.replaceChildren();
+  const blocks = markdownBlocks(text);
+  if (!blocks.length) return;
+  container.classList.add("markdown");
+  for (const block of blocks) {
+    if (block.type === "code") {
+      container.append(makeCodeBlock(block.lang, block.text));
+    } else if (block.type === "heading") {
+      const heading = document.createElement(`h${Math.min(6, block.level + 2)}`);
+      heading.className = "md-h";
+      renderInline(heading, block.text);
+      container.append(heading);
+    } else if (block.type === "hr") {
+      const rule = document.createElement("hr");
+      rule.className = "md-hr";
+      container.append(rule);
+    } else if (block.type === "quote") {
+      const quote = document.createElement("blockquote");
+      quote.className = "md-quote";
+      renderMarkdown(quote, block.text);
+      container.append(quote);
+    } else if (block.type === "list") {
+      renderList(container, block);
+    } else if (block.type === "table") {
+      renderTable(container, block.rows);
+    } else {
+      const paragraph = document.createElement("p");
+      paragraph.className = "md-p";
+      renderInline(paragraph, block.text);
+      container.append(paragraph);
+    }
+  }
+}
+
+function messageActions(article, role, target) {
+  const bar = document.createElement("div");
+  bar.className = "message-actions";
+  const add = (label, handler, title = "") => {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "message-action";
+    button.textContent = label;
+    if (title) button.title = title;
+    button.addEventListener("click", handler);
+    bar.append(button);
+  };
+  add("Copy", () => {
+    copyToClipboard(article._raw || "")
+      .then(() => toast("Copied to clipboard.", "success"))
+      .catch((error) => toast(error.message || "Copy failed", "error"));
+  });
+  if (role === "user") {
+    add("Edit", () => editIntoComposer(article._raw || "", target), "Put this prompt back in the composer");
+  } else {
+    add("Regenerate", () => regenerateFrom(article, target), "Send the previous prompt again");
+    add("Quote", () => quoteIntoComposer(article._raw || "", target), "Quote this reply in your next message");
+  }
+  return bar;
+}
+
+function composerFor(target) {
+  return target === secondaryMessages ? secondaryPrompt : prompt;
+}
+
+function editIntoComposer(text, target) {
+  const box = composerFor(target);
+  box.value = text;
+  if (box === prompt) resizePrompt(); else resizeSecondaryPrompt();
+  box.focus();
+}
+
+function quoteIntoComposer(text, target) {
+  const box = composerFor(target);
+  const quoted = String(text || "").trim().split("\n").slice(0, 40).map((line) => `> ${line}`).join("\n");
+  const current = box.value.trimEnd();
+  box.value = `${current ? `${current}\n\n` : ""}${quoted}\n\n`;
+  if (box === prompt) resizePrompt(); else resizeSecondaryPrompt();
+  box.focus();
+}
+
+function regenerateFrom(article, target) {
+  let node = article.previousElementSibling;
+  while (node && !node.classList.contains("user")) node = node.previousElementSibling;
+  if (!node || !node._raw) {
+    toast("No earlier prompt to resend.", "warning");
+    return;
+  }
+  const conversationId = target === secondaryMessages ? state.secondaryConversationId : state.conversationId;
+  if (state.activeJobs.get(conversationId)) {
+    toast("Wait for the current reply to finish.", "warning");
+    return;
+  }
+  editIntoComposer(node._raw, target);
+  const form = target === secondaryMessages ? $("secondary-composer") : $("composer");
+  form.requestSubmit();
+}
+
+// ---------------------------------------------------------------------------
+// Runtime control, notifications, exports
+// ---------------------------------------------------------------------------
+
+function confirmAction(title, copy, label = "Confirm") {
+  return new Promise((resolve) => {
+    const dialog = $("confirm-dialog");
+    $("confirm-title").textContent = title;
+    $("confirm-copy").textContent = copy;
+    const accept = $("accept-confirm");
+    accept.textContent = label;
+    let settled = false;
+    const finish = (value) => {
+      if (settled) return;
+      settled = true;
+      accept.removeEventListener("click", onAccept);
+      $("cancel-confirm").removeEventListener("click", onCancel);
+      dialog.removeEventListener("cancel", onCancel);
+      if (dialog.open) dialog.close();
+      resolve(value);
+    };
+    const onAccept = () => finish(true);
+    const onCancel = () => finish(false);
+    accept.addEventListener("click", onAccept);
+    $("cancel-confirm").addEventListener("click", onCancel);
+    dialog.addEventListener("cancel", onCancel);
+    dialog.showModal();
+  });
+}
+
+async function setRuntimeControl(nextState) {
+  if (nextState === "stopped") {
+    const ok = await confirmAction(
+      "Emergency stop Jarvis?",
+      "Background work, learning, and monitors stop until you resume. Open chats stay readable.",
+      "Stop everything",
+    );
+    if (!ok) return;
+  }
+  await post("/api/control", {state: nextState, reason: "Presence UI"});
+  toast(`Jarvis runtime is now ${nextState}.`, nextState === "running" ? "success" : "warning");
+  await refreshStatus();
+  if (state.activeView === "overview") await renderOverview();
+}
+
+function runtimeState() {
+  return String(state.lastStatus?.control?.state || "unknown");
+}
+
+async function toggleRuntimeControl() {
+  const current = runtimeState();
+  await setRuntimeControl(current === "running" ? "paused" : "running");
+}
+
+async function setNotificationsEnabled(enabled) {
+  if (!enabled) {
+    state.notifications = false;
+  } else if (typeof Notification === "undefined") {
+    toast("This browser does not support notifications.", "warning");
+    state.notifications = false;
+  } else {
+    const permission = Notification.permission === "granted"
+      ? "granted"
+      : await Notification.requestPermission();
+    state.notifications = permission === "granted";
+    if (!state.notifications) toast("Notifications were not allowed.", "warning");
+  }
+  try { localStorage.setItem("jarvis.presence.notifications", state.notifications ? "1" : "0"); } catch (_) {}
+  return state.notifications;
+}
+
+function notifyFinished(conversationId, content) {
+  if (!state.notifications || typeof document === "undefined" || !document.hidden) return;
+  if (typeof Notification === "undefined" || Notification.permission !== "granted") return;
+  const title = state.conversations.get(conversationId)?.title || "Jarvis";
+  try {
+    new Notification(`Jarvis finished: ${title}`, {body: String(content || "").slice(0, 140)});
+  } catch (_) {}
+}
+
+function updateTitleBadge() {
+  let total = 0;
+  for (const count of state.unread.values()) total += count;
+  document.title = total ? `(${total}) JARVIS Presence` : "JARVIS Presence";
+}
+
+function markUnread(conversationId) {
+  if (!conversationId) return;
+  state.unread.set(conversationId, (state.unread.get(conversationId) || 0) + 1);
+  updateTitleBadge();
+}
+
+function clearUnread(conversationId) {
+  if (state.unread.delete(conversationId)) updateTitleBadge();
+}
+
+function conversationTranscript(target = messages) {
+  return [...target.querySelectorAll(".message")]
+    .filter((article) => !article.classList.contains("progress") && !article.classList.contains("progress-finished") && !article.classList.contains("welcome"))
+    .map((article) => ({
+      role: article.classList.contains("user") ? "user" : "assistant",
+      content: article._raw || article.querySelector(".content")?.textContent || "",
+      time: article._time || null,
+    }))
+    .filter((row) => row.content);
+}
+
+function downloadText(name, text, type) {
+  const blob = new Blob([text], {type});
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = name;
+  document.body.append(link);
+  link.click();
+  link.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 1500);
+}
+
+function exportConversation(format = "markdown") {
+  const rows = conversationTranscript();
+  if (!rows.length) {
+    toast("Nothing to export yet.", "warning");
+    return;
+  }
+  const title = state.conversations.get(state.conversationId)?.title || "Jarvis chat";
+  const safeName = title.replace(/[^A-Za-z0-9 _-]+/g, "").trim().slice(0, 60) || "jarvis-chat";
+  if (format === "json") {
+    downloadText(`${safeName}.json`, JSON.stringify({title, exported_at: new Date().toISOString(), messages: rows}, null, 2), "application/json");
+  } else {
+    const lines = [`# ${title}`, "", `_Exported from JARVIS Presence on ${new Date().toLocaleString()}_`, ""];
+    for (const row of rows) {
+      lines.push(`## ${row.role === "user" ? "You" : "Jarvis"}${row.time ? ` · ${row.time}` : ""}`, "", row.content.trim(), "");
+    }
+    downloadText(`${safeName}.md`, lines.join("\n"), "text/markdown");
+  }
+  toast(`Exported ${safeName}.${format === "json" ? "json" : "md"}`, "success");
+}
+
+// ---------------------------------------------------------------------------
+// Command palette + shortcuts
+// ---------------------------------------------------------------------------
+
+function scorePaletteItem(item, query) {
+  const haystack = `${item.label || ""} ${item.detail || ""} ${item.keywords || ""}`.toLowerCase();
+  if (!query) return 1;
+  let total = 0;
+  for (const word of query.toLowerCase().split(/\s+/).filter(Boolean)) {
+    const position = haystack.indexOf(word);
+    if (position < 0) return 0;
+    total += 100 - Math.min(90, position);
+    if (String(item.label || "").toLowerCase().startsWith(word)) total += 40;
+  }
+  return total;
+}
+
+function filterPaletteItems(items, query, limit = 40) {
+  const trimmed = String(query || "").trim();
+  const scored = items
+    .map((item, index) => ({score: scorePaletteItem(item, trimmed), index, item}))
+    .filter((entry) => entry.score > 0);
+  if (trimmed) scored.sort((left, right) => right.score - left.score || left.index - right.index);
+  return scored.slice(0, limit).map((entry) => entry.item);
+}
+
+const viewIcons = {
+  overview: "◫", projects: "▰", artifacts: "◇", scheduled: "◷", dispatch: "⇄", memory: "◍",
+  activity: "≡", performance: "⌁", devices: "⌑", companion: "◉", "public-presence": "◎", customize: "☷",
+};
+
+function paletteItems() {
+  const items = [];
+  const pending = Number(state.lastStatus?.pending_approvals || 0);
+  const control = runtimeState();
+  items.push({group: "Actions", icon: "＋", label: "New chat", detail: "Ctrl+Shift+O", keywords: "create start conversation", run: () => newConversation().catch(showError)});
+  items.push({group: "Actions", icon: "✓", label: "Review approvals", detail: `${pending} pending`, keywords: "approve deny sensitive", run: () => openApprovals().catch(showError)});
+  items.push({group: "Actions", icon: "⇄", label: state.splitEnabled ? "Close split view" : "Open split view", detail: "Ctrl+Shift+S", keywords: "second pane parallel", run: () => setSplitView(!state.splitEnabled).catch(showError)});
+  items.push({group: "Actions", icon: "■", label: "Stop the current request", detail: "Esc", keywords: "cancel abort", run: () => cancelActive().catch(showError)});
+  items.push({group: "Actions", icon: "⇪", label: "Export this chat as Markdown", detail: "Ctrl+Shift+E", keywords: "save download", run: () => exportConversation("markdown")});
+  items.push({group: "Actions", icon: "{}", label: "Export this chat as JSON", keywords: "save download data", run: () => exportConversation("json")});
+  items.push({group: "Actions", icon: "✎", label: "Rename this chat", keywords: "title", run: () => requestRename(state.conversations.get(state.conversationId))});
+  items.push({group: "Actions", icon: "◐", label: `Switch theme (now ${state.theme})`, keywords: "dark light appearance", run: cycleTheme});
+  items.push({group: "Actions", icon: "☰", label: "Toggle sidebar", detail: "Ctrl+B", keywords: "rail hide show", run: toggleRail});
+  items.push({group: "Actions", icon: "⌨", label: "Keyboard shortcuts", detail: "Ctrl+/", keywords: "help keys", run: showShortcuts});
+  items.push({group: "Runtime", icon: control === "running" ? "‖" : "▶", label: control === "running" ? "Pause Jarvis background work" : "Resume Jarvis background work", detail: `now ${control}`, keywords: "control pause resume runtime", run: () => toggleRuntimeControl().catch(showError)});
+  items.push({group: "Runtime", icon: "⏻", label: "Emergency stop Jarvis", keywords: "halt stop everything", run: () => setRuntimeControl("stopped").catch(showError)});
+  for (const [key, [kicker, title]] of Object.entries(utilityCopy)) {
+    items.push({group: "Views", icon: viewIcons[key] || "·", label: title, detail: kicker, keywords: `view page ${key}`, run: () => openUtility(key).catch(showError)});
+  }
+  for (const row of state.conversations.values()) {
+    items.push({group: "Chats", icon: "◌", label: row.title || "Untitled task", detail: row.project_name || "", keywords: "conversation chat", run: () => loadConversation(row.id).catch(showError)});
+  }
+  for (const project of state.projects) {
+    items.push({group: "Projects", icon: "▰", label: `Open project ${project.name}`, detail: project.kind || "", keywords: "workspace project", run: () => openProjectInChat(project.id).catch(showError)});
+  }
+  return items;
+}
+
+function openPalette() {
+  const dialog = $("palette-dialog");
+  if (dialog.open) { dialog.close(); return; }
+  state.paletteItems = paletteItems();
+  state.paletteIndex = 0;
+  $("palette-input").value = "";
+  renderPalette("");
+  dialog.showModal();
+  $("palette-input").focus();
+}
+
+function renderPalette(query) {
+  const list = $("palette-list");
+  list.replaceChildren();
+  const visible = filterPaletteItems(state.paletteItems, query);
+  state.paletteVisible = visible;
+  if (state.paletteIndex >= visible.length) state.paletteIndex = 0;
+  if (!visible.length) {
+    const empty = document.createElement("div");
+    empty.className = "palette-empty";
+    empty.textContent = "Nothing matches. Try a chat title, a view, or an action.";
+    list.append(empty);
+    return;
+  }
+  let lastGroup = null;
+  visible.forEach((item, index) => {
+    if (item.group !== lastGroup) {
+      const group = document.createElement("div");
+      group.className = "palette-group";
+      group.textContent = item.group;
+      list.append(group);
+      lastGroup = item.group;
+    }
+    const row = document.createElement("button");
+    row.type = "button";
+    row.className = `palette-item${index === state.paletteIndex ? " active" : ""}`;
+    row.setAttribute("role", "option");
+    row.setAttribute("aria-selected", index === state.paletteIndex ? "true" : "false");
+    const icon = document.createElement("span");
+    icon.className = "palette-icon";
+    icon.textContent = item.icon || "·";
+    const label = document.createElement("span");
+    label.className = "palette-label";
+    label.textContent = item.label;
+    row.append(icon, label);
+    if (item.detail) {
+      const detail = document.createElement("small");
+      detail.textContent = item.detail;
+      row.append(detail);
+    }
+    row.addEventListener("click", () => activatePaletteItem(index));
+    row.addEventListener("mousemove", () => {
+      if (state.paletteIndex !== index) { state.paletteIndex = index; paintPaletteSelection(); }
+    });
+    list.append(row);
+  });
+}
+
+function paintPaletteSelection() {
+  const rows = $("palette-list").querySelectorAll(".palette-item");
+  rows.forEach((row, index) => {
+    row.classList.toggle("active", index === state.paletteIndex);
+    row.setAttribute("aria-selected", index === state.paletteIndex ? "true" : "false");
+  });
+  const active = rows[state.paletteIndex];
+  if (active && active.scrollIntoView) active.scrollIntoView({block: "nearest"});
+}
+
+function movePaletteSelection(delta) {
+  const total = (state.paletteVisible || []).length;
+  if (!total) return;
+  state.paletteIndex = (state.paletteIndex + delta + total) % total;
+  paintPaletteSelection();
+}
+
+function activatePaletteItem(index = state.paletteIndex) {
+  const item = (state.paletteVisible || [])[index];
+  $("palette-dialog").close();
+  if (item) item.run();
+}
+
+const shortcutGroups = [
+  ["Conversation", [
+    ["Enter", "Send message"],
+    ["Shift + Enter", "New line"],
+    ["Esc", "Stop the current request (while typing)"],
+    ["Ctrl + Shift + O", "New chat"],
+    ["Ctrl + Shift + S", "Toggle split view"],
+    ["Ctrl + Shift + E", "Export this chat as Markdown"],
+    ["Double-click title", "Rename this chat"],
+  ]],
+  ["Navigate", [
+    ["Ctrl + K", "Command palette: chats, views, actions"],
+    ["Ctrl + B", "Toggle the sidebar"],
+    ["Ctrl + /", "This shortcut list"],
+    ["Paste / drop image", "Attach it to your message"],
+  ]],
+];
+
+function renderShortcuts() {
+  const list = $("shortcuts-list");
+  list.replaceChildren();
+  for (const [group, rows] of shortcutGroups) {
+    const heading = document.createElement("div");
+    heading.className = "shortcut-group";
+    heading.textContent = group;
+    list.append(heading);
+    for (const [keys, description] of rows) {
+      const row = document.createElement("div");
+      row.className = "shortcut-row";
+      const label = document.createElement("span");
+      label.textContent = description;
+      const keyBox = document.createElement("span");
+      keyBox.className = "keys";
+      for (const part of keys.split(" + ")) {
+        const kbd = document.createElement("kbd");
+        kbd.className = "kbd";
+        kbd.textContent = part;
+        keyBox.append(kbd);
+      }
+      row.append(label, keyBox);
+      list.append(row);
+    }
+  }
+}
+
+function showShortcuts() {
+  renderShortcuts();
+  const dialog = $("shortcuts-dialog");
+  if (!dialog.open) dialog.showModal();
+}
+
+function anyDialogOpen() {
+  return [...document.querySelectorAll("dialog")].some((dialog) => dialog.open);
+}
+
+// ---------------------------------------------------------------------------
+// Polling cadence
+// ---------------------------------------------------------------------------
+
+function adaptivePollDelay(base) {
+  if (typeof document !== "undefined" && document.hidden) return Math.max(base, 4000);
+  if (base <= 150) return base;
+  const idle = Date.now() - (state.lastActivityAt || 0);
+  if (idle > 120000) return 3000;
+  if (idle > 30000) return 1500;
+  return base;
+}
+
+function noteActivity() {
+  state.lastActivityAt = Date.now();
+}
+
+// ---------------------------------------------------------------------------
+// Quick prompts + pinned chats + rename
+// ---------------------------------------------------------------------------
+
+const quickPrompts = {
+  home: [
+    ["Summarize", "Summarize the key points of this conversation so far."],
+    ["Explain", "Explain this step by step for a beginner: "],
+    ["Plan", "Help me plan this, with milestones, risks, and a first step: "],
+    ["Draft", "Draft a clear, friendly message about: "],
+    ["Research", "Research this and tell me what you could verify: "],
+  ],
+  code: [
+    ["Review", "Review this code for bugs, security issues, and clarity: "],
+    ["Tests", "Write focused unit tests for this: "],
+    ["Fix", "Find and fix the bug described here: "],
+    ["Refactor", "Refactor this for readability without changing behavior: "],
+    ["Explain", "Explain what this code does and where it could fail: "],
+  ],
+};
+
+function renderQuickActions(mode = state.workspaceMode) {
+  const bar = $("quick-actions");
+  if (!bar) return;
+  bar.replaceChildren();
+  for (const [label, template] of quickPrompts[mode] || quickPrompts.home) {
+    const chip = document.createElement("button");
+    chip.type = "button";
+    chip.className = "quick-chip";
+    chip.textContent = label;
+    chip.title = template;
+    chip.addEventListener("click", () => {
+      const current = prompt.value.trim();
+      prompt.value = current && !template.endsWith(" ") ? `${template}\n\n${current}` : `${template}${current}`;
+      resizePrompt();
+      prompt.focus();
+    });
+    bar.append(chip);
+  }
+}
+
+function loadPinnedConversations() {
+  try {
+    const saved = JSON.parse(localStorage.getItem("jarvis.presence.pinned-chats") || "[]");
+    if (Array.isArray(saved)) {
+      state.pinnedConversations = new Set(saved.filter((value) => Number.isSafeInteger(value) && value > 0).slice(0, 50));
+    }
+  } catch (_) {
+    state.pinnedConversations = new Set();
+  }
+}
+
+function togglePinnedConversation(conversationId) {
+  if (state.pinnedConversations.has(conversationId)) state.pinnedConversations.delete(conversationId);
+  else if (state.pinnedConversations.size < 50) state.pinnedConversations.add(conversationId);
+  else return toast("You can pin up to 50 chats.", "warning");
+  try { localStorage.setItem("jarvis.presence.pinned-chats", JSON.stringify([...state.pinnedConversations])); } catch (_) {}
+  refreshConversations().catch(showError);
+}
+
+function requestRename(conversation) {
+  if (!conversation) return;
+  state.renameConversationId = conversation.id;
+  $("rename-chat-title").value = conversation.title || "";
+  $("rename-chat-dialog").showModal();
+  $("rename-chat-title").select();
+}
+
+async function submitRename(event) {
+  event.preventDefault();
+  const conversationId = state.renameConversationId;
+  const title = $("rename-chat-title").value.trim();
+  if (!conversationId || !title) return;
+  const button = $("confirm-rename-chat");
+  button.disabled = true;
+  try {
+    const result = await post(`/api/conversations/${conversationId}/rename`, {title});
+    $("rename-chat-dialog").close();
+    if (conversationId === state.conversationId) $("chat-title").textContent = result.title;
+    await refreshConversations();
+    toast("Chat renamed.", "success");
+  } finally {
+    button.disabled = false;
+  }
+}
+
+function closeRowMenus() {
+  document.querySelectorAll(".row-menu").forEach((menu) => { menu.hidden = true; });
+}
+
+async function openApprovals() {
+  await refreshApprovals();
+  $("approval-dialog").showModal();
 }
 
 function currentJobId() {
@@ -339,7 +1230,7 @@ function renderMessageContent(body, content) {
     }
     return "";
   }).trim();
-  renderLinkedText(body, visible);
+  renderMarkdown(body, visible);
   if (!paths.length || !state.projectId) return;
   const gallery = document.createElement("div");
   gallery.className = "generated-images";
@@ -444,9 +1335,12 @@ function renderProductComparison(article, comparison) {
   bubble.append(section);
 }
 
-function appendMessage(role, content, meta = "", images = [], target = messages) {
+function appendMessage(role, content, meta = "", images = [], target = messages, options = null) {
+  const settings = options || {};
   const article = document.createElement("article");
   article.className = `message ${role}`;
+  article._raw = String(content || "");
+  article._time = formatMessageTime(settings.time);
   const inner = document.createElement("div");
   inner.className = "message-inner";
   const avatar = document.createElement("div");
@@ -456,7 +1350,12 @@ function appendMessage(role, content, meta = "", images = [], target = messages)
   bubble.className = "bubble";
   const label = document.createElement("div");
   label.className = "role";
-  label.textContent = role === "user" ? "YOU" : "JARVIS";
+  const who = document.createElement("span");
+  who.textContent = role === "user" ? "YOU" : "JARVIS";
+  const stamp = document.createElement("span");
+  stamp.className = "message-time";
+  stamp.textContent = article._time;
+  label.append(who, stamp);
   const body = document.createElement("div");
   body.className = "content";
   renderMessageContent(body, content);
@@ -467,6 +1366,9 @@ function appendMessage(role, content, meta = "", images = [], target = messages)
     detail.textContent = meta;
     bubble.append(detail);
   }
+  const actions = messageActions(article, role, target);
+  actions.hidden = !article._raw;
+  bubble.append(actions);
   if (Array.isArray(images) && images.length) {
     const gallery = document.createElement("div");
     gallery.className = "message-images";
@@ -550,6 +1452,7 @@ function appendAssistantDelta(jobId, text, target = messages) {
     state.streamNodes.set(jobId, stream);
   }
   stream.text += String(text);
+  stream.body.classList.remove("markdown");
   stream.body.textContent = stream.text;
   target.scrollTop = target.scrollHeight;
 }
@@ -562,6 +1465,9 @@ function finalizeAssistantStream(jobId, content, meta = "", target = messages) {
   stream.article.classList.remove("streaming");
   stream.article.querySelector(".generated-images")?.remove();
   renderMessageContent(stream.body, content);
+  stream.article._raw = String(content || "");
+  const actionBar = stream.article.querySelector(".message-actions");
+  if (actionBar) actionBar.hidden = !stream.article._raw;
   if (stream.meta) stream.meta.textContent = meta;
   state.streamNodes.delete(jobId);
   target.scrollTop = target.scrollHeight;
@@ -737,8 +1643,11 @@ async function loadConversation(id) {
   if (!result.messages.length) {
     appendMessage("assistant", "Conversation ready. What are we working on?");
   } else {
-    for (const item of result.messages) appendMessage(item.role, item.content);
+    for (const item of result.messages) {
+      appendMessage(item.role, item.content, "", [], messages, {time: item.created_at});
+    }
   }
+  clearUnread(state.conversationId);
   if (swappedConversation) await loadSecondaryConversation(swappedConversation);
   await refreshConversations();
   syncBusy();
@@ -804,8 +1713,9 @@ async function loadSecondaryConversation(id) {
     );
   } else {
     for (const item of result.messages) {
-      appendMessage(item.role, item.content, "", [], secondaryMessages);
+      appendMessage(item.role, item.content, "", [], secondaryMessages, {time: item.created_at});
     }
+    clearUnread(state.secondaryConversationId);
   }
   const conversation = state.conversations.get(state.secondaryConversationId);
   $("secondary-activity").textContent = state.activeJobs.has(state.secondaryConversationId)
@@ -859,23 +1769,104 @@ async function refreshConversations() {
   const projectRows = result.conversations.filter(
     (row) => row.project_id === state.projectId,
   );
-  if (!projectRows.length) {
+  const query = state.chatSearch.trim().toLowerCase();
+  const visibleRows = projectRows.filter(
+    (row) => !query || String(row.title || "").toLowerCase().includes(query),
+  );
+  const pinned = (row) => (state.pinnedConversations.has(row.id) ? 1 : 0);
+  visibleRows.sort((left, right) => pinned(right) - pinned(left));
+  const counter = $("conversation-count");
+  if (counter) counter.textContent = projectRows.length ? String(projectRows.length) : "";
+  if (!visibleRows.length) {
     const empty = document.createElement("div");
     empty.className = "conversation-empty";
-    empty.textContent = "No chats here yet.";
+    empty.textContent = projectRows.length ? "No chats match that filter." : "No chats here yet.";
     list.append(empty);
   }
-  for (const row of projectRows) {
+  for (const row of visibleRows) {
     const entry = document.createElement("div");
     entry.className = `conversation-entry${row.id === state.conversationId ? " active" : ""}`;
     const button = document.createElement("button");
     button.type = "button";
     button.className = "conversation-item";
-    const running = state.activeJobs.has(row.id) ? "  ·  Working" : "";
-    const split = state.splitEnabled && row.id === state.secondaryConversationId ? "  ·  Split" : "";
-    button.textContent = `${row.title || "Untitled task"}${running}${split}`;
+    const title = document.createElement("span");
+    title.className = "conversation-title";
+    title.textContent = row.title || "Untitled task";
+    const meta = document.createElement("span");
+    meta.className = "conversation-meta";
+    if (state.pinnedConversations.has(row.id)) {
+      const mark = document.createElement("span");
+      mark.className = "pinned-mark";
+      mark.textContent = "★";
+      meta.append(mark);
+    }
+    if (state.activeJobs.has(row.id)) {
+      const working = document.createElement("span");
+      working.className = "working";
+      working.textContent = "working";
+      meta.append(working);
+    }
+    const unread = state.unread.get(row.id);
+    if (unread) {
+      const badge = document.createElement("span");
+      badge.className = "unread";
+      badge.textContent = String(unread);
+      meta.append(badge);
+    }
+    if (state.splitEnabled && row.id === state.secondaryConversationId) {
+      const split = document.createElement("span");
+      split.textContent = "split";
+      meta.append(split);
+    }
+    const count = document.createElement("span");
+    count.textContent = `${row.message_count || 0} msg${row.message_count === 1 ? "" : "s"}`;
+    meta.append(count);
+    const age = relativeTime(row.created_at);
+    if (age) {
+      const when = document.createElement("span");
+      when.textContent = age;
+      meta.append(when);
+    }
+    button.append(title, meta);
     button.title = row.title || "Conversation";
     button.addEventListener("click", () => loadConversation(row.id).catch(showError));
+    const tools = document.createElement("div");
+    tools.className = "conversation-tools";
+    const pin = document.createElement("button");
+    pin.type = "button";
+    pin.className = "conversation-pin";
+    pin.textContent = state.pinnedConversations.has(row.id) ? "★" : "☆";
+    pin.title = state.pinnedConversations.has(row.id) ? "Unpin chat" : "Pin chat";
+    pin.setAttribute("aria-label", pin.title);
+    pin.addEventListener("click", () => togglePinnedConversation(row.id));
+    const more = document.createElement("button");
+    more.type = "button";
+    more.className = "conversation-more";
+    more.textContent = "⋯";
+    more.title = "Chat actions";
+    more.setAttribute("aria-label", `Actions for ${row.title || "this chat"}`);
+    const menu = document.createElement("div");
+    menu.className = "row-menu";
+    menu.hidden = true;
+    const menuItem = (labelText, handler, danger = false) => {
+      const item = document.createElement("button");
+      item.type = "button";
+      item.textContent = labelText;
+      if (danger) item.className = "danger";
+      item.addEventListener("click", () => { menu.hidden = true; handler(); });
+      menu.append(item);
+    };
+    menuItem("Open", () => loadConversation(row.id).catch(showError));
+    menuItem("Rename…", () => requestRename(row));
+    menuItem(state.pinnedConversations.has(row.id) ? "Unpin" : "Pin", () => togglePinnedConversation(row.id));
+    if (row.id === state.conversationId) menuItem("Export as Markdown", () => exportConversation("markdown"));
+    menuItem("Delete", () => requestConversationDelete(row), true);
+    more.addEventListener("click", (event) => {
+      event.stopPropagation();
+      const open = menu.hidden;
+      closeRowMenus();
+      menu.hidden = !open;
+    });
     const remove = document.createElement("button");
     remove.type = "button";
     remove.className = "conversation-delete";
@@ -884,7 +1875,8 @@ async function refreshConversations() {
     remove.setAttribute("aria-label", remove.title);
     remove.disabled = state.activeJobs.has(row.id);
     remove.addEventListener("click", () => requestConversationDelete(row));
-    entry.append(button, remove);
+    tools.append(pin, more, remove);
+    entry.append(button, tools, menu);
     list.append(entry);
   }
   renderSecondaryConversationOptions();
@@ -1075,6 +2067,7 @@ function setWorkspaceMode(mode) {
   $("home-mode").setAttribute("aria-selected", codeMode ? "false" : "true");
   $("code-mode").classList.toggle("active", codeMode);
   $("code-mode").setAttribute("aria-selected", codeMode ? "true" : "false");
+  state.workspaceMode = codeMode ? "code" : "home";
   if (codeMode) {
     $("model").value = "coding";
     prompt.placeholder = "Ask Jarvis to build, fix, test, or inspect code";
@@ -1082,14 +2075,18 @@ function setWorkspaceMode(mode) {
     $("model").value = "auto";
     prompt.placeholder = "Message Jarvis";
   }
+  renderQuickActions(state.workspaceMode);
   showChat();
 }
 
 const utilityCopy = {
+  overview: ["Dashboard", "Overview", "What Jarvis is doing right now, what needs you, and where to go next."],
   projects: ["Workspace", "Projects", "Keep chats, files, and agent work separated by project."],
   artifacts: ["Project workspace", "Project files", "Code, research, documents, images, datasets, and exports from the active project only."],
   scheduled: ["Automation", "Scheduled", "Queued tasks, recurring learning, and approved proactive work."],
   dispatch: ["Agent system", "Dispatch", "Live specialist assignments and model routing managed by Jarvis."],
+  memory: ["Governed memory", "Memory", "Search what Jarvis remembers and review recent memories. Queries that contain secrets or private identifiers are refused by design."],
+  activity: ["Audit trail", "Activity", "A bounded, redacted log of what Jarvis did: tasks, tools, controls, and approvals."],
   performance: ["Prompt-free telemetry", "Performance", "See how quickly and reliably Jarvis has completed recent work. This view never reads prompts, messages, or tool arguments."],
   devices: ["Private devices", "Devices", "Review devices Jarvis has observed on paired private networks and endpoints Windows already reports as paired over Bluetooth."],
   companion: ["Opt-in assistance", "Screen Companion", "Let Jarvis observe the active window, suggest help, or run operator-authored routines with existing approvals."],
@@ -1132,6 +2129,9 @@ async function openUtility(view) {
   document.querySelectorAll("[data-view]").forEach((button) => {
     button.classList.toggle("active", button.dataset.view === view);
   });
+  if (view === "overview") await renderOverview(generation);
+  if (view === "memory") await renderMemory(generation);
+  if (view === "activity") await renderActivity(generation);
   if (view === "projects") renderProjects();
   if (view === "artifacts") await renderArtifacts(generation);
   if (view === "scheduled") await renderSchedule(generation);
@@ -1441,6 +2441,76 @@ function scheduledRow(titleText, metaText, statusText) {
   return row;
 }
 
+function taskQueueForm() {
+  const card = document.createElement("form");
+  card.className = "utility-card task-form";
+  const title = document.createElement("h3");
+  title.textContent = "Queue a background task";
+  const help = document.createElement("p");
+  help.textContent = "The task runs in the current project when the Jarvis worker is active, with the same approvals and limits as a chat request.";
+  const box = document.createElement("textarea");
+  box.maxLength = 50000;
+  box.placeholder = "Example: Summarize every new file in research/ and write the digest to documents/digest.md";
+  box.setAttribute("aria-label", "Task prompt");
+  const row = document.createElement("div");
+  row.className = "task-form-row";
+  const model = $("model").cloneNode(true);
+  model.id = "";
+  model.value = "auto";
+  model.setAttribute("aria-label", "Model profile for the task");
+  const project = document.createElement("span");
+  project.className = "overview-tip";
+  project.textContent = `Project: ${activeProject()?.name || "Default workspace"}`;
+  const spacer = document.createElement("span");
+  spacer.className = "spacer";
+  const submit = document.createElement("button");
+  submit.type = "submit";
+  submit.className = "primary";
+  submit.textContent = "Queue task";
+  row.append(model, project, spacer, submit);
+  card.append(title, help, box, row);
+  card.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const text = box.value.trim();
+    if (!text) { box.focus(); return; }
+    submit.disabled = true;
+    try {
+      const result = await post("/api/tasks", {prompt: text, project_id: state.projectId, model: model.value});
+      box.value = "";
+      toast(`Task #${result.task_id} queued.`, "success");
+      if (state.activeView === "scheduled") await renderSchedule();
+    } catch (error) {
+      showError(error);
+    } finally {
+      submit.disabled = false;
+    }
+  });
+  return card;
+}
+
+function toggleScheduledRow(kind, row, labelText, metaText) {
+  const article = scheduledRow(labelText, metaText, row.enabled ? "enabled" : "paused");
+  const actions = document.createElement("div");
+  actions.className = "utility-actions";
+  const toggle = document.createElement("button");
+  toggle.type = "button";
+  toggle.textContent = row.enabled ? "Pause" : "Enable";
+  toggle.addEventListener("click", async () => {
+    toggle.disabled = true;
+    try {
+      await post(`/api/schedule/${kind}/${row.id}/${row.enabled ? "disable" : "enable"}`);
+      toast(`${labelText} ${row.enabled ? "paused" : "enabled"}.`, "success");
+      if (state.activeView === "scheduled") await renderSchedule();
+    } catch (error) {
+      toggle.disabled = false;
+      showError(error);
+    }
+  });
+  actions.append(toggle);
+  article.append(actions);
+  return article;
+}
+
 async function renderSchedule(generation = null) {
   const render = beginUtilityRender("scheduled", generation);
   if (!render) return;
@@ -1448,23 +2518,408 @@ async function renderSchedule(generation = null) {
   content.replaceChildren(emptyUtility("Loading scheduled work…"));
   const result = await api("/api/schedule");
   if (!isUtilityRenderCurrent(render)) return;
+  const tasks = result.tasks || [];
+  const open = tasks.filter((row) => ["queued", "running", "leased", "retry", "pending"].includes(String(row.status || "").toLowerCase()));
   content.replaceChildren(
-    scheduleSection("Task queue", result.tasks || [], (row) => scheduledRow(
+    taskQueueForm(),
+    scheduleSection(`Task queue (${open.length} open)`, tasks, (row) => scheduledRow(
       `#${row.id} · ${row.prompt || "Untitled task"}`,
       `${row.specialist_key || "Jarvis"} · updated ${formatTimestamp(row.updated_at)}`,
       row.status,
     )),
-    scheduleSection("Continuous learning", result.learning_topics || [], (row) => scheduledRow(
+    scheduleSection("Continuous learning", result.learning_topics || [], (row) => toggleScheduledRow(
+      "learning",
+      row,
       row.topic,
       `Every ${row.interval_hours} hours · next ${formatTimestamp(row.next_run)}`,
-      row.enabled ? "enabled" : "paused",
     )),
-    scheduleSection("Proactive backlog", result.backlog || [], (row) => scheduledRow(
+    scheduleSection("Proactive backlog", result.backlog || [], (row) => toggleScheduledRow(
+      "backlog",
+      row,
       row.subject,
       `${row.kind} · next ${formatTimestamp(row.next_run)}`,
-      row.enabled ? "enabled" : "paused",
     )),
   );
+}
+
+// ---------------------------------------------------------------------------
+// Overview, Memory, Activity views
+// ---------------------------------------------------------------------------
+
+function statBlock(value, label) {
+  const block = document.createElement("div");
+  block.className = "stat";
+  const number = document.createElement("span");
+  number.className = "stat-value";
+  number.textContent = String(value);
+  const caption = document.createElement("span");
+  caption.className = "stat-label";
+  caption.textContent = label;
+  block.append(number, caption);
+  return block;
+}
+
+function overviewCard(titleText, pillText = "") {
+  const card = document.createElement("section");
+  card.className = "utility-card overview-card";
+  const head = document.createElement("div");
+  head.className = "utility-card-head";
+  const title = document.createElement("h3");
+  title.textContent = titleText;
+  head.append(title);
+  if (pillText) head.append(makePill(pillText));
+  card.append(head);
+  return card;
+}
+
+function linkRow(labelText, detailText, handler) {
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = "link-row";
+  const label = document.createElement("span");
+  label.textContent = labelText;
+  const detail = document.createElement("small");
+  detail.textContent = detailText || "";
+  button.append(label, detail);
+  button.addEventListener("click", handler);
+  return button;
+}
+
+async function renderOverview(generation = null) {
+  const render = beginUtilityRender("overview", generation);
+  if (!render) return;
+  const {content} = render;
+  content.replaceChildren(emptyUtility("Loading overview…"));
+  const [statusResult, scheduleResult, approvalsResult, performanceResult] = await Promise.allSettled([
+    api("/api/status"),
+    api("/api/schedule"),
+    api("/api/approvals"),
+    api("/api/performance?limit=50"),
+  ]);
+  if (!isUtilityRenderCurrent(render)) return;
+  content.replaceChildren();
+  const status = statusResult.status === "fulfilled" ? statusResult.value : (state.lastStatus || {});
+  if (statusResult.status === "fulfilled") state.lastStatus = status;
+  const schedule = scheduleResult.status === "fulfilled" ? scheduleResult.value : {tasks: [], learning_topics: [], backlog: []};
+  const approvals = approvalsResult.status === "fulfilled" ? approvalsResult.value : {approvals: [], persistent_approvals: []};
+  const performance = performanceResult.status === "fulfilled" ? performanceResult.value : null;
+  const grid = document.createElement("div");
+  grid.className = "overview-grid";
+
+  const control = String(status.control?.state || "unknown");
+  const runtime = overviewCard("Runtime", status.ready ? "ready" : "degraded");
+  const stats = document.createElement("div");
+  stats.className = "stat-row";
+  stats.append(
+    statBlock(`${status.active_agent_count || 0}/${status.max_agents || 1}`, "agents busy"),
+    statBlock(status.queued_jobs || 0, "queued"),
+    statBlock(`${Math.floor((status.uptime_seconds || 0) / 60)}m`, "uptime"),
+  );
+  const provider = document.createElement("p");
+  provider.textContent = providerLabel(status.provider || {});
+  const controlLine = document.createElement("p");
+  controlLine.textContent = `Background work is ${control}${status.control?.reason ? ` · ${status.control.reason}` : ""}.`;
+  const controls = document.createElement("div");
+  controls.className = "control-actions";
+  const pause = document.createElement("button");
+  pause.type = "button";
+  pause.className = control === "running" ? "" : "primary";
+  pause.textContent = control === "running" ? "Pause background work" : "Resume";
+  pause.addEventListener("click", () => setRuntimeControl(control === "running" ? "paused" : "running").catch(showError));
+  const stopAll = document.createElement("button");
+  stopAll.type = "button";
+  stopAll.className = "danger";
+  stopAll.textContent = "Emergency stop";
+  stopAll.disabled = control === "stopped";
+  stopAll.addEventListener("click", () => setRuntimeControl("stopped").catch(showError));
+  controls.append(pause, stopAll);
+  runtime.append(stats, provider, controlLine, controls);
+  grid.append(runtime);
+
+  const jobs = Array.isArray(status.jobs) ? status.jobs : (status.active_jobs || []);
+  const work = overviewCard("Work in progress", jobs.length ? `${jobs.length} job${jobs.length === 1 ? "" : "s"}` : "idle");
+  if (!jobs.length) {
+    const idle = document.createElement("p");
+    idle.textContent = "Nothing is running. Start a chat or queue a background task.";
+    work.append(idle);
+  }
+  for (const job of jobs.slice(0, 8)) {
+    const row = document.createElement("div");
+    row.className = "job-row";
+    const label = document.createElement("strong");
+    const conversation = state.conversations.get(job.conversation_id);
+    label.textContent = conversation?.title || `Conversation #${job.conversation_id}`;
+    row.append(label, makePill(job.state || "active"));
+    const openChat = document.createElement("button");
+    openChat.type = "button";
+    openChat.className = "ghost";
+    openChat.textContent = "Open";
+    openChat.addEventListener("click", () => loadConversation(job.conversation_id).catch(showError));
+    const stopJob = document.createElement("button");
+    stopJob.type = "button";
+    stopJob.className = "danger";
+    stopJob.textContent = "Stop";
+    stopJob.addEventListener("click", async () => {
+      stopJob.disabled = true;
+      try {
+        await post("/api/cancel", {job_id: job.job_id});
+        toast("Stop requested.", "warning");
+        await renderOverview();
+      } catch (error) {
+        stopJob.disabled = false;
+        showError(error);
+      }
+    });
+    row.append(openChat, stopJob);
+    work.append(row);
+  }
+  grid.append(work);
+
+  const pendingApprovals = (approvals.approvals || []).filter((row) => row.status === "pending");
+  const onboardingPending = Number(state.featureOnboarding?.pending_count || 0);
+  const attention = overviewCard("Needs you", pendingApprovals.length + onboardingPending ? "attention" : "clear");
+  const attentionStats = document.createElement("div");
+  attentionStats.className = "stat-row";
+  attentionStats.append(
+    statBlock(pendingApprovals.length, "approvals"),
+    statBlock((approvals.persistent_approvals || []).length, "standing grants"),
+    statBlock(onboardingPending, "features to review"),
+  );
+  const attentionActions = document.createElement("div");
+  attentionActions.className = "control-actions";
+  const openApprovalsButton = document.createElement("button");
+  openApprovalsButton.type = "button";
+  openApprovalsButton.className = pendingApprovals.length ? "primary" : "";
+  openApprovalsButton.textContent = "Review approvals";
+  openApprovalsButton.addEventListener("click", () => openApprovals().catch(showError));
+  const openSettings = document.createElement("button");
+  openSettings.type = "button";
+  openSettings.textContent = "Optional features";
+  openSettings.addEventListener("click", () => openUtility("customize").catch(showError));
+  attentionActions.append(openApprovalsButton, openSettings);
+  attention.append(attentionStats, attentionActions);
+  grid.append(attention);
+
+  const recent = overviewCard("Recent chats");
+  const recentList = document.createElement("div");
+  recentList.className = "overview-list";
+  const rows = [...state.conversations.values()];
+  rows.sort((left, right) => (left.project_id === state.projectId ? -1 : 0) - (right.project_id === state.projectId ? -1 : 0));
+  for (const row of rows.slice(0, 7)) {
+    recentList.append(linkRow(row.title || "Untitled task", `${row.project_name || ""}${state.activeJobs.has(row.id) ? " · working" : ""}`, () => loadConversation(row.id).catch(showError)));
+  }
+  if (!rows.length) {
+    const none = document.createElement("p");
+    none.textContent = "No chats yet.";
+    recentList.append(none);
+  }
+  recent.append(recentList);
+  grid.append(recent);
+
+  const tasks = schedule.tasks || [];
+  const openTasks = tasks.filter((row) => ["queued", "running", "leased", "retry", "pending"].includes(String(row.status || "").toLowerCase()));
+  const topics = (schedule.learning_topics || []).filter((row) => row.enabled);
+  const backlog = (schedule.backlog || []).filter((row) => row.enabled);
+  const scheduled = overviewCard("Scheduled", openTasks.length ? `${openTasks.length} open` : "quiet");
+  const scheduledStats = document.createElement("div");
+  scheduledStats.className = "stat-row";
+  scheduledStats.append(
+    statBlock(openTasks.length, "open tasks"),
+    statBlock(topics.length, "learning topics"),
+    statBlock(backlog.length, "backlog items"),
+  );
+  const nextTopic = topics.map((row) => row.next_run).filter(Boolean).sort()[0];
+  const nextLine = document.createElement("p");
+  nextLine.textContent = nextTopic ? `Next learning run ${formatTimestamp(nextTopic)}.` : "No learning run is scheduled.";
+  const scheduledActions = document.createElement("div");
+  scheduledActions.className = "control-actions";
+  const openScheduled = document.createElement("button");
+  openScheduled.type = "button";
+  openScheduled.textContent = "Open Scheduled";
+  openScheduled.addEventListener("click", () => openUtility("scheduled").catch(showError));
+  scheduledActions.append(openScheduled);
+  scheduled.append(scheduledStats, nextLine, scheduledActions);
+  grid.append(scheduled);
+
+  const perf = overviewCard("Performance", performance?.records ? "measured" : "learning");
+  const perfStats = document.createElement("div");
+  perfStats.className = "stat-row";
+  const firstVisible = performance?.latency?.first_visible_ms?.p95;
+  const noTool = performance?.latency?.no_tool_total_ms?.p95;
+  perfStats.append(
+    statBlock(Number.isFinite(Number(firstVisible)) ? formatMetricDuration(firstVisible) : "–", "first reply p95"),
+    statBlock(Number.isFinite(Number(noTool)) ? formatMetricDuration(noTool) : "–", "simple request p95"),
+    statBlock(performance?.records || 0, "measured"),
+  );
+  const perfActions = document.createElement("div");
+  perfActions.className = "control-actions";
+  const openPerf = document.createElement("button");
+  openPerf.type = "button";
+  openPerf.textContent = "Open Performance";
+  openPerf.addEventListener("click", () => openUtility("performance").catch(showError));
+  perfActions.append(openPerf);
+  perf.append(perfStats, perfActions);
+  grid.append(perf);
+
+  content.append(grid);
+}
+
+function memoryRow(row) {
+  const article = document.createElement("article");
+  article.className = "utility-card memory-result";
+  const meta = document.createElement("div");
+  meta.className = "memory-meta";
+  meta.append(makePill(row.kind || "memory"));
+  const when = document.createElement("span");
+  when.textContent = `${formatTimestamp(row.created_at)}${row.created_at ? ` · ${relativeTime(row.created_at)}` : ""}`;
+  meta.append(when);
+  if (row.source) {
+    const source = document.createElement("span");
+    source.textContent = `source: ${row.source}`;
+    meta.append(source);
+  }
+  const body = document.createElement("div");
+  body.className = "memory-content";
+  body.textContent = row.content || "";
+  article.append(meta, body);
+  return article;
+}
+
+function recallReportText(report) {
+  if (!report || typeof report !== "object") return "";
+  const parts = [`recall ${report.mode || "unknown"}`, `${report.candidates ?? 0} candidates`];
+  if (Array.isArray(report.dropped_terms) && report.dropped_terms.length) {
+    parts.push(`dropped ${report.dropped_terms.slice(0, 6).join(", ")}`);
+  }
+  if (report.abstained) parts.push("abstained: too many candidates to rank safely");
+  return parts.join(" · ");
+}
+
+async function renderMemory(generation = null) {
+  const render = beginUtilityRender("memory", generation);
+  if (!render) return;
+  const {content} = render;
+  content.replaceChildren(emptyUtility("Loading recent memories…"));
+  const recent = await api("/api/memory/recent?limit=40").catch(() => ({memories: []}));
+  if (!isUtilityRenderCurrent(render)) return;
+  content.replaceChildren();
+  const search = document.createElement("form");
+  search.className = "utility-card memory-search-form";
+  const input = document.createElement("input");
+  input.type = "search";
+  input.maxLength = 500;
+  input.placeholder = "Search what Jarvis remembers…";
+  input.setAttribute("aria-label", "Search memory");
+  const go = document.createElement("button");
+  go.type = "submit";
+  go.className = "primary";
+  go.textContent = "Search";
+  search.append(input, go);
+  const results = document.createElement("section");
+  const resultsTitle = document.createElement("h3");
+  resultsTitle.className = "utility-section-title";
+  resultsTitle.textContent = "Results";
+  const resultsList = document.createElement("div");
+  resultsList.className = "utility-list";
+  const report = document.createElement("p");
+  report.className = "recall-report";
+  results.append(resultsTitle, report, resultsList);
+  results.hidden = true;
+  search.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const query = input.value.trim();
+    if (!query) { input.focus(); return; }
+    go.disabled = true;
+    resultsList.replaceChildren(emptyUtility("Searching…"));
+    results.hidden = false;
+    try {
+      const payload = await post("/api/memory/search", {q: query, limit: 25});
+      if (state.activeView !== "memory") return;
+      resultsList.replaceChildren();
+      report.textContent = recallReportText(payload.report);
+      report.classList.toggle("abstained", Boolean(payload.report?.abstained));
+      if (!(payload.results || []).length) {
+        resultsList.append(emptyUtility("No matching memories. Queries containing secrets or private identifiers are refused by design."));
+      }
+      for (const row of payload.results || []) resultsList.append(memoryRow(row));
+    } catch (error) {
+      resultsList.replaceChildren(emptyUtility(error.message || "Search failed."));
+    } finally {
+      go.disabled = false;
+    }
+  });
+  content.append(search, results);
+  const recentSection = document.createElement("section");
+  const recentTitle = document.createElement("h3");
+  recentTitle.className = "utility-section-title";
+  recentTitle.textContent = `Recent memories (${(recent.memories || []).length})`;
+  recentSection.append(recentTitle);
+  if (!(recent.memories || []).length) {
+    recentSection.append(emptyUtility("Jarvis has not stored any memories yet."));
+  } else {
+    const list = document.createElement("div");
+    list.className = "utility-list";
+    for (const row of recent.memories) list.append(memoryRow(row));
+    recentSection.append(list);
+  }
+  content.append(recentSection);
+  input.focus();
+}
+
+async function renderActivity(generation = null) {
+  const render = beginUtilityRender("activity", generation);
+  if (!render) return;
+  const {content} = render;
+  content.replaceChildren(emptyUtility("Loading activity…"));
+  const payload = await api("/api/activity?limit=200");
+  if (!isUtilityRenderCurrent(render)) return;
+  content.replaceChildren();
+  const rows = payload.activity || [];
+  const categories = [...new Set(rows.map((row) => row.category).filter(Boolean))].sort();
+  let filter = "all";
+  const filters = document.createElement("div");
+  filters.className = "activity-filters";
+  const list = document.createElement("div");
+  list.className = "utility-list";
+  const paint = () => {
+    filters.querySelectorAll("button").forEach((button) => button.classList.toggle("active", button.dataset.filter === filter));
+    list.replaceChildren();
+    const visible = rows.filter((row) => filter === "all" || row.category === filter);
+    if (!visible.length) {
+      list.append(emptyUtility("No activity recorded for this filter."));
+      return;
+    }
+    for (const row of visible) {
+      const article = document.createElement("article");
+      article.className = "activity-row";
+      const when = document.createElement("span");
+      when.className = "activity-time";
+      when.textContent = relativeTime(row.created_at) || formatTimestamp(row.created_at);
+      when.title = formatTimestamp(row.created_at);
+      const main = document.createElement("div");
+      main.className = "activity-main";
+      const title = document.createElement("strong");
+      title.textContent = `${row.category || "event"} · ${row.action || ""}${row.task_id ? ` · task #${row.task_id}` : ""}`;
+      main.append(title);
+      if (row.details) {
+        const detail = document.createElement("small");
+        detail.textContent = row.details;
+        main.append(detail);
+      }
+      article.append(when, main, makePill(row.status || "recorded"));
+      list.append(article);
+    }
+  };
+  for (const value of ["all", ...categories]) {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.dataset.filter = value;
+    button.textContent = value === "all" ? `All (${rows.length})` : `${value} (${rows.filter((row) => row.category === value).length})`;
+    button.addEventListener("click", () => { filter = value; paint(); });
+    filters.append(button);
+  }
+  content.append(filters, list);
+  paint();
 }
 
 function renderDispatch() {
@@ -3804,13 +5259,112 @@ async function renderCustomize(generation = null) {
     renderPinnedProjects();
     toast("Pinned projects cleared.");
   });
+  const themeSelect = document.createElement("select");
+  for (const [value, label] of [["system", "Match system"], ["dark", "Dark"], ["light", "Light"]]) {
+    const option = document.createElement("option");
+    option.value = value;
+    option.textContent = label;
+    themeSelect.append(option);
+  }
+  themeSelect.value = state.theme;
+  themeSelect.addEventListener("change", () => applyTheme(themeSelect.value));
+  const densitySelect = document.createElement("select");
+  for (const [value, label] of [["comfortable", "Comfortable"], ["compact", "Compact"]]) {
+    const option = document.createElement("option");
+    option.value = value;
+    option.textContent = label;
+    densitySelect.append(option);
+  }
+  densitySelect.value = state.density;
+  densitySelect.addEventListener("change", () => applyDensity(densitySelect.value));
+  const scaleSelect = document.createElement("select");
+  for (const [value, label] of [["normal", "Normal"], ["large", "Large"]]) {
+    const option = document.createElement("option");
+    option.value = value;
+    option.textContent = label;
+    scaleSelect.append(option);
+  }
+  scaleSelect.value = state.scale;
+  scaleSelect.addEventListener("change", () => applyScale(scaleSelect.value));
+  const notify = document.createElement("input");
+  notify.type = "checkbox";
+  notify.checked = state.notifications;
+  notify.addEventListener("change", async () => {
+    notify.checked = await setNotificationsEnabled(notify.checked);
+  });
   card.append(
+    settingRow("Theme", "Dark, light, or follow the operating system.", themeSelect),
+    settingRow("Density", "Compact tightens spacing for smaller screens.", densitySelect),
+    settingRow("Text size", "Larger text for chat and views.", scaleSelect),
+    settingRow("Desktop notifications", "Notify when a reply finishes while this tab is in the background.", notify),
     settingRow("Task model", "Choose the model profile used by the next message.", modelSelect),
     settingRow("Voice responses", "Read completed Jarvis responses aloud.", voice),
     settingRow("Compact sidebar", "Collapse the navigation rail until you reopen it.", compact),
     settingRow("Pinned projects", "Remove every project shortcut from this browser.", clearPins),
   );
   content.append(card);
+
+  const preferences = document.createElement("section");
+  preferences.className = "utility-card";
+  const preferencesHead = document.createElement("div");
+  preferencesHead.className = "utility-card-head";
+  const preferencesTitle = document.createElement("h3");
+  preferencesTitle.textContent = "Durable preferences";
+  preferencesHead.append(preferencesTitle);
+  const preferencesCopy = document.createElement("p");
+  preferencesCopy.textContent = "Explicit preferences Jarvis keeps across chats, such as tone, units, or formatting. Values are redacted for secrets before they are stored.";
+  const preferenceList = document.createElement("div");
+  preferenceList.className = "utility-list";
+  const preferenceForm = document.createElement("form");
+  preferenceForm.className = "pref-form";
+  const nameInput = document.createElement("input");
+  nameInput.type = "text";
+  nameInput.maxLength = 100;
+  nameInput.placeholder = "name, e.g. units";
+  nameInput.setAttribute("aria-label", "Preference name");
+  const valueInput = document.createElement("input");
+  valueInput.type = "text";
+  valueInput.maxLength = 2000;
+  valueInput.placeholder = "value, e.g. metric";
+  valueInput.setAttribute("aria-label", "Preference value");
+  const savePreference = document.createElement("button");
+  savePreference.type = "submit";
+  savePreference.className = "primary";
+  savePreference.textContent = "Save";
+  preferenceForm.append(nameInput, valueInput, savePreference);
+  const loadPreferences = async () => {
+    const payload = await api("/api/preferences").catch(() => ({preferences: []}));
+    if (state.activeView !== "customize") return;
+    preferenceList.replaceChildren();
+    if (!(payload.preferences || []).length) {
+      preferenceList.append(emptyUtility("No durable preferences yet."));
+      return;
+    }
+    for (const row of payload.preferences) {
+      preferenceList.append(scheduledRow(`${row.name} = ${row.value}`, `${row.source || "user"} · ${formatTimestamp(row.updated_at)}`, row.source === "user" ? "active" : "learned"));
+    }
+  };
+  preferenceForm.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const name = nameInput.value.trim();
+    const value = valueInput.value.trim();
+    if (!name || !value) return;
+    savePreference.disabled = true;
+    try {
+      await post("/api/preferences", {name, value});
+      nameInput.value = "";
+      valueInput.value = "";
+      toast("Preference saved.", "success");
+      await loadPreferences();
+    } catch (error) {
+      showError(error);
+    } finally {
+      savePreference.disabled = false;
+    }
+  });
+  preferences.append(preferencesHead, preferencesCopy, preferenceList, preferenceForm);
+  content.append(preferences);
+  loadPreferences().catch(() => {});
 
   const featureStatus = await refreshFeatureOnboarding();
   if (!isUtilityRenderCurrent(render)) return;
@@ -3838,8 +5392,17 @@ async function renderCustomize(generation = null) {
 }
 
 function applyStatus(data) {
+  state.lastStatus = data;
   const dot = $("status-dot");
   dot.className = `dot ${data.ready ? "online" : "error"}`;
+  const chip = $("runtime-quick");
+  if (chip) {
+    const control = String(data.control?.state || "unknown");
+    chip.hidden = false;
+    chip.textContent = control;
+    chip.className = `runtime-quick ${control}`;
+    chip.title = control === "running" ? "Background work is running · click to pause" : `Background work is ${control} · click to resume`;
+  }
   $("status-label").textContent = data.ready ? "Presence online" : "Presence degraded";
   const provider = data.provider || {};
   $("provider-label").textContent = providerLabel(provider);
@@ -3950,6 +5513,7 @@ async function pollEvents() {
       await reconcileRuntimeState();
       return;
     }
+    if ((data.events || []).length) noteActivity();
     for (const event of data.events || []) {
       state.lastEventId = Math.max(state.lastEventId, event.id || 0);
       // Conversation history was loaded from SQLite during boot. Replaying old
@@ -3977,6 +5541,10 @@ async function pollEvents() {
           && payload.conversation_id) {
         state.activeJobs.delete(payload.conversation_id);
         syncBusy();
+        if (event.kind === "assistant") {
+          if (!belongsHere) markUnread(payload.conversation_id);
+          notifyFinished(payload.conversation_id, payload.content);
+        }
         refreshConversations().catch(() => {});
       }
       if (event.kind === "activity" && belongsHere) {
@@ -4001,6 +5569,11 @@ async function pollEvents() {
           eventTarget,
         );
         renderProductComparison(answerArticle, payload.product_comparison);
+        if (answerArticle) {
+          const elapsed = formatMetricDuration(payload.metrics?.total_ms);
+          const metaNode = answerArticle.querySelector(".meta");
+          if (metaNode && elapsed) metaNode.textContent = [metaNode.textContent, elapsed].filter(Boolean).join(" · ");
+        }
         if (eventTarget === messages) speak(payload.content);
         if (payload.approval_id) {
           toast(`Approval #${payload.approval_id} is waiting for review.`);
@@ -4045,6 +5618,16 @@ async function pollEvents() {
         setConversationActivity(payload.conversation_id, "Ready when you are.");
       }
       if (event.kind === "approval_decided") refreshApprovals().catch(() => {});
+      if (event.kind === "conversation_renamed") {
+        if (payload.conversation_id === state.conversationId && payload.title) {
+          $("chat-title").textContent = payload.title;
+        }
+        refreshConversations().catch(() => {});
+      }
+      if (event.kind === "task_queued" && state.activeView === "scheduled") {
+        renderSchedule().catch(() => {});
+      }
+      if (event.kind === "control") refreshStatus().catch(() => {});
       if (event.kind === "network_inventory_updated") {
         const eventIsCurrent = Number(event.created_at || 0) >= state.pageStartedAt - 2;
         if (
@@ -4106,7 +5689,7 @@ async function pollEvents() {
     // Status polling owns visible disconnect state; event polling retries quietly.
   } finally {
     state.polling = false;
-    window.setTimeout(pollEvents, currentJobId() ? 150 : 700);
+    window.setTimeout(pollEvents, adaptivePollDelay(currentJobId() ? 150 : 700));
   }
 }
 
@@ -4115,6 +5698,7 @@ async function submitPrompt(event) {
   const text = prompt.value.trim();
   if ((!text && !state.pendingImages.length) || currentJobId()) return;
   const sentImages = state.pendingImages.splice(0);
+  noteActivity();
   appendMessage("user", text, "", sentImages);
   renderImagePreview();
   prompt.value = "";
@@ -4426,6 +6010,109 @@ document.querySelectorAll("[data-view]").forEach((button) => {
 });
 $("rail-toggle").addEventListener("click", toggleRail);
 $("mobile-rail-toggle").addEventListener("click", toggleRail);
+$("open-palette").addEventListener("click", openPalette);
+$("theme-toggle").addEventListener("click", cycleTheme);
+$("refresh-utility").addEventListener("click", () => openUtility(state.activeView).catch(showError));
+$("runtime-quick").addEventListener("click", () => toggleRuntimeControl().catch(showError));
+$("chat-search").addEventListener("input", () => {
+  state.chatSearch = $("chat-search").value;
+  refreshConversations().catch(showError);
+});
+$("chat-title").addEventListener("dblclick", () => requestRename(state.conversations.get(state.conversationId)));
+$("chat-title").addEventListener("keydown", (event) => {
+  if (event.key === "Enter") requestRename(state.conversations.get(state.conversationId));
+});
+$("rename-chat-form").addEventListener("submit", (event) => submitRename(event).catch(showError));
+$("cancel-rename-chat").addEventListener("click", () => $("rename-chat-dialog").close());
+$("close-shortcuts").addEventListener("click", () => $("shortcuts-dialog").close());
+$("palette-form").addEventListener("submit", (event) => {
+  event.preventDefault();
+  activatePaletteItem();
+});
+$("palette-input").addEventListener("input", () => {
+  state.paletteIndex = 0;
+  renderPalette($("palette-input").value);
+});
+$("palette-input").addEventListener("keydown", (event) => {
+  if (event.key === "ArrowDown") { event.preventDefault(); movePaletteSelection(1); }
+  if (event.key === "ArrowUp") { event.preventDefault(); movePaletteSelection(-1); }
+});
+document.querySelectorAll(".nav-group-title").forEach((title) => {
+  const group = title.parentElement;
+  const key = group.dataset.navGroup;
+  let collapsed = key === "security";
+  try {
+    const saved = localStorage.getItem(`jarvis.presence.nav.${key}`);
+    if (saved !== null) collapsed = saved === "1";
+  } catch (_) {}
+  group.classList.toggle("collapsed", collapsed);
+  title.setAttribute("aria-expanded", collapsed ? "false" : "true");
+  title.addEventListener("click", () => {
+    const next = !group.classList.contains("collapsed");
+    group.classList.toggle("collapsed", next);
+    title.setAttribute("aria-expanded", next ? "false" : "true");
+    try { localStorage.setItem(`jarvis.presence.nav.${key}`, next ? "1" : "0"); } catch (_) {}
+  });
+});
+document.addEventListener("click", (event) => {
+  if (!event.target.closest(".row-menu") && !event.target.closest(".conversation-more")) closeRowMenus();
+});
+messages.addEventListener("scroll", () => {
+  const distance = messages.scrollHeight - messages.scrollTop - messages.clientHeight;
+  $("scroll-to-bottom").hidden = distance < 240;
+});
+$("scroll-to-bottom").addEventListener("click", () => {
+  messages.scrollTop = messages.scrollHeight;
+  $("scroll-to-bottom").hidden = true;
+});
+prompt.addEventListener("paste", (event) => {
+  const files = [...(event.clipboardData?.files || [])].filter((file) => allowedImageTypes.has(file.type));
+  if (!files.length) return;
+  event.preventDefault();
+  addImageFiles(files).catch(showError);
+});
+$("composer").addEventListener("dragover", (event) => {
+  if ([...(event.dataTransfer?.types || [])].includes("Files")) {
+    event.preventDefault();
+    $("composer").classList.add("drag-over");
+  }
+});
+$("composer").addEventListener("dragleave", () => $("composer").classList.remove("drag-over"));
+$("composer").addEventListener("drop", (event) => {
+  $("composer").classList.remove("drag-over");
+  const files = [...(event.dataTransfer?.files || [])].filter((file) => allowedImageTypes.has(file.type));
+  if (!files.length) return;
+  event.preventDefault();
+  addImageFiles(files).catch(showError);
+});
+prompt.addEventListener("input", () => {
+  noteActivity();
+  const counter = $("prompt-counter");
+  const length = prompt.value.length;
+  counter.hidden = length < 40000;
+  counter.textContent = `${length.toLocaleString()} / 50,000`;
+  counter.classList.toggle("warn", length > 48000);
+});
+document.addEventListener("visibilitychange", () => {
+  if (document.hidden) return;
+  noteActivity();
+  clearUnread(state.conversationId);
+  refreshStatus().catch(() => {});
+});
+document.addEventListener("keydown", (event) => {
+  const ctrl = event.ctrlKey || event.metaKey;
+  const key = String(event.key || "").toLowerCase();
+  if (ctrl && !event.shiftKey && key === "k") { event.preventDefault(); openPalette(); return; }
+  if (ctrl && event.shiftKey && key === "o") { event.preventDefault(); newConversation().catch(showError); return; }
+  if (ctrl && event.shiftKey && key === "s") { event.preventDefault(); setSplitView(!state.splitEnabled).catch(showError); return; }
+  if (ctrl && event.shiftKey && key === "e") { event.preventDefault(); exportConversation("markdown"); return; }
+  if (ctrl && !event.shiftKey && key === "b") { event.preventDefault(); toggleRail(); return; }
+  if (ctrl && event.key === "/") { event.preventDefault(); showShortcuts(); return; }
+  if (event.key === "Escape" && document.activeElement === prompt && currentJobId() && !anyDialogOpen()) {
+    event.preventDefault();
+    cancelActive().catch(showError);
+  }
+});
 $("project").addEventListener("change", () => {
   const projectId = Number($("project").value) || 1;
   // A project selector must change the conversation's execution workspace, not
@@ -4483,6 +6170,11 @@ secondaryPrompt.addEventListener("keydown", (event) => {
 });
 
 async function boot() {
+  loadAppearance();
+  loadPinnedConversations();
+  renderQuickActions("home");
+  renderShortcuts();
+  updateTitleBadge();
   const savedRailState = localStorage.getItem("jarvis.presence.rail-collapsed");
   setRailCollapsed(savedRailState === "1" || (savedRailState === null && window.matchMedia("(max-width: 760px)").matches));
   loadPinnedProjects();
@@ -4499,7 +6191,14 @@ async function boot() {
   const pendingApprovals = await refreshApprovals();
   if (pendingApprovals && !$("approval-dialog").open) $("approval-dialog").showModal();
   schedulePriorityDialogs();
-  setInterval(refreshStatus, 5000);
+  const statusLoop = () => {
+    const delay = document.hidden ? 20000 : 5000;
+    window.setTimeout(async () => {
+      await refreshStatus();
+      statusLoop();
+    }, delay);
+  };
+  statusLoop();
   pollEvents();
   prompt.focus();
 }

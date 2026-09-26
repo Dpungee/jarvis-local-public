@@ -58,7 +58,12 @@ class BrowserReleaseSecurityTests(unittest.TestCase):
     @unittest.skipUnless(shutil.which('node'), 'Node is required for offline snapshot JavaScript evaluation')
     def test_confirmation_digest_binds_query_hidden_fields_and_destination(self):
         script = r"""
+const fs = require('fs');
+const resultPath = process.argv[1];
+const report = value => fs.writeFileSync(resultPath, JSON.stringify(value));
+report({phase:'started'});
 global.crypto = require('crypto').webcrypto;
+report({phase:'crypto_ready'});
 const form = {action:'https://example.com/send',method:'post'};
 const field = {tagName:'INPUT',type:'hidden',name:'recipient',id:'',value:'first',checked:false};
 const target = {tagName:'BUTTON',type:'submit',innerText:'Send',href:'',form,
@@ -68,17 +73,73 @@ global.location = {href:'https://example.com/send?recipient=first'};
 """ + 'const snapshot = ' + browser._CONFIRM_STATE_JS + r""";
 (async () => {
   const digests = [await snapshot(1)];
+  report({phase:'digest_1'});
   field.value='second'; digests.push(await snapshot(1));
+  report({phase:'digest_2'});
   location.href='https://example.com/send?recipient=second'; digests.push(await snapshot(1));
+  report({phase:'digest_3'});
   form.action='https://example.com/other'; digests.push(await snapshot(1));
-  console.log(JSON.stringify(digests));
-})().catch(e=>{console.error(e);process.exit(1)});
+  report({phase:'complete', digests});
+  process.exit(0);
+})().catch(e=>{report({phase:'failed', error:e.name});process.exit(1)});
 """
-        # Allow cold process/WebCrypto startup on loaded hosted Windows runners;
-        # all four payload-binding assertions still have to pass without retries.
-        result = subprocess.run([shutil.which('node'), '-e', script], check=True,
-                                capture_output=True, text=True, timeout=30)
-        self.assertEqual(len(set(json.loads(result.stdout))), 4)
+        # Wait on the process, not pipe EOF, and persist phases for any timeout.
+        # Real WebCrypto, the deadline and all payload-binding assertions remain.
+        with tempfile.TemporaryDirectory() as tmp:
+            result_path = Path(tmp) / 'digest-result.json'
+
+            def last_result():
+                try:
+                    return json.loads(result_path.read_text(encoding='utf-8'))
+                except (OSError, json.JSONDecodeError):
+                    return {'phase': 'no-readable-result'}
+
+            try:
+                result = subprocess.run(
+                    [shutil.which('node'), '-e', script, str(result_path)],
+                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=30)
+            except subprocess.TimeoutExpired:
+                self.fail(f'Node digest fixture timed out after 30s; last result: {last_result()}')
+            payload = last_result()
+            self.assertEqual(result.returncode, 0, payload)
+            self.assertEqual(payload.get('phase'), 'complete', payload)
+            digests = payload['digests']
+            self.assertEqual(len(digests), 4)
+            self.assertEqual(len(set(digests)), 4)
+            for digest in digests:
+                self.assertRegex(digest, r'^[0-9a-f]{64}$')
+
+    @unittest.skipUnless(shutil.which('node'), 'Node fixture contract')
+    def test_digest_fixture_rejects_incomplete_or_invalid_results(self):
+        cases = [
+            ({'phase': 'crypto_ready'}, 0),
+            ({'phase': 'complete', 'digests': ['a' * 64] * 4}, 0),
+            ({'phase': 'complete', 'digests': ['a', 'b', 'c', 'd']}, 0),
+            ({'phase': 'complete', 'digests': [c * 64 for c in 'abcd']}, 1),
+        ]
+        for payload, returncode in cases:
+            with self.subTest(payload=payload, returncode=returncode):
+                def child(args, payload=payload, returncode=returncode, **kwargs):
+                    Path(args[-1]).write_text(json.dumps(payload), encoding='utf-8')
+                    return SimpleNamespace(returncode=returncode)
+
+                with patch('tests.test_hub_release_security.subprocess.run', side_effect=child) as run:
+                    with self.assertRaises(AssertionError):
+                        self.test_confirmation_digest_binds_query_hidden_fields_and_destination()
+                    run.assert_called_once()
+                    self.assertEqual(run.call_args.kwargs['timeout'], 30)
+                    self.assertEqual(run.call_args.kwargs['stdout'], subprocess.DEVNULL)
+                    self.assertEqual(run.call_args.kwargs['stderr'], subprocess.DEVNULL)
+
+    @unittest.skipUnless(shutil.which('node'), 'Node fixture contract')
+    def test_digest_fixture_timeout_reports_last_phase(self):
+        def child(args, **kwargs):
+            Path(args[-1]).write_text(json.dumps({'phase': 'crypto_ready'}), encoding='utf-8')
+            raise subprocess.TimeoutExpired(args, kwargs['timeout'])
+
+        with patch('tests.test_hub_release_security.subprocess.run', side_effect=child):
+            with self.assertRaisesRegex(AssertionError, 'timed out after 30s.*crypto_ready'):
+                self.test_confirmation_digest_binds_query_hidden_fields_and_destination()
 
     def test_boundary_javascript_runs_in_isolated_world(self):
         session, _ = self.session()

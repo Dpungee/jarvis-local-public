@@ -6,6 +6,7 @@ import tempfile
 import threading
 import unittest
 from pathlib import Path
+from unittest.mock import call, patch
 
 from jarvis import web_check
 from jarvis.local_ports import reachable_beyond_loopback
@@ -125,22 +126,42 @@ class DeterministicClockTests(unittest.TestCase):
 
 
 class NetworkExposureTests(unittest.TestCase):
-    def test_loopback_only_server_is_not_exposed_and_all_interfaces_is(self):
-        loopback = socket.socket()
-        loopback.bind(("127.0.0.1", 0))
-        loopback.listen()
-        everywhere = socket.socket()
-        everywhere.bind(("0.0.0.0", 0))
-        everywhere.listen()
-        try:
+    def test_loopback_only_server_is_not_exposed(self):
+        with socket.socket() as loopback:
+            loopback.bind(("127.0.0.1", 0))
+            loopback.listen()
             self.assertFalse(reachable_beyond_loopback(loopback.getsockname()[1]))
-            lan = [a for a in {i[4][0] for i in socket.getaddrinfo(socket.gethostname(), None, socket.AF_INET)}
-                   if not a.startswith("127.")]
-            if lan:
-                self.assertTrue(reachable_beyond_loopback(everywhere.getsockname()[1]))
-        finally:
-            loopback.close()
-            everywhere.close()
+
+    def test_nonloopback_connection_is_detected_without_exposing_a_listener(self):
+        # Mock the socket boundary rather than opening a listener to the LAN.
+        # Documentation-only addresses never leave this fixture.
+        addresses = [(socket.AF_INET, socket.SOCK_STREAM, 0, "", (host, 0))
+                     for host in ("127.0.0.1", "198.51.100.10", "198.51.100.10")]
+        with patch("jarvis.local_ports.socket.gethostname", return_value="test-host"), \
+             patch("jarvis.local_ports.socket.getaddrinfo", return_value=addresses) as resolve, \
+             patch("jarvis.local_ports.socket.create_connection") as connect:
+            self.assertTrue(reachable_beyond_loopback(12345))
+        resolve.assert_called_once_with("test-host", None, socket.AF_INET)
+        connect.assert_called_once_with(("198.51.100.10", 12345), timeout=0.3)
+        connect.return_value.__enter__.assert_called_once_with()
+        connect.return_value.__exit__.assert_called_once()
+
+    def test_refused_nonloopback_connections_are_not_exposure(self):
+        addresses = [(socket.AF_INET, socket.SOCK_STREAM, 0, "", (host, 0))
+                     for host in ("198.51.100.11", "127.0.0.1", "198.51.100.10")]
+        with patch("jarvis.local_ports.socket.getaddrinfo", return_value=addresses), \
+             patch("jarvis.local_ports.socket.create_connection", side_effect=OSError) as connect:
+            self.assertFalse(reachable_beyond_loopback(12345))
+        self.assertEqual(connect.call_args_list, [
+            call(("198.51.100.10", 12345), timeout=0.3),
+            call(("198.51.100.11", 12345), timeout=0.3),
+        ])
+
+    def test_address_resolution_failure_does_not_attempt_a_connection(self):
+        with patch("jarvis.local_ports.socket.getaddrinfo", side_effect=OSError), \
+             patch("jarvis.local_ports.socket.create_connection") as connect:
+            self.assertFalse(reachable_beyond_loopback(12345))
+        connect.assert_not_called()
 
 
 if __name__ == "__main__":

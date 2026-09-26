@@ -235,7 +235,7 @@ class LongHorizonTests(unittest.TestCase):
         )
 
     def test_schema_v40_and_normal_five_stage_completion(self) -> None:
-        self.assertEqual(SCHEMA_VERSION, 50)
+        self.assertEqual(SCHEMA_VERSION, 54)
         self.assertEqual(self.memory.db.execute("PRAGMA user_version").fetchone()[0], SCHEMA_VERSION)
         plan_id = self.store.create_plan(self.manifest())
         for _ in range(5):

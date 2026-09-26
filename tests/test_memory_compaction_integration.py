@@ -1993,7 +1993,7 @@ class SpanPartitionTests(CompactionStoreCase):
             if "REFERENCES messages(" in line
         ]
         self.assertEqual(
-            hits, ["memory.py:" + str(self._references_messages_line())],
+            hits, ["memory_schema_migrations.py:" + str(self._references_messages_line())],
             "a new foreign key into messages(id) appeared; add it to the "
             "compaction partition list (design 2.7 step 1b) before this test "
             "is repointed",
@@ -2001,13 +2001,13 @@ class SpanPartitionTests(CompactionStoreCase):
 
     @staticmethod
     def _references_messages_line() -> int:
-        path = Path(__file__).resolve().parents[1] / "jarvis" / "memory.py"
+        path = Path(__file__).resolve().parents[1] / "jarvis" / "memory_schema_migrations.py"
         for number, line in enumerate(
             path.read_text(encoding="utf-8").splitlines(), start=1
         ):
             if "REFERENCES messages(" in line:
                 return number
-        raise AssertionError("memory.py no longer references messages(id)")
+        raise AssertionError("memory_schema_migrations.py no longer references messages(id)")
 
 
 @requires_schema_50
@@ -2416,8 +2416,8 @@ class SchemaFiftyTests(CompactionStoreCase):
     """The storage contract itself: version, immutability, lineage, and the id
     sequence that a tombstoned milestone must not give back."""
 
-    def test_the_schema_version_is_fifty(self) -> None:
-        self.assertEqual(SCHEMA_VERSION, 50)
+    def test_the_schema_version_is_fifty_four(self) -> None:
+        self.assertEqual(SCHEMA_VERSION, 54)
         self.assertEqual(int(self.memory.db.execute(
             "PRAGMA user_version").fetchone()[0]), SCHEMA_VERSION)
         self.assertEqual(memory_spine.SPINE_SCHEMA_VERSION, 49)
@@ -2750,7 +2750,10 @@ class SchemaFiftyTests(CompactionStoreCase):
         row = self.milestones(conversation)[0]
 
         # Direction 1: a stated outcome survives unchanged.
-        stated = self.memory.conversation_milestones(conversation, project_id=1)
+        # Outcome semantics must not depend on CI scheduling consuming the read
+        # budget. Deadline behavior is checked separately with an advancing clock.
+        with patch('jarvis.memory.time.monotonic', return_value=100.0):
+            stated = self.memory.conversation_milestones(conversation, project_id=1)
         self.assertEqual(stated["report"]["mode"], "complete")
         self.assertEqual([entry["outcome"] for entry in stated["rows"]],
                          ["complete"])
@@ -2774,7 +2777,8 @@ class SchemaFiftyTests(CompactionStoreCase):
             tamper.close()
         self.memory = Memory(self.db_path)
 
-        silent = self.memory.conversation_milestones(conversation, project_id=1)
+        with patch('jarvis.memory.time.monotonic', return_value=100.0):
+            silent = self.memory.conversation_milestones(conversation, project_id=1)
         self.assertTrue(silent["rows"])
         for entry in silent["rows"]:
             self.assertIsNone(
@@ -2788,6 +2792,11 @@ class SchemaFiftyTests(CompactionStoreCase):
         self.assertEqual(block.outcome_missing, len(silent["rows"]))
         self.assertIn(memory_compaction.HISTORY_OUTCOME_UNSTATED, block.text)
         self.assertNotIn('"outcome":"complete"', block.text)
+
+        with patch('jarvis.memory.time.monotonic', side_effect=[100.0, 101.0]):
+            expired = self.memory.conversation_milestones(conversation, project_id=1)
+        self.assertEqual(expired['report']['mode'], 'budget-exceeded')
+        self.assertEqual(expired['rows'], [])
 
     def test_the_author_column_refuses_model(self) -> None:
         """M-16: the CHECK keeps ``'model'`` so a later phase needs no table

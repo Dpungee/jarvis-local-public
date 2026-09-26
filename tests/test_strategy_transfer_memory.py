@@ -123,7 +123,7 @@ class StrategyTransferMemoryTests(unittest.TestCase):
 
     def test_v39_schema_and_selector_candidates_are_metadata_only(self) -> None:
         with Memory(Path(":memory:")) as memory:
-            self.assertEqual(SCHEMA_VERSION, 50)
+            self.assertEqual(SCHEMA_VERSION, 54)
             self.assertEqual(memory.db.execute("PRAGMA user_version").fetchone()[0], SCHEMA_VERSION)
             for table in (
                 "task_strategy_observations", "strategy_transfer_applications",

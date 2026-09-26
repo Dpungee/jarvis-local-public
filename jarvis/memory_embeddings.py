@@ -110,6 +110,8 @@ class OpenAIEmbeddingClient:
                 try:
                     exc.close()
                 except Exception:
+                    # Closing the error response is best-effort cleanup; the HTTP failure
+                    # itself is classified and handled below and must not be masked.
                     pass
                 retryable = status in {408, 409, 429, 500, 502, 503, 504}
                 if retryable and attempt < self.max_retries:

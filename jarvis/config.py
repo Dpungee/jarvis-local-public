@@ -48,6 +48,8 @@ _DOTENV_KEYS = frozenset({
     "JARVIS_OLLAMA_DEEP_KEEP_ALIVE",
     "JARVIS_OLLAMA_NUM_THREAD",
     "JARVIS_OLLAMA_PRELOAD",
+    "JARVIS_LOCAL_CODING_CONTEXT",
+    "JARVIS_LOCAL_CODING_CONTEXT_MAX_TOKENS",
     "JARVIS_REASONING_THINKING",
     "JARVIS_CLOUD_ENABLED",
     "JARVIS_CLOUD_GENERATION_TIMEOUT",
@@ -102,11 +104,14 @@ _DOTENV_KEYS = frozenset({
     "JARVIS_SPECIALIST_DELEGATION_LIMIT_PER_REQUEST",
     "JARVIS_MEMORY_AUTO_IMPROVE",
     "JARVIS_MEMORY_EMBEDDINGS",
+    "JARVIS_MEMORY_BRIDGE",
+    "JARVIS_MEMORY_BRIDGE_RUNTIME_DB",
     "JARVIS_MEMORY_EMBEDDING_MODEL",
     "JARVIS_MEMORY_EMBEDDING_DIMENSIONS",
     "JARVIS_MEMORY_CLAIM_CLOCK",
     "JARVIS_MEMORY_CLAIM_STALE_THRESHOLD",
     "JARVIS_MEMORY_PROPOSER",
+    "JARVIS_MEMORY_TRANSCRIPT_RECALL",
     "JARVIS_STRATEGY_TRANSFER",
     "JARVIS_APPROVAL_TTL_HOURS",
     "JARVIS_SELF_INSPECT",
@@ -471,6 +476,8 @@ class Config:
     ollama_deep_keep_alive: str = "0"
     ollama_num_thread: int | None = None
     ollama_preload: bool = False
+    local_coding_context: str = "disabled"
+    local_coding_context_max_tokens: int = 2048
     reasoning_thinking: bool = True
     cloud_enabled: bool = True
     cloud_generation_timeout: float = 600.0
@@ -521,6 +528,10 @@ class Config:
     memory_auto_improve: bool = True
     strategy_transfer: str = "observe"
     memory_embeddings: str = "disabled"
+    # Runtime->memory replay bridge.  "disabled" by default: ingestion is
+    # implemented but is not activated by installing this build.
+    memory_bridge: str = "disabled"
+    memory_bridge_runtime_db: str = ""
     memory_embedding_model: str = "text-embedding-3-small"
     memory_embedding_dimensions: int = 512
     memory_claim_clock: str = "shadow"
@@ -531,6 +542,12 @@ class Config:
     # verbatim in the operator's words; the parser validates it and the
     # operator still confirms.  Neither mode lets a model write memory.
     memory_proposer: str = "assisted"
+    # The transcript recall channel: a new conversation's automatic recall
+    # may quote bounded, screened excerpts of what was said in EARLIER
+    # conversations of the same store (never the current one).  Off restores
+    # the read path byte for byte; the explicit session_search tool is
+    # unaffected either way.
+    memory_transcript_recall: bool = True
     vault_dir: Path | None = None
 
     @property
@@ -670,6 +687,12 @@ class Config:
                 else _env_int("JARVIS_OLLAMA_NUM_THREAD", 1, 1, 256)
             ),
             ollama_preload=_env_bool("JARVIS_OLLAMA_PRELOAD", False),
+            local_coding_context=os.getenv(
+                "JARVIS_LOCAL_CODING_CONTEXT", "disabled"
+            ).strip().casefold(),
+            local_coding_context_max_tokens=_env_int(
+                "JARVIS_LOCAL_CODING_CONTEXT_MAX_TOKENS", 2048, 256, 4096
+            ),
             reasoning_thinking=_env_bool("JARVIS_REASONING_THINKING", True),
             cloud_enabled=_env_bool("JARVIS_CLOUD_ENABLED", True),
             cloud_generation_timeout=_env_float(
@@ -721,6 +744,12 @@ class Config:
             memory_embeddings=os.getenv(
                 "JARVIS_MEMORY_EMBEDDINGS", "disabled"
             ).strip().lower(),
+            memory_bridge=os.getenv(
+                "JARVIS_MEMORY_BRIDGE", "disabled"
+            ).strip().lower(),
+            memory_bridge_runtime_db=os.getenv(
+                "JARVIS_MEMORY_BRIDGE_RUNTIME_DB", ""
+            ).strip(),
             memory_embedding_model=os.getenv(
                 "JARVIS_MEMORY_EMBEDDING_MODEL", "text-embedding-3-small"
             ).strip(),
@@ -736,6 +765,9 @@ class Config:
             memory_proposer=os.getenv(
                 "JARVIS_MEMORY_PROPOSER", "assisted"
             ).strip().lower(),
+            memory_transcript_recall=_env_bool(
+                "JARVIS_MEMORY_TRANSCRIPT_RECALL", True
+            ),
             vault_dir=vault_dir,
             approval_ttl_hours=_env_int("JARVIS_APPROVAL_TTL_HOURS", 24, 1, 720),
             external_access=os.getenv("JARVIS_EXTERNAL_ACCESS", "disabled").strip().lower(),
@@ -884,6 +916,15 @@ class Config:
             raise ValueError(
                 "JARVIS_MEMORY_EMBEDDINGS must be 'disabled' or 'openai'"
             )
+        if cfg.memory_bridge not in {"disabled", "worker"}:
+            raise ValueError(
+                "JARVIS_MEMORY_BRIDGE must be 'disabled' or 'worker'"
+            )
+        if cfg.memory_bridge == "worker" and not cfg.memory_bridge_runtime_db:
+            raise ValueError(
+                "JARVIS_MEMORY_BRIDGE=worker requires "
+                "JARVIS_MEMORY_BRIDGE_RUNTIME_DB to name the runtime store"
+            )
         if cfg.memory_claim_clock not in {"disabled", "shadow", "enforce"}:
             raise ValueError(
                 "JARVIS_MEMORY_CLAIM_CLOCK must be 'disabled', 'shadow', or 'enforce'"
@@ -891,6 +932,10 @@ class Config:
         if cfg.memory_proposer not in {"rules", "assisted"}:
             raise ValueError(
                 "JARVIS_MEMORY_PROPOSER must be 'rules' or 'assisted'"
+            )
+        if cfg.local_coding_context not in {"disabled", "shadow", "enabled"}:
+            raise ValueError(
+                "JARVIS_LOCAL_CODING_CONTEXT must be disabled, shadow, or enabled"
             )
         if (
             not cfg.memory_embedding_model

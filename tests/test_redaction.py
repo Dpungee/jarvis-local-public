@@ -4,6 +4,7 @@ import unittest
 
 from jarvis.memory import _redacted_json_value
 from jarvis.redaction import (
+    StreamingRedactor,
     contains_obfuscated_secret,
     contains_private_identifier,
     contains_sensitive_key_phrase,
@@ -16,6 +17,58 @@ from jarvis.redaction import (
 
 
 class SharedRedactionTests(unittest.TestCase):
+    def test_streaming_redactor_blocks_every_secret_family_at_every_split(self):
+        sensitive_keys = (
+            "password", "passwd", "api_key", "access_key", "secret_key",
+            "private_key", "access_token", "refresh_token", "session_token",
+            "auth_token", "oauth_token", "id_token", "client_secret",
+            "authorization", "credential", "credentials", "cookie",
+            "session_cookie", "recovery_code", "mfa_code", "token", "secret",
+        )
+        examples = [f"{key}=EXAMPLE_NOT_A_REAL_VALUE" for key in sensitive_keys]
+        examples.extend(
+            [
+                "-----BEGIN " + "PRIVATE KEY-----\nEXAMPLEONLY\n-----END " + "PRIVATE KEY-----",
+                "sk-" + "EXAMPLEONLY12",
+                "sk-proj-" + "EXAMPLEONLY12",
+                *(
+                    "gh" + kind + "_" + "EXAMPLEONLY12"
+                    for kind in "pousr"
+                ),
+                "github_" + "pat_" + "EXAMPLEONLY12",
+                *(
+                    "xox" + kind + "-" + "EXAMPLEONLY12"
+                    for kind in "baprs"
+                ),
+                "AI" + "za" + "EXAMPLE_NOT_REAL_12345",
+                "AK" + "IA" + "EXAMPLENOTREAL12",
+                "eyJ" + "EXAMPLEONLY12." + "EXAMPLEONLY12." + "EXAMPLEONLY12",
+                "Bearer " + "EXAMPLE_NOT_REAL_TOKEN",
+                '"service.api-key": "EXAMPLE NOT REAL"',
+            ]
+        )
+        for secret in examples:
+            payload = f"before {secret} after"
+            for split in range(1, len(payload)):
+                with self.subTest(secret=secret[:18], split=split):
+                    redactor = StreamingRedactor()
+                    rendered = (
+                        redactor.feed(payload[:split])
+                        + redactor.feed(payload[split:])
+                        + redactor.finish()
+                    )
+                    self.assertNotIn(secret, rendered)
+                    self.assertIn("[REDACTED]", rendered)
+                    self.assertTrue(rendered.startswith("before "))
+                    self.assertTrue(rendered.endswith(" after"))
+
+    def test_streaming_redactor_bounds_an_unterminated_secret(self):
+        redactor = StreamingRedactor(overlap=64, max_pending=128)
+        rendered = redactor.feed("api_key=\"" + "x" * 256)
+        rendered += redactor.feed("still-the-same-secret-tail")
+        rendered += redactor.finish()
+        self.assertEqual(rendered, "[REDACTED]")
+
     def test_namespaced_sensitive_assignments_use_the_same_policy(self):
         keys = (
             "OPENAI_API_KEY",

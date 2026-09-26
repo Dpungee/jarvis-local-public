@@ -60,13 +60,13 @@ FIXTURE_PATH = (
     / "fixtures"
     / "memory_graph_holdout_v4.json"
 )
-FIXTURE_SHA256 = "ca2f213b21b73d6e19dee988d361264839b2b577958406a97afa9ccf9b470136"
+FIXTURE_SHA256 = "b75f2dfdec9d6256139575728bd35abb0ff163f0ae48bb71ec982d11fcdaa0f1"
 SCORER_SHA256 = "a0bcef7cbd4ee77ad8b67bf24be7bf106bdcd05c22ce6b64cc427d8a805a5e0c"
 SCORER_START = "# -- BEGIN SEALED MEMORY GRAPH HOLDOUT V4 SCORER --"
 SCORER_END = "# -- END SEALED MEMORY GRAPH HOLDOUT V4 SCORER --"
 TOKEN_ENVIRONMENT_VARIABLE = "JARVIS_MEMORY_GRAPH_HOLDOUT_V4_TOKEN"
 
-# The four files the fixture pins.  ``jarvis/agent.py`` is deliberately absent
+# The original fixture files plus extracted memory. ``jarvis/agent.py`` is deliberately absent
 # (design section 1.4): the scored path is store side, and the fixture bakes
 # the question -> subjects mapping so the agent parser is never called here.
 PINNED_FILES = (
@@ -74,6 +74,25 @@ PINNED_FILES = (
     "jarvis/memory_graph.py",
     "jarvis/memory_retrieval.py",
     "jarvis/redaction.py",
+    "jarvis/memory_embeddings.py",
+    "jarvis/memory_runtime.py",
+    "jarvis/memory_schema_migrations.py",
+    "jarvis/memory_projects_budget.py",
+    "jarvis/memory_predictions.py",
+    "jarvis/memory_conversations.py",
+    "jarvis/memory_presence_companion.py",
+    "jarvis/memory_ordinary_recall.py",
+    "jarvis/memory_claims.py",
+    "jarvis/memory_embedding_store.py",
+    "jarvis/memory_lessons.py",
+    "jarvis/memory_strategy_transfer.py",
+    "jarvis/memory_strategy_trial.py",
+    "jarvis/memory_tasks_scheduling.py",
+    "jarvis/memory_operator_state.py",
+    "jarvis/memory_approvals.py",
+    "jarvis/memory_learning_ladder.py",
+    "jarvis/memory_governance.py",
+    "jarvis/memory_conversation_compaction.py",
 )
 # An unsealed pin.  ``claude-reseal-runtime-pins.py`` (boss item) replaces each
 # per-file placeholder with the real digest, then rewrites FIXTURE_SHA256 and

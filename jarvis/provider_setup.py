@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import dataclasses
 import os
 import re
 import sqlite3
@@ -48,10 +49,11 @@ _MANAGED_KEYS = (
 )
 _KEY_PATTERN = re.compile(r"^\s*([A-Z][A-Z0-9_]*)\s*=")
 _WINDOWS_REPARSE_POINT = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
-_CHOICES = frozenset({"codex", "claude", "both"})
+_CHOICES = frozenset({"ollama", "codex", "claude", "both"})
 _AUTH_STATUS_MAX_BYTES = 4096
 _SETUP_MARKER = "# JARVIS_PROVIDER_SETUP=complete:v1"
 _CANARY_SENTINEL = "JARVIS_CANARY_OK"
+_PINNED_CLAUDE_SONNET_4_5_MODEL = "claude-cli:claude-sonnet-4-5-20250929"
 _WINGET_PACKAGE_DIRECTORY = re.compile(
     r"Microsoft\.DesktopAppInstaller_[0-9]+(?:\.[0-9]+){1,4}_"
     r"(?:x64|x86|arm64|neutral)__8wekyb3d8bbwe\Z",
@@ -350,8 +352,17 @@ def is_setup_complete(
 def _provider_values(choice: str) -> dict[str, str]:
     normalized = str(choice).strip().casefold()
     if normalized not in _CHOICES:
-        raise ValueError("provider choice must be codex, claude, or both")
-    if normalized == "codex":
+        raise ValueError("provider choice must be ollama, codex, claude, or both")
+    if normalized == "ollama":
+        profiles = {
+            "JARVIS_FAST_MODEL": "qwen3.5:9b",
+            "JARVIS_REASONING_MODEL": "gpt-oss:20b",
+            "JARVIS_CODING_MODEL": "qwen3-coder:30b",
+            "JARVIS_DEEP_MODEL": "qwen3-coder:30b",
+            "JARVIS_BACKGROUND_MODEL": "fast",
+            "JARVIS_LEARNING_MODEL": "fast",
+        }
+    elif normalized == "codex":
         profiles = {
             "JARVIS_FAST_MODEL": "codex-cli:gpt-5.6-luna",
             "JARVIS_REASONING_MODEL": "codex-cli:gpt-5.6-terra",
@@ -362,12 +373,12 @@ def _provider_values(choice: str) -> dict[str, str]:
         }
     elif normalized == "claude":
         profiles = {
-            "JARVIS_FAST_MODEL": "claude-cli:haiku",
-            "JARVIS_REASONING_MODEL": "claude-cli:sonnet",
-            "JARVIS_CODING_MODEL": "claude-cli:sonnet",
-            "JARVIS_DEEP_MODEL": "claude-cli:sonnet",
-            "JARVIS_BACKGROUND_MODEL": "claude-cli:haiku",
-            "JARVIS_LEARNING_MODEL": "claude-cli:haiku",
+            "JARVIS_FAST_MODEL": _PINNED_CLAUDE_SONNET_4_5_MODEL,
+            "JARVIS_REASONING_MODEL": _PINNED_CLAUDE_SONNET_4_5_MODEL,
+            "JARVIS_CODING_MODEL": _PINNED_CLAUDE_SONNET_4_5_MODEL,
+            "JARVIS_DEEP_MODEL": _PINNED_CLAUDE_SONNET_4_5_MODEL,
+            "JARVIS_BACKGROUND_MODEL": _PINNED_CLAUDE_SONNET_4_5_MODEL,
+            "JARVIS_LEARNING_MODEL": _PINNED_CLAUDE_SONNET_4_5_MODEL,
         }
     else:
         profiles = {
@@ -385,11 +396,54 @@ def _provider_values(choice: str) -> dict[str, str]:
         # API keys that happen to exist in the parent process environment.
         "JARVIS_OPENAI_API_ENABLED": "false",
         "JARVIS_ANTHROPIC_API_ENABLED": "false",
-        "JARVIS_CLOUD_ENABLED": "true",
-        "JARVIS_OLLAMA_ENABLED": "false",
+        "JARVIS_CLOUD_ENABLED": "false" if normalized == "ollama" else "true",
+        "JARVIS_OLLAMA_ENABLED": "true" if normalized == "ollama" else "false",
         "JARVIS_MODEL": "auto",
         **profiles,
     }
+
+
+_CONFIG_FIELDS_BY_ENV = {
+    "JARVIS_CODEX_CLI_ENABLED": "codex_cli_enabled",
+    "JARVIS_CLAUDE_CLI_ENABLED": "claude_cli_enabled",
+    "JARVIS_OPENAI_API_ENABLED": "openai_api_enabled",
+    "JARVIS_ANTHROPIC_API_ENABLED": "anthropic_api_enabled",
+    "JARVIS_CLOUD_ENABLED": "cloud_enabled",
+    "JARVIS_OLLAMA_ENABLED": "ollama_enabled",
+    "JARVIS_MODEL": "model",
+    "JARVIS_FAST_MODEL": "fast_model",
+    "JARVIS_REASONING_MODEL": "reasoning_model",
+    "JARVIS_CODING_MODEL": "coding_model",
+    "JARVIS_DEEP_MODEL": "deep_model",
+    "JARVIS_BACKGROUND_MODEL": "background_model",
+    "JARVIS_LEARNING_MODEL": "learning_model",
+}
+
+
+def provider_choice_from_config(config: Any) -> str:
+    """Return the bounded provider mode represented by a loaded Config."""
+    codex = bool(getattr(config, "codex_cli_enabled", False))
+    claude = bool(getattr(config, "claude_cli_enabled", False))
+    ollama = bool(getattr(config, "ollama_enabled", False))
+    if codex and claude:
+        return "both"
+    if codex:
+        return "codex"
+    if claude:
+        return "claude"
+    if ollama:
+        return "ollama"
+    return "ollama"
+
+
+def config_with_provider_choice(config: Config, choice: str) -> Config:
+    """Apply provider routing in memory so the desktop can switch immediately."""
+    values = _provider_values(choice)
+    updates: dict[str, Any] = {}
+    for env_name, field_name in _CONFIG_FIELDS_BY_ENV.items():
+        raw = values[env_name]
+        updates[field_name] = raw == "true" if raw in {"true", "false"} else raw
+    return dataclasses.replace(config, **updates)
 
 
 def _render_env(existing: str, updates: Mapping[str, str]) -> str:
@@ -876,20 +930,26 @@ def _prepare_provider(
 
 def _prompt_choice(input_fn: Callable[[str], str], output: TextIO) -> str:
     output.write(
-        "\nChoose how Jarvis should access subscription models:\n"
+        "\nChoose how Jarvis should access models:\n"
         "  1. Codex CLI (your ChatGPT subscription)\n"
         "  2. Claude CLI (your Claude subscription)\n"
         "  3. Both (Claude for fast/reasoning; Codex for coding/deep)\n"
+        "  4. Ollama (local models on this computer)\n"
     )
-    mapping = {"1": "codex", "codex": "codex", "2": "claude", "claude": "claude", "3": "both", "both": "both"}
+    mapping = {
+        "1": "codex", "codex": "codex", "chatgpt": "codex",
+        "2": "claude", "claude": "claude",
+        "3": "both", "both": "both",
+        "4": "ollama", "ollama": "ollama", "local": "ollama",
+    }
     for _attempt in range(3):
         try:
-            answer = input_fn("Provider [1/2/3]: ").strip().casefold()
+            answer = input_fn("Provider [1/2/3/4]: ").strip().casefold()
         except (EOFError, KeyboardInterrupt) as exc:
             raise ProviderSetupRequired(SETUP_NEEDED_MESSAGE) from exc
         if answer in mapping:
             return mapping[answer]
-        output.write("Enter 1, 2, or 3.\n")
+        output.write("Enter 1, 2, 3, or 4.\n")
     raise ProviderSetupRequired(SETUP_NEEDED_MESSAGE)
 
 
@@ -903,13 +963,13 @@ def configure_provider(
 ) -> ProviderSetupResult:
     normalized = str(choice).strip().casefold()
     if normalized not in _CHOICES:
-        raise ValueError("provider choice must be codex, claude, or both")
+        raise ValueError("provider choice must be ollama, codex, claude, or both")
     values = os.environ if environ is None else environ
     if require_ready:
         unavailable = [
             provider
             for provider in _selected_providers(normalized)
-            if not detect_provider(
+            if provider != "ollama" and not detect_provider(
                 provider, root=root, environ=values, runner=runner
             ).authenticated
         ]
@@ -948,6 +1008,8 @@ def ensure_ready(
     values = os.environ if environ is None else environ
     choice = _prompt_choice(input_fn, destination)
     for provider in _selected_providers(choice):
+        if provider == "ollama":
+            continue
         _prepare_provider(
             provider,
             root=root,
@@ -980,7 +1042,7 @@ def _parser() -> argparse.ArgumentParser:
     )
     mode.add_argument(
         "--login",
-        choices=sorted(_CHOICES),
+        choices=("both", "claude", "codex"),
         help="install/sign in and select a provider even on an existing installation",
     )
     return parser

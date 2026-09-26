@@ -1,6 +1,20 @@
 # JARVIS Development Status
 
-## Cross-checkout public integration (2026-09-25, not published)
+## Public integration and release verification (2026-09-26)
+
+- The reviewed 274-path integration was published through protected PR #26 as
+  `63d3f82`. The exact candidate passed 5,481 local tests (nine skips), all three
+  hosted Windows Python versions (ten skips each), 76% displayed branch-aware
+  coverage, package/install checks, dependency audit, privacy, and CodeQL.
+  A fresh public-only clone matched the reviewed tree and passed privacy/secret
+  scans. The repository URL is unchanged and commit email identities are no-reply.
+- Post-merge CodeQL identified a medium-severity all-interface listener in a
+  synthetic network-exposure test. The test now retains real loopback-only
+  validation and uses mocked connection boundaries for reachable/refused non-
+  loopback addresses and resolution failure. No LAN listener is opened by that
+  fixture; production detection, query scope and security gates are unchanged.
+  This follow-up still requires its own complete checks and alert-resolution
+  verification; no finding was dismissed.
 
 - This candidate is based on published commit `93119c4`. Original development
   checkouts and the running Hub were not changed by this integration.

@@ -5,12 +5,13 @@ import io
 import json
 import os
 import shutil
+import sqlite3
 import unittest
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from urllib.parse import urlsplit
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from jarvis.agent import (
     Agent,
@@ -53,6 +54,7 @@ from jarvis.agent import (
 )
 from jarvis.config import Config
 from jarvis.memory import Memory
+from jarvis.ollama_client import OllamaError
 from jarvis.tools import FILE_WRITE_TOOLS, Tool, ToolBox, _OutputCollector
 from tests.test_agent import (
     SUBSTANTIVE_RESEARCH_RESULT,
@@ -1063,6 +1065,36 @@ class AgentHardeningTests(unittest.TestCase):
         )
         agent.toolbox = toolbox or FakeToolBox()
         return agent, client
+
+    def test_failed_transcript_write_is_recorded_not_swallowed(self):
+        agent, _client = self.make_agent([])
+        announced: list[str] = []
+        agent.on_event = announced.append
+        with patch.object(
+            agent.memory,
+            "add_message",
+            side_effect=sqlite3.OperationalError("database is locked"),
+        ):
+            result = agent._model_recovery_result(OllamaError("every route failed"), 7)
+        self.assertEqual(getattr(result, "status", None), "incomplete")
+        self.assertIn("cannot", str(result))
+        self.assertEqual(
+            agent.dropped_writes,
+            ({"kind": "assistant transcript", "error": "OperationalError"},),
+        )
+        self.assertIn("write dropped - assistant transcript - OperationalError", announced)
+
+    def test_dropped_write_evidence_is_bounded_and_survives_a_failing_event_sink(self):
+        agent, _client = self.make_agent([])
+        agent.on_event = Mock(side_effect=RuntimeError("sink is broken"))
+        for index in range(40):
+            agent._note_dropped_write(f"probe {index}", ValueError("x"))
+        dropped = agent.dropped_writes
+        self.assertEqual(len(dropped), 32)
+        self.assertEqual(dropped[0]["kind"], "probe 8")
+        self.assertEqual(dropped[-1], {"kind": "probe 39", "error": "ValueError"})
+        agent._note_dropped_write("quiet", OSError("disk"), announce=False)
+        self.assertEqual(agent.on_event.call_count, 40)
 
     def test_eight_kilobyte_soul_cannot_displace_hard_contract(self):
         soul_path = self.test_dir / "large-soul.md"

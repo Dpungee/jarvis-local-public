@@ -59,6 +59,130 @@ SECRET_VALUE = re.compile(
     re.S,
 )
 
+# A streamed credential can be split at any byte boundary.  Redacting each
+# transport fragment independently is therefore unsafe: ``api_`` followed by
+# ``key=...`` does not match either fragment even though the assembled text is
+# a credential.  The stateful redactor below retains enough ordinary suffix to
+# recognize every fixed prefix in ``SECRET_VALUE`` and retains an entire
+# in-progress credential until a real terminator arrives.  Unbounded quoted
+# values and private-key blocks are kept from their opener, not merely inside
+# the fixed suffix.
+STREAM_REDACTION_OVERLAP = 128
+STREAM_REDACTION_MAX_PENDING = 64 * 1024
+_STREAM_SECRET_CANDIDATE = re.compile(
+    rf"(?i)(?:"
+    rf"-----BEGIN\s+[A-Z _.-]*PRIVATE[ _.-]*KEY-----|"
+    rf"\bsk-(?:proj-)?|\bgh[pousr]_|\bgithub_pat_|"
+    rf"\bxox[baprs]-|\bAIza|\bAKIA|\beyJ|\bbearer\s+|"
+    rf"(?:[\"']?(?:{_NAMESPACED_SENSITIVE_KEY_PATTERN})[\"']?)\s*[:=]\s*"
+    rf")",
+)
+
+
+def _stream_match_is_terminated(text: str, match: re.Match[str]) -> bool:
+    """Return whether a complete secret match cannot grow with another chunk."""
+    matched = match.group(0)
+    if "-----END" in matched.upper():
+        return True
+    assignment = re.search(r"[:=]\s*", matched)
+    if assignment is not None:
+        value = matched[assignment.end():]
+        if value.startswith(('"', "'")):
+            return len(value) >= 2 and value.endswith(value[0])
+    if match.end() < len(text):
+        return text[match.end()].isspace() or text[match.end()] in ",;)]}>"
+    return False
+
+
+class StreamingRedactor:
+    """Incrementally redact secrets without exposing cross-chunk fragments.
+
+    ``feed`` returns only text whose secret classification can no longer be
+    changed by a later fragment.  ``finish`` must be called exactly once when
+    the provider stream ends so the retained suffix is emitted in redacted
+    form.  Pending input is bounded; an adversarial unterminated credential is
+    replaced wholesale instead of growing memory without limit.
+    """
+
+    def __init__(
+        self,
+        replacement: str = "[REDACTED]",
+        *,
+        overlap: int = STREAM_REDACTION_OVERLAP,
+        max_pending: int = STREAM_REDACTION_MAX_PENDING,
+    ) -> None:
+        if not isinstance(overlap, int) or isinstance(overlap, bool) or overlap < 64:
+            raise ValueError("stream redaction overlap must be an integer of at least 64")
+        if (
+            not isinstance(max_pending, int)
+            or isinstance(max_pending, bool)
+            or max_pending < overlap * 2
+        ):
+            raise ValueError("stream redaction pending limit is too small")
+        self.replacement = str(replacement)
+        self.overlap = overlap
+        self.max_pending = max_pending
+        self._pending = ""
+        self._finished = False
+        self._failed_closed = False
+
+    def _drain(self, *, final: bool) -> str:
+        emitted: list[str] = []
+        while self._pending:
+            direct = SECRET_VALUE.search(self._pending)
+            candidate = _STREAM_SECRET_CANDIDATE.search(self._pending)
+            if direct is not None and (
+                candidate is None or direct.start() <= candidate.start()
+            ):
+                if not final and not _stream_match_is_terminated(self._pending, direct):
+                    if direct.start():
+                        emitted.append(redact_secrets(self._pending[:direct.start()], self.replacement))
+                        self._pending = self._pending[direct.start():]
+                    break
+                emitted.append(redact_secrets(self._pending[:direct.end()], self.replacement))
+                self._pending = self._pending[direct.end():]
+                continue
+            if candidate is not None:
+                if candidate.start():
+                    emitted.append(redact_secrets(self._pending[:candidate.start()], self.replacement))
+                    self._pending = self._pending[candidate.start():]
+                break
+            if final:
+                emitted.append(redact_secrets(self._pending, self.replacement))
+                self._pending = ""
+                break
+            safe = len(self._pending) - self.overlap
+            if safe <= 0:
+                break
+            emitted.append(redact_secrets(self._pending[:safe], self.replacement))
+            self._pending = self._pending[safe:]
+        if len(self._pending) > self.max_pending:
+            # An unclosed quote/private-key block or separator-obfuscated key
+            # must fail closed rather than turn into an unbounded buffer. Once
+            # this happens, suppress the rest of the stream too: otherwise a
+            # later fragment could expose the tail of the same oversized
+            # credential after the pending buffer was cleared.
+            emitted.append(self.replacement)
+            self._pending = ""
+            self._failed_closed = True
+        return "".join(emitted)
+
+    def feed(self, value: Any) -> str:
+        if self._finished:
+            raise RuntimeError("stream redactor is already finished")
+        if self._failed_closed:
+            return ""
+        self._pending += str(value or "")
+        return self._drain(final=False)
+
+    def finish(self) -> str:
+        if self._finished:
+            return ""
+        self._finished = True
+        if self._failed_closed:
+            return ""
+        return self._drain(final=True)
+
 # Durable lessons can be reused long after the originating task.  Secrets are
 # already removed above, but ordinary identifiers such as an email address or
 # a concrete user-home path are private too and must not become reusable

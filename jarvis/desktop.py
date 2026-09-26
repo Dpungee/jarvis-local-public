@@ -248,7 +248,6 @@ def system_snapshot(root: Path) -> dict[str, Any]:
     physical_storage = _physical_storage_devices()
     return {
         "timestamp": time.time(),
-        "computer": platform.node(),
         "operating_system": platform.platform(),
         "processor": platform.processor(),
         "logical_cpu_count": os.cpu_count(),

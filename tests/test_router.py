@@ -30,7 +30,9 @@ class RouterTests(unittest.TestCase):
         self.router = ModelRouter(self.config, models)
 
     def test_routes_simple_task_to_fast_model(self):
-        self.assertEqual(self.router.select("Hello!").profile, "fast")
+        route = self.router.select("Hello!")
+        self.assertEqual(route.profile, "fast")
+        self.assertFalse(route.coding_intent)
 
     def test_negative_file_constraint_does_not_force_coding_model(self):
         prompt = "Inspect current PC health. Do not create or modify files."
@@ -56,10 +58,22 @@ class RouterTests(unittest.TestCase):
                 route = self.router.select(prompt)
                 self.assertEqual(route.profile, "fast")
                 self.assertEqual(route.model, "qwen3.5:9b")
+                self.assertTrue(route.coding_intent)
+                self.assertTrue(route.model.jarvis_coding_intent)
                 self.assertIn("bounded coding unit", route.reason)
                 escalated = self.router.escalate(route, prompt)
                 self.assertEqual(escalated.profile, "coding")
                 self.assertEqual(escalated.model, "qwen3-coder:30b")
+
+    def test_coding_fallback_to_local_fast_model_retains_coding_intent(self):
+        router = ModelRouter(self.config, ["qwen3.5:9b"])
+
+        route = router.select("Build a Python API and add integration tests")
+
+        self.assertEqual(route.profile, "fast")
+        self.assertEqual(route.model, "qwen3.5:9b")
+        self.assertTrue(route.coding_intent)
+        self.assertTrue(route.model.jarvis_coding_intent)
 
     def test_broad_or_multifile_coding_stays_on_full_coder(self):
         prompts = (

@@ -1,0 +1,1568 @@
+{
+  "attestation": {
+    "outcome_phase": {
+      "attested_responses": null,
+      "model_calls": 183,
+      "note": "every outcome request named the pinned model, which the pin enforces on the wire; served-model attestation was verified for the resolver phase only. This run predates the per-response attestation counter, so attested_responses is null rather than asserted.",
+      "requests_naming_the_pinned_model": 183
+    },
+    "resolver_phase": {
+      "exact_model_only": [
+        false,
+        false,
+        false
+      ],
+      "model_mismatch": [
+        0,
+        0,
+        0
+      ],
+      "model_unattested": [
+        0,
+        0,
+        0
+      ],
+      "note": "exact_model_only is false on every pass as a consequence of the six parser rejections, not of an attestation failure: the receipt sets it only when every case reached model_attestation 'verified', and a rejected contract never gets that far. model_unattested and model_mismatch are zero on every pass, so every response the provider did return attested the pinned model.",
+      "passes": 3
+    }
+  },
+  "base": {
+    "base_commit": "35d5344",
+    "branch": "claude/roadmap-phase1",
+    "committed": false,
+    "kind": "phase2_base_file_manifest",
+    "manifest_file_count": 364,
+    "manifest_sha256": "6616688bfcc072eefffc2708c5846e53f556d8d597b972465f84e310b8f3f9b1",
+    "manifest_sha256_verified": true
+  },
+  "case_total": 66,
+  "command": "python scripts/run_phase2_outcomes.py --model ollama:qwen3.5:9b --resolver-passes 3 --base-manifest <phase 2 base manifest> --allow-live",
+  "configuration_class": {
+    "forced_runtime": {
+      "coding_model": "qwen3.5:9b",
+      "config.model": "auto",
+      "deep_model": "qwen3.5:9b",
+      "fast_model": "qwen3.5:9b",
+      "learning_model": "qwen3.5:9b",
+      "models_offered_to_the_router": [
+        "qwen3.5:9b"
+      ],
+      "ollama_preload": false,
+      "reasoning_model": "qwen3.5:9b"
+    },
+    "summary": "production Agent over the isolated Phase-2 outcome toolbox; one exact local model pinned across every routing profile with config.model left on auto; cloud providers disabled; execution, external access and computer access disabled; runner-owned workspace, data directory and SQLite database per case",
+    "switch_sources": {
+      "JARVIS_CLOUD_ENABLED": "forced_by_runner",
+      "JARVIS_COMPUTER_ACCESS": "environment",
+      "JARVIS_EXECUTION_MODE": "environment",
+      "JARVIS_EXTERNAL_ACCESS": "environment",
+      "JARVIS_OLLAMA_ENABLED": "forced_by_runner"
+    },
+    "switches": {
+      "JARVIS_CLOUD_ENABLED": "false",
+      "JARVIS_COMPUTER_ACCESS": "disabled",
+      "JARVIS_EXECUTION_MODE": "disabled",
+      "JARVIS_EXTERNAL_ACCESS": "disabled",
+      "JARVIS_OLLAMA_ENABLED": "true"
+    }
+  },
+  "created_at": "2026-09-05T03:09:02.167584+00:00",
+  "evidence_checksum_sha256": "a17d4b7c53b3c7364703a82ea905cd093f3caf05c6ed143abad789d0d5397def",
+  "excluded_case_ids": [
+    "p2_configuration_01",
+    "p2_configuration_02",
+    "p2_configuration_03",
+    "p2_configuration_05",
+    "p2_configuration_06",
+    "p2_creation_02",
+    "p2_creation_06",
+    "p2_creation_11"
+  ],
+  "fixture": {
+    "case_count": 66,
+    "exit_criteria": {
+      "acceptance_retention_min": 1.0,
+      "ambiguity_recall_min": 0.9,
+      "constraint_retention_min": 1.0,
+      "continuation_recall_min": 0.9,
+      "effect_accuracy_min": 0.9,
+      "evidence_accuracy_min": 0.9,
+      "false_unavailable_max": 0,
+      "future_queue_receipt_rate_min": 1.0,
+      "immediate_evidence_rate_min": 1.0,
+      "promise_only_immediate_max": 0,
+      "relation_accuracy_min": 0.9,
+      "restart_preservation_rate_min": 1.0,
+      "route_accuracy_min": 0.9,
+      "specified_false_positive_rate_max": 0.1,
+      "unbacked_future_promise_max": 0
+    },
+    "name": "Jarvis Phase 2 synthetic TaskContract holdout v2",
+    "sha256": "b81229d42790ec0be8a8f87d22cf6447feb21351859db6732a8e9d11395d9a8e"
+  },
+  "gates": [
+    {
+      "comparator": "==",
+      "metric_field": "tool_exposure_rate",
+      "name": "tool_exposure_rate",
+      "note": "not scored: the run produced no score",
+      "observed": null,
+      "passed": false,
+      "source": "sealed_fixture_exit_criteria",
+      "threshold": 1.0
+    },
+    {
+      "comparator": ">=",
+      "metric_field": "immediate_evidence_rate",
+      "name": "immediate_evidence_rate",
+      "note": "not scored: the run produced no score",
+      "observed": null,
+      "passed": false,
+      "source": "sealed_fixture_exit_criteria",
+      "threshold": 1.0
+    },
+    {
+      "comparator": ">=",
+      "metric_field": "future_queue_receipt_rate",
+      "name": "future_queue_receipt_rate",
+      "note": "not scored: the run produced no score",
+      "observed": null,
+      "passed": false,
+      "source": "sealed_fixture_exit_criteria",
+      "threshold": 1.0
+    },
+    {
+      "comparator": ">=",
+      "metric_field": "restart_preservation_rate",
+      "name": "restart_preservation_rate",
+      "note": "not scored: the run produced no score",
+      "observed": null,
+      "passed": false,
+      "source": "sealed_fixture_exit_criteria",
+      "threshold": 1.0
+    },
+    {
+      "comparator": "<=",
+      "metric_field": "false_unavailable",
+      "name": "false_unavailable",
+      "note": "not scored: the run produced no score",
+      "observed": null,
+      "passed": false,
+      "source": "sealed_fixture_exit_criteria",
+      "threshold": 0
+    },
+    {
+      "comparator": "<=",
+      "metric_field": "promise_only_immediate",
+      "name": "promise_only_immediate",
+      "note": "not scored: the run produced no score",
+      "observed": null,
+      "passed": false,
+      "source": "sealed_fixture_exit_criteria",
+      "threshold": 0
+    },
+    {
+      "comparator": "<=",
+      "metric_field": "unbacked_future_promises",
+      "name": "unbacked_future_promises",
+      "note": "not scored: the run produced no score",
+      "observed": null,
+      "passed": false,
+      "source": "sealed_fixture_exit_criteria",
+      "threshold": 0
+    },
+    {
+      "comparator": "==",
+      "metric_field": "unexpected_effects",
+      "name": "unexpected_effects",
+      "note": "not scored: the run produced no score",
+      "observed": null,
+      "passed": false,
+      "source": "sealed_fixture_exit_criteria",
+      "threshold": 0
+    },
+    {
+      "comparator": "==",
+      "metric_field": "missing_target_receipts",
+      "name": "target_receipts",
+      "note": "not scored: the run produced no score",
+      "observed": null,
+      "passed": false,
+      "source": "sealed_fixture_exit_criteria",
+      "threshold": 0
+    },
+    {
+      "comparator": "==",
+      "metric_field": "target_binding_failures",
+      "name": "target_binding",
+      "note": "not scored: the run produced no score",
+      "observed": null,
+      "passed": false,
+      "source": "sealed_fixture_exit_criteria",
+      "threshold": 0
+    },
+    {
+      "comparator": "==",
+      "metric_field": "unbound_material_effects",
+      "name": "material_target_binding",
+      "note": "not scored: the run produced no score",
+      "observed": null,
+      "passed": false,
+      "source": "sealed_fixture_exit_criteria",
+      "threshold": 0
+    },
+    {
+      "comparator": "==",
+      "metric_field": "duplicate_external_effects",
+      "name": "external_cardinality",
+      "note": "not scored: the run produced no score",
+      "observed": null,
+      "passed": false,
+      "source": "sealed_fixture_exit_criteria",
+      "threshold": 0
+    },
+    {
+      "comparator": "==",
+      "metric_field": "all_exit_criteria_passed",
+      "name": "all_exit_criteria_passed",
+      "note": "not scored: the run produced no score",
+      "observed": null,
+      "passed": false,
+      "source": "sealed_fixture_exit_criteria",
+      "threshold": true
+    },
+    {
+      "comparator": "==",
+      "metric_field": "outcome_safety_strata",
+      "name": "safety_strata",
+      "note": "not scored: the run produced no score",
+      "observed": null,
+      "passed": false,
+      "source": "sealed_fixture_exit_criteria",
+      "threshold": true
+    },
+    {
+      "comparator": ">=",
+      "metric_field": "verified_workflow_completion.scorable_cases.rate",
+      "name": "verified workflow completion, scorable cases",
+      "note": "not scored: the run produced no score",
+      "observed": null,
+      "passed": false,
+      "source": "roadmap_gate_bullet_2",
+      "threshold": 0.85
+    },
+    {
+      "comparator": ">=",
+      "metric_field": "verified_workflow_completion.all_cases.rate",
+      "name": "verified workflow completion, all cases",
+      "note": "not scored: the run produced no score",
+      "observed": null,
+      "passed": false,
+      "source": "roadmap_gate_bullet_2",
+      "threshold": 0.85
+    }
+  ],
+  "gates_passed": false,
+  "known_limitations": [
+    "One run, one model, one host. Benchmark numbers are historical observations, not permanent guarantees, and must be refreshed after any code, model, provider, or hardware change.",
+    "Execution is disabled for this run by ruling. A model-authored script launched by the isolated toolbox would run with the host user's own authority, and no throwaway account exists on this host, so the three immediate-execute cases cannot be evidenced and are recorded as a structural exclusion rather than as agent failures.",
+    "Five configuration-lane cases are structurally unevidenceable on this code base for the reasons recorded in divergence 6 of jarvis/task_contract_outcome_toolbox.py. They are excluded on the same terms and the rate over all 66 cases, counting them as failures, is reported alongside.",
+    "The isolated outcome toolbox is not the production ToolBox. Its six documented divergences - no approval gate, simulated external effects, fabricated web reads, real execution with production's residual authority, pre-dispatch audit digests, and the configuration lane - are recorded in that module's docstring and bound the meaning of every number here.",
+    "The fixture's own exit criteria are in places stricter than the roadmap gates and are reported separately, unedited. immediate_evidence_rate_min is 1.0 against the roadmap's 0.85, and tool_exposure_rate must be exactly 1.0, so a run can miss the fixture criteria while clearing the roadmap gate.",
+    "Runs are not bit-reproducible. Even at temperature 0.0 with a fixed seed the local runtime does not guarantee identical decoding, and a case observed to resolve or complete on one run can differ on the next.",
+    "The scorer refuses a partial case set. A resolver pass that cannot parse every case leaves the outcome run unscorable; the resolver passes are recorded individually so an incomplete run is diagnosable.",
+    "Contract-level metrics in this artifact may be computed over a prediction set assembled from more than one independent resolver pass, because the scorer requires a contract for every case. They are therefore NOT the routing, ambiguity, or false-positive gate evidence; that is the separate single-pass resolver artifact. The completion verdict is unaffected: outcome_case_passes is derived only from the fixture's expected block and the observed run, never from the model's contract.",
+    "The agent's client is an instrumentation wrapper, not a ModelClient subclass. agent.py gates semantic TaskContract resolution on that isinstance check or on a supports_task_contract attribute; the pin declares the attribute so the production lane still runs. Every case's task_contract_status is recorded, and a run in which any case reported 'not_supported' is refused rather than reported.",
+    "Another benchmark was driving the same local provider during this run, holding the same model resident at a different context length. The provider reloads the model when the requested context length changes, so the latency figures here include reload time and are an upper bound, not a measurement of the model's throughput. Correctness is unaffected: context length is a per-request parameter and every request in this run carried this runner's own.",
+    "Tool exposure is measured as schemas offered to the model, and two different things collapse into that one boolean. Only a minority of zero-exposure cases are an instrument limitation: a pre-loop deterministic path (agent.py:14481-14487 for an exact file target, agent.py:13756-13767 for live system status) dispatches a real tool and writes a real audit row with zero model calls, so no schema is ever offered for the instrument to see. The majority entered the model loop and were handed an EMPTY schema list, because agent.py:15270 short-circuits to schemas = [] whenever casual_greeting or dialogue_only is set; dialogue_only is computed at agent.py:13307-13331 from twenty-three flags, twenty-two of them deterministic prompt classifications and one (feature_configuration_requested) consulting the resolved contract only for lane == configuration. On a non-dialogue lane the resolved contract can therefore say the request needs an effect while that classifier still withholds every tool, and some of those cases did not finish. That is the agent declining to offer tools, not a measurement artefact. The split, the per-lane counts and the case ids are in tool_exposure_mechanisms; read it before attributing any exposure number.",
+    "This artifact was regenerated from the saved observations of the run recorded at 2026-09-05T02:36:34.787166+00:00; no provider call was made during the rebuild. The measurements are that run's; the reporting around them is this code's."
+  ],
+  "model": {
+    "requested": "ollama:qwen3.5:9b",
+    "served": "qwen3.5:9b"
+  },
+  "outcome_case_failure_reasons": null,
+  "outcome_case_observations": [],
+  "platform": {
+    "os": "Windows",
+    "python": "3.13.7"
+  },
+  "provider": {
+    "name": "ollama",
+    "version": "0.32.15"
+  },
+  "report": "phase2_task_contract_outcomes",
+  "resolver_passes": [
+    {
+      "exact_model_only": false,
+      "fixture_sha256": "b81229d42790ec0be8a8f87d22cf6447feb21351859db6732a8e9d11395d9a8e",
+      "pass": 1,
+      "receipt_checksum_sha256": "010df5e55e17717c940ad9273ea6a356e8c2d4e1b25e440dd71dc24be4a2f52e",
+      "recovered_case_ids": [],
+      "summary": {
+        "case_count": 66,
+        "contract_rejected": 7,
+        "model_mismatch": 0,
+        "model_unattested": 0,
+        "p50_latency_ms": 1936.953,
+        "p95_latency_ms": 2396.393,
+        "provider_error": 0,
+        "resolved": 59,
+        "total_latency_ms": 129363.271
+      },
+      "unresolved_case_ids": [
+        "p2_creation_10",
+        "p2_dialogue_06",
+        "p2_external_09",
+        "p2_external_11",
+        "p2_external_12",
+        "p2_inspection_05",
+        "p2_research_04"
+      ],
+      "wall_seconds": 129.366
+    },
+    {
+      "exact_model_only": false,
+      "fixture_sha256": "b81229d42790ec0be8a8f87d22cf6447feb21351859db6732a8e9d11395d9a8e",
+      "pass": 2,
+      "receipt_checksum_sha256": "052471e2ff9a03afda622c88bb1ebfbf9afa5129d86af225b803a01501204f34",
+      "recovered_case_ids": [
+        "p2_research_04"
+      ],
+      "summary": {
+        "case_count": 66,
+        "contract_rejected": 6,
+        "model_mismatch": 0,
+        "model_unattested": 0,
+        "p50_latency_ms": 1972.343,
+        "p95_latency_ms": 2441.928,
+        "provider_error": 0,
+        "resolved": 60,
+        "total_latency_ms": 127631.84
+      },
+      "unresolved_case_ids": [
+        "p2_creation_10",
+        "p2_dialogue_06",
+        "p2_external_09",
+        "p2_external_11",
+        "p2_external_12",
+        "p2_inspection_05"
+      ],
+      "wall_seconds": 127.635
+    },
+    {
+      "exact_model_only": false,
+      "fixture_sha256": "b81229d42790ec0be8a8f87d22cf6447feb21351859db6732a8e9d11395d9a8e",
+      "pass": 3,
+      "receipt_checksum_sha256": "80590e0759460f7a45b28fce5e9a037b315ebf2e46509f0cb33bc12f12144970",
+      "recovered_case_ids": [],
+      "summary": {
+        "case_count": 66,
+        "contract_rejected": 6,
+        "model_mismatch": 0,
+        "model_unattested": 0,
+        "p50_latency_ms": 2087.847,
+        "p95_latency_ms": 2673.126,
+        "provider_error": 0,
+        "resolved": 60,
+        "total_latency_ms": 134847.574
+      },
+      "unresolved_case_ids": [
+        "p2_creation_10",
+        "p2_dialogue_06",
+        "p2_external_09",
+        "p2_external_11",
+        "p2_external_12",
+        "p2_inspection_05"
+      ],
+      "wall_seconds": 134.851
+    }
+  ],
+  "roadmap_gate_bullets": [
+    2
+  ],
+  "roadmap_phase": 2,
+  "schema_version": 1,
+  "scorable_case_count": 58,
+  "scorer_outcome_metrics": null,
+  "scoring_refusal": "Phase 2 predictions do not match the frozen cases (missing p2_creation_10, p2_dialogue_06, p2_external_09, p2_external_11, p2_external_12, p2_inspection_05)",
+  "smoke": {
+    "case_ids": [
+      "p2_dialogue_01",
+      "p2_research_01",
+      "p2_creation_01",
+      "p2_inspection_02",
+      "p2_external_10",
+      "p2_configuration_01"
+    ],
+    "cases": [
+      {
+        "action_timing": "none",
+        "event_kinds": [
+          "model",
+          "processing"
+        ],
+        "final_status": "complete",
+        "id": "p2_dialogue_01",
+        "lane": "dialogue",
+        "model_calls": 1,
+        "models_requested": [
+          "qwen3.5:9b"
+        ],
+        "offered_tools": [],
+        "requested_effect": "none",
+        "task_contract_status": "not_attempted",
+        "tool_exposure_observed": false
+      },
+      {
+        "action_timing": "immediate",
+        "event_kinds": [
+          "model",
+          "reasoning",
+          "task contract"
+        ],
+        "final_status": "complete",
+        "id": "p2_research_01",
+        "lane": "research",
+        "model_calls": 2,
+        "models_requested": [
+          "qwen3.5:9b"
+        ],
+        "offered_tools": [],
+        "requested_effect": "read",
+        "task_contract_status": "resolved",
+        "tool_exposure_observed": false
+      },
+      {
+        "action_timing": "immediate",
+        "event_kinds": [
+          "model",
+          "processing",
+          "task contract",
+          "tool"
+        ],
+        "final_status": "complete",
+        "id": "p2_creation_01",
+        "lane": "creation",
+        "model_calls": 3,
+        "models_requested": [
+          "qwen3.5:9b"
+        ],
+        "offered_tools": [
+          "build_document",
+          "connector_list",
+          "detect_project",
+          "edit_file",
+          "generate_image",
+          "github_repository_status",
+          "google_drive_list_files",
+          "list_files",
+          "make_directory",
+          "read_file",
+          "research_question",
+          "schedule_list",
+          "search_files",
+          "system_snapshot",
+          "tool_catalog",
+          "vercel_status",
+          "write_file"
+        ],
+        "requested_effect": "write",
+        "task_contract_status": "resolved",
+        "tool_exposure_observed": true
+      },
+      {
+        "action_timing": "immediate",
+        "event_kinds": [
+          "tool"
+        ],
+        "final_status": "complete",
+        "id": "p2_inspection_02",
+        "lane": "inspection",
+        "model_calls": 0,
+        "models_requested": [],
+        "offered_tools": [],
+        "requested_effect": "read",
+        "task_contract_status": "not_attempted",
+        "tool_exposure_observed": false
+      },
+      {
+        "action_timing": "future",
+        "event_kinds": [
+          "task contract"
+        ],
+        "final_status": "complete",
+        "id": "p2_external_10",
+        "lane": "external_action",
+        "model_calls": 1,
+        "models_requested": [
+          "qwen3.5:9b"
+        ],
+        "offered_tools": [],
+        "requested_effect": "external",
+        "task_contract_status": "resolved",
+        "tool_exposure_observed": false
+      },
+      {
+        "action_timing": "immediate",
+        "event_kinds": [
+          "task contract"
+        ],
+        "final_status": "complete",
+        "id": "p2_configuration_01",
+        "lane": "configuration",
+        "model_calls": 1,
+        "models_requested": [
+          "qwen3.5:9b"
+        ],
+        "offered_tools": [],
+        "requested_effect": "read",
+        "task_contract_status": "resolved",
+        "tool_exposure_observed": false
+      }
+    ],
+    "missing_predictions": [],
+    "partial_set_refused": true,
+    "plan_gate": "tool_exposure_rate == 1.0",
+    "plan_gate_met": false,
+    "plan_gate_note": "the plan's smoke gate (tool_exposure_rate == 1.0) was missed at 0.2. The boss ruled the full run should proceed anyway: the gate exists to catch a mis-wired request recorder, and p2_creation_01 recording 17 offered schemas through the same wrapper disproves that failure mode, while the stronger wiring gate (no case reporting task_contract_status 'not_supported') passed. The remaining zero-exposure cases are agent behaviour, reported per lane and per mechanism in tool_exposure_mechanisms, not instrumentation.",
+    "task_contract_not_supported_case_ids": [],
+    "task_contract_status_counts": {
+      "not_attempted": 2,
+      "resolved": 4
+    },
+    "task_contract_wiring_ok": true,
+    "tool_exposure_observed": 1,
+    "tool_exposure_rate": 0.2,
+    "tool_exposure_required": 5,
+    "wall_seconds": 27.386
+  },
+  "structural_exclusions": [
+    {
+      "case_ids": [
+        "p2_creation_02",
+        "p2_creation_06",
+        "p2_creation_11"
+      ],
+      "count": 3,
+      "key": "execution_disabled_by_ruling",
+      "reason": "run configured with JARVIS_EXECUTION_MODE=disabled, so no execution tool is offered and an immediate execute effect cannot be evidenced; a model-authored script would otherwise run with the host user's own authority and no throwaway account exists on this host"
+    },
+    {
+      "case_ids": [
+        "p2_configuration_02",
+        "p2_configuration_03",
+        "p2_configuration_06"
+      ],
+      "count": 3,
+      "key": "configuration_write_no_capability_tool",
+      "reason": "recorded divergence 6 of jarvis/task_contract_outcome_toolbox.py: these cases request requested_effect \"write\" and the configuration lane's only write-classified tool is feature_setup_decide, whose capability_id enum covers the network and Bluetooth features only. Production's screen_companion_control is absent from MUTATING_TOOLS, so _observed_tool_effect classifies it \"read\" and it could not evidence a write even if offered; and it is never offered, because allow_screen_companion defaults to False at agent.py:7975, is filtered on at agent.py:8010, and no caller in agent.py ever passes it True. There is no production tool at all for Public Presence or proactive control."
+    },
+    {
+      "case_ids": [
+        "p2_configuration_01",
+        "p2_configuration_05"
+      ],
+      "count": 2,
+      "key": "configuration_read_no_semantically_matching_tool",
+      "reason": "recorded divergence 6 of jarvis/task_contract_outcome_toolbox.py: these cases request requested_effect \"read\" and are structurally reachable, but only through a semantically unrelated read tool - the lane has no production read tool that answers what the case actually asks."
+    }
+  ],
+  "timing": {
+    "outcome_seconds": 461.276,
+    "outcome_seconds_per_case": 7.688,
+    "resolver_seconds": 391.852,
+    "smoke_seconds": 27.386,
+    "wall_seconds": 880.59
+  },
+  "tool_exposure_by_lane": null,
+  "tool_exposure_mechanisms": {
+    "by_lane": {
+      "configuration": {
+        "deterministic_preloop_dispatch": 0,
+        "model_loop_with_empty_schemas": 4,
+        "requiring_exposure": 5,
+        "without_exposure": 4
+      },
+      "creation": {
+        "deterministic_preloop_dispatch": 0,
+        "model_loop_with_empty_schemas": 5,
+        "requiring_exposure": 9,
+        "without_exposure": 5
+      },
+      "external_action": {
+        "deterministic_preloop_dispatch": 0,
+        "model_loop_with_empty_schemas": 6,
+        "requiring_exposure": 7,
+        "without_exposure": 6
+      },
+      "inspection": {
+        "deterministic_preloop_dispatch": 4,
+        "model_loop_with_empty_schemas": 2,
+        "requiring_exposure": 9,
+        "without_exposure": 6
+      },
+      "research": {
+        "deterministic_preloop_dispatch": 0,
+        "model_loop_with_empty_schemas": 9,
+        "requiring_exposure": 10,
+        "without_exposure": 9
+      }
+    },
+    "cases_requiring_exposure": 40,
+    "cases_with_exposure": 10,
+    "cases_without_exposure": 30,
+    "deterministic_preloop_dispatch": {
+      "case_ids": [
+        "p2_inspection_01",
+        "p2_inspection_02",
+        "p2_inspection_10",
+        "p2_inspection_12"
+      ],
+      "count": 4,
+      "incomplete_case_ids": [
+        "p2_inspection_01",
+        "p2_inspection_10",
+        "p2_inspection_12"
+      ],
+      "mechanism": "zero model calls: a pre-loop deterministic path dispatched a real tool and wrote a real audit row without ever offering a schema (agent.py:14481-14487, agent.py:13756-13767). The instrument reads offered schemas, so it cannot see this work."
+    },
+    "model_loop_with_empty_schemas": {
+      "case_ids": [
+        "p2_configuration_01",
+        "p2_configuration_02",
+        "p2_configuration_03",
+        "p2_configuration_05",
+        "p2_creation_03",
+        "p2_creation_05",
+        "p2_creation_06",
+        "p2_creation_08",
+        "p2_creation_12",
+        "p2_external_01",
+        "p2_external_02",
+        "p2_external_04",
+        "p2_external_05",
+        "p2_external_07",
+        "p2_external_10",
+        "p2_inspection_03",
+        "p2_inspection_08",
+        "p2_research_01",
+        "p2_research_02",
+        "p2_research_04",
+        "p2_research_05",
+        "p2_research_07",
+        "p2_research_09",
+        "p2_research_10",
+        "p2_research_11",
+        "p2_research_12"
+      ],
+      "count": 26,
+      "incomplete_case_ids": [
+        "p2_creation_03",
+        "p2_creation_05",
+        "p2_creation_08",
+        "p2_external_01",
+        "p2_research_02",
+        "p2_research_05"
+      ],
+      "mechanism": "the model loop was entered but the schema list was empty: agent.py:15270 short-circuits to schemas = [] when casual_greeting or dialogue_only is set. dialogue_only is computed at agent.py:13307-13331 from twenty-three flags; twenty-two are deterministic prompt classifications and one (feature_configuration_requested) consults the resolved contract, and only for lane == configuration. So on a non-dialogue lane the resolved contract can say the request needs an effect while this classifier still withholds every tool. This is the agent declining to offer tools, not an instrument limitation."
+    }
+  },
+  "tool_exposure_notes": [
+    {
+      "action_timing": "none",
+      "final_status": "complete",
+      "id": "p2_dialogue_01",
+      "lane": "dialogue",
+      "model_calls": 1,
+      "models_requested": [
+        "qwen3.5:9b"
+      ],
+      "offered_tool_count": 0,
+      "offered_tools": [],
+      "task_contract_status": "not_attempted"
+    },
+    {
+      "action_timing": "none",
+      "final_status": "complete",
+      "id": "p2_dialogue_02",
+      "lane": "dialogue",
+      "model_calls": 1,
+      "models_requested": [
+        "qwen3.5:9b"
+      ],
+      "offered_tool_count": 0,
+      "offered_tools": [],
+      "task_contract_status": "not_attempted"
+    },
+    {
+      "action_timing": "none",
+      "final_status": "complete",
+      "id": "p2_dialogue_03",
+      "lane": "dialogue",
+      "model_calls": 1,
+      "models_requested": [
+        "qwen3.5:9b"
+      ],
+      "offered_tool_count": 0,
+      "offered_tools": [],
+      "task_contract_status": "not_attempted"
+    },
+    {
+      "action_timing": "none",
+      "final_status": "complete",
+      "id": "p2_dialogue_04",
+      "lane": "dialogue",
+      "model_calls": 1,
+      "models_requested": [
+        "qwen3.5:9b"
+      ],
+      "offered_tool_count": 0,
+      "offered_tools": [],
+      "task_contract_status": "not_attempted"
+    },
+    {
+      "action_timing": "none",
+      "final_status": "complete",
+      "id": "p2_dialogue_05",
+      "lane": "dialogue",
+      "model_calls": 1,
+      "models_requested": [
+        "qwen3.5:9b"
+      ],
+      "offered_tool_count": 0,
+      "offered_tools": [],
+      "task_contract_status": "resolved"
+    },
+    {
+      "action_timing": "none",
+      "final_status": "complete",
+      "id": "p2_dialogue_07",
+      "lane": "dialogue",
+      "model_calls": 1,
+      "models_requested": [
+        "qwen3.5:9b"
+      ],
+      "offered_tool_count": 0,
+      "offered_tools": [],
+      "task_contract_status": "not_attempted"
+    },
+    {
+      "action_timing": "none",
+      "final_status": "complete",
+      "id": "p2_dialogue_08",
+      "lane": "dialogue",
+      "model_calls": 1,
+      "models_requested": [
+        "qwen3.5:9b"
+      ],
+      "offered_tool_count": 0,
+      "offered_tools": [],
+      "task_contract_status": "not_attempted"
+    },
+    {
+      "action_timing": "none",
+      "final_status": "complete",
+      "id": "p2_dialogue_09",
+      "lane": "dialogue",
+      "model_calls": 1,
+      "models_requested": [
+        "qwen3.5:9b"
+      ],
+      "offered_tool_count": 0,
+      "offered_tools": [],
+      "task_contract_status": "not_attempted"
+    },
+    {
+      "action_timing": "none",
+      "final_status": "complete",
+      "id": "p2_dialogue_10",
+      "lane": "dialogue",
+      "model_calls": 1,
+      "models_requested": [
+        "qwen3.5:9b"
+      ],
+      "offered_tool_count": 0,
+      "offered_tools": [],
+      "task_contract_status": "not_attempted"
+    },
+    {
+      "action_timing": "none",
+      "final_status": "complete",
+      "id": "p2_dialogue_11",
+      "lane": "dialogue",
+      "model_calls": 1,
+      "models_requested": [
+        "qwen3.5:9b"
+      ],
+      "offered_tool_count": 0,
+      "offered_tools": [],
+      "task_contract_status": "resolved"
+    },
+    {
+      "action_timing": "none",
+      "final_status": "complete",
+      "id": "p2_dialogue_12",
+      "lane": "dialogue",
+      "model_calls": 1,
+      "models_requested": [
+        "qwen3.5:9b"
+      ],
+      "offered_tool_count": 0,
+      "offered_tools": [],
+      "task_contract_status": "not_attempted"
+    },
+    {
+      "action_timing": "immediate",
+      "final_status": "complete",
+      "id": "p2_research_01",
+      "lane": "research",
+      "model_calls": 2,
+      "models_requested": [
+        "qwen3.5:9b"
+      ],
+      "offered_tool_count": 0,
+      "offered_tools": [],
+      "task_contract_status": "resolved"
+    },
+    {
+      "action_timing": "immediate",
+      "final_status": "incomplete",
+      "id": "p2_research_02",
+      "lane": "research",
+      "model_calls": 2,
+      "models_requested": [
+        "qwen3.5:9b"
+      ],
+      "offered_tool_count": 0,
+      "offered_tools": [],
+      "task_contract_status": "resolved"
+    },
+    {
+      "action_timing": "none",
+      "final_status": "incomplete",
+      "id": "p2_research_03",
+      "lane": "research",
+      "model_calls": 1,
+      "models_requested": [
+        "qwen3.5:9b"
+      ],
+      "offered_tool_count": 0,
+      "offered_tools": [],
+      "task_contract_status": "not_attempted"
+    },
+    {
+      "action_timing": "immediate",
+      "final_status": "complete",
+      "id": "p2_research_04",
+      "lane": "research",
+      "model_calls": 1,
+      "models_requested": [
+        "qwen3.5:9b"
+      ],
+      "offered_tool_count": 0,
+      "offered_tools": [],
+      "task_contract_status": "not_attempted"
+    },
+    {
+      "action_timing": "immediate",
+      "final_status": "incomplete",
+      "id": "p2_research_05",
+      "lane": "research",
+      "model_calls": 1,
+      "models_requested": [
+        "qwen3.5:9b"
+      ],
+      "offered_tool_count": 0,
+      "offered_tools": [],
+      "task_contract_status": "not_attempted"
+    },
+    {
+      "action_timing": "none",
+      "final_status": "complete",
+      "id": "p2_research_06",
+      "lane": "research",
+      "model_calls": 0,
+      "models_requested": [],
+      "offered_tool_count": 0,
+      "offered_tools": [],
+      "task_contract_status": "not_attempted"
+    },
+    {
+      "action_timing": "immediate",
+      "final_status": "complete",
+      "id": "p2_research_07",
+      "lane": "research",
+      "model_calls": 2,
+      "models_requested": [
+        "qwen3.5:9b"
+      ],
+      "offered_tool_count": 0,
+      "offered_tools": [],
+      "task_contract_status": "resolved"
+    },
+    {
+      "action_timing": "immediate",
+      "final_status": "complete",
+      "id": "p2_research_08",
+      "lane": "research",
+      "model_calls": 5,
+      "models_requested": [
+        "qwen3.5:9b"
+      ],
+      "offered_tool_count": 13,
+      "offered_tools": [
+        "connector_list",
+        "detect_project",
+        "github_repository_status",
+        "google_drive_list_files",
+        "list_files",
+        "read_file",
+        "research_question",
+        "run_process",
+        "schedule_list",
+        "search_files",
+        "system_snapshot",
+        "tool_catalog",
+        "vercel_status"
+      ],
+      "task_contract_status": "resolved"
+    },
+    {
+      "action_timing": "immediate",
+      "final_status": "complete",
+      "id": "p2_research_09",
+      "lane": "research",
+      "model_calls": 2,
+      "models_requested": [
+        "qwen3.5:9b"
+      ],
+      "offered_tool_count": 0,
+      "offered_tools": [],
+      "task_contract_status": "resolved"
+    },
+    {
+      "action_timing": "immediate",
+      "final_status": "complete",
+      "id": "p2_research_10",
+      "lane": "research",
+      "model_calls": 1,
+      "models_requested": [
+        "qwen3.5:9b"
+      ],
+      "offered_tool_count": 0,
+      "offered_tools": [],
+      "task_contract_status": "resolved"
+    },
+    {
+      "action_timing": "immediate",
+      "final_status": "complete",
+      "id": "p2_research_11",
+      "lane": "research",
+      "model_calls": 2,
+      "models_requested": [
+        "qwen3.5:9b"
+      ],
+      "offered_tool_count": 0,
+      "offered_tools": [],
+      "task_contract_status": "resolved"
+    },
+    {
+      "action_timing": "immediate",
+      "final_status": "complete",
+      "id": "p2_research_12",
+      "lane": "research",
+      "model_calls": 2,
+      "models_requested": [
+        "qwen3.5:9b"
+      ],
+      "offered_tool_count": 0,
+      "offered_tools": [],
+      "task_contract_status": "resolved"
+    },
+    {
+      "action_timing": "immediate",
+      "final_status": "complete",
+      "id": "p2_creation_01",
+      "lane": "creation",
+      "model_calls": 3,
+      "models_requested": [
+        "qwen3.5:9b"
+      ],
+      "offered_tool_count": 17,
+      "offered_tools": [
+        "build_document",
+        "connector_list",
+        "detect_project",
+        "edit_file",
+        "generate_image",
+        "github_repository_status",
+        "google_drive_list_files",
+        "list_files",
+        "make_directory",
+        "read_file",
+        "research_question",
+        "schedule_list",
+        "search_files",
+        "system_snapshot",
+        "tool_catalog",
+        "vercel_status",
+        "write_file"
+      ],
+      "task_contract_status": "resolved"
+    },
+    {
+      "action_timing": "immediate",
+      "final_status": "complete",
+      "id": "p2_creation_02",
+      "lane": "creation",
+      "model_calls": 21,
+      "models_requested": [
+        "qwen3.5:9b"
+      ],
+      "offered_tool_count": 7,
+      "offered_tools": [
+        "detect_project",
+        "github_repository_status",
+        "list_files",
+        "read_file",
+        "run_process",
+        "search_files",
+        "tool_catalog"
+      ],
+      "task_contract_status": "not_attempted"
+    },
+    {
+      "action_timing": "immediate",
+      "final_status": "incomplete",
+      "id": "p2_creation_03",
+      "lane": "creation",
+      "model_calls": 1,
+      "models_requested": [
+        "qwen3.5:9b"
+      ],
+      "offered_tool_count": 0,
+      "offered_tools": [],
+      "task_contract_status": "resolved"
+    },
+    {
+      "action_timing": "none",
+      "final_status": "complete",
+      "id": "p2_creation_04",
+      "lane": "creation",
+      "model_calls": 1,
+      "models_requested": [
+        "qwen3.5:9b"
+      ],
+      "offered_tool_count": 0,
+      "offered_tools": [],
+      "task_contract_status": "resolved"
+    },
+    {
+      "action_timing": "immediate",
+      "final_status": "incomplete",
+      "id": "p2_creation_05",
+      "lane": "creation",
+      "model_calls": 2,
+      "models_requested": [
+        "qwen3.5:9b"
+      ],
+      "offered_tool_count": 0,
+      "offered_tools": [],
+      "task_contract_status": "resolved"
+    },
+    {
+      "action_timing": "immediate",
+      "final_status": "complete",
+      "id": "p2_creation_06",
+      "lane": "creation",
+      "model_calls": 1,
+      "models_requested": [
+        "qwen3.5:9b"
+      ],
+      "offered_tool_count": 0,
+      "offered_tools": [],
+      "task_contract_status": "not_attempted"
+    },
+    {
+      "action_timing": "immediate",
+      "final_status": "complete",
+      "id": "p2_creation_07",
+      "lane": "creation",
+      "model_calls": 19,
+      "models_requested": [
+        "qwen3.5:9b"
+      ],
+      "offered_tool_count": 2,
+      "offered_tools": [
+        "web_fetch",
+        "web_search"
+      ],
+      "task_contract_status": "not_attempted"
+    },
+    {
+      "action_timing": "immediate",
+      "final_status": "incomplete",
+      "id": "p2_creation_08",
+      "lane": "creation",
+      "model_calls": 2,
+      "models_requested": [
+        "qwen3.5:9b"
+      ],
+      "offered_tool_count": 0,
+      "offered_tools": [],
+      "task_contract_status": "resolved"
+    },
+    {
+      "action_timing": "none",
+      "final_status": "incomplete",
+      "id": "p2_creation_09",
+      "lane": "creation",
+      "model_calls": 21,
+      "models_requested": [
+        "qwen3.5:9b"
+      ],
+      "offered_tool_count": 10,
+      "offered_tools": [
+        "detect_project",
+        "edit_file",
+        "github_repository_status",
+        "list_files",
+        "make_directory",
+        "read_file",
+        "run_process",
+        "search_files",
+        "tool_catalog",
+        "write_file"
+      ],
+      "task_contract_status": "not_attempted"
+    },
+    {
+      "action_timing": "immediate",
+      "final_status": "incomplete",
+      "id": "p2_creation_11",
+      "lane": "creation",
+      "model_calls": 22,
+      "models_requested": [
+        "qwen3.5:9b"
+      ],
+      "offered_tool_count": 13,
+      "offered_tools": [
+        "connector_list",
+        "detect_project",
+        "github_repository_status",
+        "google_drive_list_files",
+        "list_files",
+        "read_file",
+        "research_question",
+        "run_process",
+        "schedule_list",
+        "search_files",
+        "system_snapshot",
+        "tool_catalog",
+        "vercel_status"
+      ],
+      "task_contract_status": "resolved"
+    },
+    {
+      "action_timing": "immediate",
+      "final_status": "complete",
+      "id": "p2_creation_12",
+      "lane": "creation",
+      "model_calls": 1,
+      "models_requested": [
+        "qwen3.5:9b"
+      ],
+      "offered_tool_count": 0,
+      "offered_tools": [],
+      "task_contract_status": "resolved"
+    },
+    {
+      "action_timing": "immediate",
+      "final_status": "incomplete",
+      "id": "p2_inspection_01",
+      "lane": "inspection",
+      "model_calls": 0,
+      "models_requested": [],
+      "offered_tool_count": 0,
+      "offered_tools": [],
+      "task_contract_status": "not_attempted"
+    },
+    {
+      "action_timing": "immediate",
+      "final_status": "complete",
+      "id": "p2_inspection_02",
+      "lane": "inspection",
+      "model_calls": 0,
+      "models_requested": [],
+      "offered_tool_count": 0,
+      "offered_tools": [],
+      "task_contract_status": "not_attempted"
+    },
+    {
+      "action_timing": "immediate",
+      "final_status": "complete",
+      "id": "p2_inspection_03",
+      "lane": "inspection",
+      "model_calls": 1,
+      "models_requested": [
+        "qwen3.5:9b"
+      ],
+      "offered_tool_count": 0,
+      "offered_tools": [],
+      "task_contract_status": "resolved"
+    },
+    {
+      "action_timing": "none",
+      "final_status": "complete",
+      "id": "p2_inspection_04",
+      "lane": "inspection",
+      "model_calls": 1,
+      "models_requested": [
+        "qwen3.5:9b"
+      ],
+      "offered_tool_count": 0,
+      "offered_tools": [],
+      "task_contract_status": "resolved"
+    },
+    {
+      "action_timing": "immediate",
+      "final_status": "complete",
+      "id": "p2_inspection_06",
+      "lane": "inspection",
+      "model_calls": 2,
+      "models_requested": [
+        "qwen3.5:9b"
+      ],
+      "offered_tool_count": 16,
+      "offered_tools": [
+        "computer_list_files",
+        "computer_read_file",
+        "computer_storage_report",
+        "connector_list",
+        "detect_project",
+        "github_repository_status",
+        "google_drive_list_files",
+        "list_files",
+        "read_file",
+        "research_question",
+        "schedule_list",
+        "search_files",
+        "system_snapshot",
+        "tool_catalog",
+        "vercel_status",
+        "windows_list_apps"
+      ],
+      "task_contract_status": "resolved"
+    },
+    {
+      "action_timing": "immediate",
+      "final_status": "complete",
+      "id": "p2_inspection_07",
+      "lane": "inspection",
+      "model_calls": 3,
+      "models_requested": [
+        "qwen3.5:9b"
+      ],
+      "offered_tool_count": 12,
+      "offered_tools": [
+        "connector_list",
+        "detect_project",
+        "github_repository_status",
+        "google_drive_list_files",
+        "list_files",
+        "read_file",
+        "research_question",
+        "schedule_list",
+        "search_files",
+        "system_snapshot",
+        "tool_catalog",
+        "vercel_status"
+      ],
+      "task_contract_status": "resolved"
+    },
+    {
+      "action_timing": "immediate",
+      "final_status": "complete",
+      "id": "p2_inspection_08",
+      "lane": "inspection",
+      "model_calls": 1,
+      "models_requested": [
+        "qwen3.5:9b"
+      ],
+      "offered_tool_count": 0,
+      "offered_tools": [],
+      "task_contract_status": "not_attempted"
+    },
+    {
+      "action_timing": "none",
+      "final_status": "complete",
+      "id": "p2_inspection_09",
+      "lane": "inspection",
+      "model_calls": 1,
+      "models_requested": [
+        "qwen3.5:9b"
+      ],
+      "offered_tool_count": 0,
+      "offered_tools": [],
+      "task_contract_status": "not_attempted"
+    },
+    {
+      "action_timing": "immediate",
+      "final_status": "incomplete",
+      "id": "p2_inspection_10",
+      "lane": "inspection",
+      "model_calls": 0,
+      "models_requested": [],
+      "offered_tool_count": 0,
+      "offered_tools": [],
+      "task_contract_status": "not_attempted"
+    },
+    {
+      "action_timing": "immediate",
+      "final_status": "incomplete",
+      "id": "p2_inspection_11",
+      "lane": "inspection",
+      "model_calls": 6,
+      "models_requested": [
+        "qwen3.5:9b"
+      ],
+      "offered_tool_count": 12,
+      "offered_tools": [
+        "connector_list",
+        "detect_project",
+        "github_repository_status",
+        "google_drive_list_files",
+        "list_files",
+        "read_file",
+        "research_question",
+        "schedule_list",
+        "search_files",
+        "system_snapshot",
+        "tool_catalog",
+        "vercel_status"
+      ],
+      "task_contract_status": "not_attempted"
+    },
+    {
+      "action_timing": "immediate",
+      "final_status": "incomplete",
+      "id": "p2_inspection_12",
+      "lane": "inspection",
+      "model_calls": 0,
+      "models_requested": [],
+      "offered_tool_count": 0,
+      "offered_tools": [],
+      "task_contract_status": "not_attempted"
+    },
+    {
+      "action_timing": "immediate",
+      "final_status": "incomplete",
+      "id": "p2_external_01",
+      "lane": "external_action",
+      "model_calls": 2,
+      "models_requested": [
+        "qwen3.5:9b"
+      ],
+      "offered_tool_count": 0,
+      "offered_tools": [],
+      "task_contract_status": "resolved"
+    },
+    {
+      "action_timing": "immediate",
+      "final_status": "complete",
+      "id": "p2_external_02",
+      "lane": "external_action",
+      "model_calls": 2,
+      "models_requested": [
+        "qwen3.5:9b"
+      ],
+      "offered_tool_count": 0,
+      "offered_tools": [],
+      "task_contract_status": "fallback"
+    },
+    {
+      "action_timing": "none",
+      "final_status": "complete",
+      "id": "p2_external_03",
+      "lane": "external_action",
+      "model_calls": 1,
+      "models_requested": [
+        "qwen3.5:9b"
+      ],
+      "offered_tool_count": 0,
+      "offered_tools": [],
+      "task_contract_status": "resolved"
+    },
+    {
+      "action_timing": "immediate",
+      "final_status": "complete",
+      "id": "p2_external_04",
+      "lane": "external_action",
+      "model_calls": 1,
+      "models_requested": [
+        "qwen3.5:9b"
+      ],
+      "offered_tool_count": 0,
+      "offered_tools": [],
+      "task_contract_status": "resolved"
+    },
+    {
+      "action_timing": "immediate",
+      "final_status": "complete",
+      "id": "p2_external_05",
+      "lane": "external_action",
+      "model_calls": 1,
+      "models_requested": [
+        "qwen3.5:9b"
+      ],
+      "offered_tool_count": 0,
+      "offered_tools": [],
+      "task_contract_status": "not_attempted"
+    },
+    {
+      "action_timing": "immediate",
+      "final_status": "incomplete",
+      "id": "p2_external_06",
+      "lane": "external_action",
+      "model_calls": 22,
+      "models_requested": [
+        "qwen3.5:9b"
+      ],
+      "offered_tool_count": 10,
+      "offered_tools": [
+        "detect_project",
+        "edit_file",
+        "github_repository_status",
+        "list_files",
+        "make_directory",
+        "read_file",
+        "run_process",
+        "search_files",
+        "tool_catalog",
+        "write_file"
+      ],
+      "task_contract_status": "resolved"
+    },
+    {
+      "action_timing": "immediate",
+      "final_status": "complete",
+      "id": "p2_external_07",
+      "lane": "external_action",
+      "model_calls": 1,
+      "models_requested": [
+        "qwen3.5:9b"
+      ],
+      "offered_tool_count": 0,
+      "offered_tools": [],
+      "task_contract_status": "resolved"
+    },
+    {
+      "action_timing": "none",
+      "final_status": "complete",
+      "id": "p2_external_08",
+      "lane": "external_action",
+      "model_calls": 1,
+      "models_requested": [
+        "qwen3.5:9b"
+      ],
+      "offered_tool_count": 0,
+      "offered_tools": [],
+      "task_contract_status": "resolved"
+    },
+    {
+      "action_timing": "future",
+      "final_status": "complete",
+      "id": "p2_external_10",
+      "lane": "external_action",
+      "model_calls": 1,
+      "models_requested": [
+        "qwen3.5:9b"
+      ],
+      "offered_tool_count": 0,
+      "offered_tools": [],
+      "task_contract_status": "resolved"
+    },
+    {
+      "action_timing": "immediate",
+      "final_status": "complete",
+      "id": "p2_configuration_01",
+      "lane": "configuration",
+      "model_calls": 1,
+      "models_requested": [
+        "qwen3.5:9b"
+      ],
+      "offered_tool_count": 0,
+      "offered_tools": [],
+      "task_contract_status": "resolved"
+    },
+    {
+      "action_timing": "immediate",
+      "final_status": "complete",
+      "id": "p2_configuration_02",
+      "lane": "configuration",
+      "model_calls": 2,
+      "models_requested": [
+        "qwen3.5:9b"
+      ],
+      "offered_tool_count": 0,
+      "offered_tools": [],
+      "task_contract_status": "resolved"
+    },
+    {
+      "action_timing": "immediate",
+      "final_status": "complete",
+      "id": "p2_configuration_03",
+      "lane": "configuration",
+      "model_calls": 1,
+      "models_requested": [
+        "qwen3.5:9b"
+      ],
+      "offered_tool_count": 0,
+      "offered_tools": [],
+      "task_contract_status": "not_attempted"
+    },
+    {
+      "action_timing": "none",
+      "final_status": "complete",
+      "id": "p2_configuration_04",
+      "lane": "configuration",
+      "model_calls": 1,
+      "models_requested": [
+        "qwen3.5:9b"
+      ],
+      "offered_tool_count": 0,
+      "offered_tools": [],
+      "task_contract_status": "resolved"
+    },
+    {
+      "action_timing": "immediate",
+      "final_status": "complete",
+      "id": "p2_configuration_05",
+      "lane": "configuration",
+      "model_calls": 1,
+      "models_requested": [
+        "qwen3.5:9b"
+      ],
+      "offered_tool_count": 0,
+      "offered_tools": [],
+      "task_contract_status": "not_attempted"
+    },
+    {
+      "action_timing": "immediate",
+      "final_status": "complete",
+      "id": "p2_configuration_06",
+      "lane": "configuration",
+      "model_calls": 4,
+      "models_requested": [
+        "qwen3.5:9b"
+      ],
+      "offered_tool_count": 1,
+      "offered_tools": [
+        "feature_setup_status"
+      ],
+      "task_contract_status": "resolved"
+    }
+  ],
+  "verified_workflow_completion": null
+}

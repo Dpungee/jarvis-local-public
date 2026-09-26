@@ -1,7 +1,7 @@
-# JARVIS Local
+# JARVIS — Local AI Agent Platform
 
 <p align="center">
-  <strong>Windows-first, local-first personal AI with automatic model routing, provenance-aware memory, bounded tools, and approval-gated automation.</strong>
+  <strong>Local-first AI agent platform with persistent chats, multi-agent coordination, governed memory, and permission-scoped tools.</strong>
 </p>
 
 <p align="center">
@@ -12,11 +12,15 @@
   <img alt="Status: public preview" src="https://img.shields.io/badge/status-public%20preview-f5a623">
 </p>
 
-JARVIS Local is an alpha personal-agent runtime for supervised Windows workflows. It
-supports local and optional cloud or subscription model providers, source-grounded
-research, purpose-bound specialists, provenance-aware memory, and bounded local or
-external tools. It is not an OS sandbox, unrestricted administrator, professional
-security product, or conscious system.
+JARVIS is a Windows-first, local-first AI agent platform. Its Agent Hub combines
+persistent chats and project folders with permission-scoped tools, multi-agent
+coordination, and governed memory. Agents can research, build, and work with local
+projects through verified, approval-gated execution—not just return chat text.
+Local models and optional cloud or subscription providers are supported.
+
+This is an alpha platform for supervised workflows, not an OS sandbox, unrestricted
+administrator, professional security product, or conscious system. The repository
+URL and the `jarvis-local` Python package name remain unchanged for compatibility.
 
 > [!IMPORTANT]
 > Jarvis is powerful software, not an unrestricted administrator. Host execution,
@@ -28,7 +32,8 @@ security product, or conscious system.
 
 | Capability | What it means in practice |
 | --- | --- |
-| Natural conversation | Lightweight dialogue stays out of tool and approval loops. |
+| Chat-first workspace | Persistent chats and project folders, with task activity, results, and approvals inline. |
+| Multi-agent coordination | Stable agent identities, scoped permissions, mailboxes, rooms, and task ownership. |
 | Automatic model routing | Choose a provider; Jarvis selects the task profile and specialist. |
 | Verifiable work | Research requires fetched sources, code paths require outcome checks, and failures remain visible. |
 | Durable memory | Preferences, claims, lessons, and retrieval outcomes retain provenance and confidence metadata. |
@@ -91,7 +96,9 @@ records.
 
 Read [Screen Companion](docs/SCREEN_COMPANION.md) for the active-window privacy model
 and [Embodied Presence](docs/EMBODIED_PRESENCE.md) for the companion/avatar architecture
-and staged activation plan.
+and staged activation plan. Companion can also teach a workflow from an explicit,
+bounded active-window recording: it analyzes in-memory keyframes twice, then requires
+the operator to review, edit, create, or delete the proposed declarative skill.
 
 ## Requirements
 
@@ -105,9 +112,8 @@ and staged activation plan.
 
 ## Install the public preview
 
-For the easiest supported path, use a Codex CLI or Claude CLI subscription login. The
-v0.6.3 first-run wizard configures those subscription providers; Ollama is supported,
-but its local-model selection is still a manual setup path.
+The first-run wizard can keep Jarvis fully local with Ollama or configure a Codex CLI
+or Claude CLI subscription login. It stores provider routing, never credentials.
 
 1. **Exact release source archive:** for the published `v0.6.3` public preview,
    download that exact tag or its source archive from the
@@ -120,7 +126,7 @@ but its local-model selection is still a manual setup path.
    libraries to the Python environment currently on `PATH`; it does not create a
    separate virtual environment. Installation and any provider download can take a few
    minutes.
-4. A new installation offers **Codex CLI**, **Claude
+4. A new installation offers **Ollama**, **Codex CLI**, **Claude
    CLI**, or both and stores provider routing—not credentials. It then reviews each
    optional network, Bluetooth, defensive-monitoring, and security-popup capability;
    choose **Set up**, **Not now**, or **Keep disabled** for every item.
@@ -218,13 +224,24 @@ python -m jarvis selftest --full
 python -m jarvis training cai-status
 ```
 
+The native desktop's gear menu can switch its foreground Agent immediately between
+local Ollama, Claude through Claude CLI, ChatGPT through Codex CLI, or a split
+Claude/ChatGPT route. Jarvis checks the required CLI sign-in before changing a
+subscription route and keeps vendor credentials outside its settings files. A separate
+background worker reads the saved route on its next restart.
+
 ## Isolated execution backend
 
 Jarvis keeps the existing contained host executor by default. To run the same
 allowlisted workspace commands in an ephemeral, networkless Docker container instead,
 install and start Docker Desktop, then set `JARVIS_EXECUTION_BACKEND=docker`.
 
-Docker mode fails closed if the CLI or daemon is unavailable. It does not weaken the
+The Companion indicator reaches Presence only through an ACL-protected named pipe; see
+[docs/LOCAL_BROKER.md](docs/LOCAL_BROKER.md).
+
+`jarvis doctor` and the Presence status payload (`execution.backend`, `execution.os_sandbox`)
+report which backend is active and state plainly that the host backend is not an OS
+sandbox. Docker mode fails closed if the CLI or daemon is unavailable. It does not weaken the
 command policy or approval gate, and it refuses to mount workspaces containing
 credential/configuration paths such as `.env`, `.git`, or symlinks. The initial pinned
 sandbox image supports Python execution; other build runtimes stay unavailable until
@@ -333,6 +350,8 @@ Consequential tools create exact, one-shot approval requests. Inspect them with 
 
 With `JARVIS_EXECUTION_MODE=trusted-host` and `JARVIS_COMPUTER_ACCESS=trusted-desktop`, Jarvis can inventory bounded registered desktop applications and signed Start-menu package activations such as Calculator, then launch an exact selected app after one-shot approval. It can also open an exact approved public URL in the default browser. Shells, installers, updater/helper binaries, and system-management utilities are excluded. The high-level `photoshop_remove_background` adapter binds the installed COM-registered Photoshop version, approved input hash, PNG output, and any deterministic backup path; processes a temporary byte-exact source snapshot; verifies the exported PNG; and never saves over the source image. For other operator-requested workflows, `desktop_interact` sends one explicitly approved batch of bounded clicks, text, hotkeys, or scrolling to the exact foreground window. It binds the window identity and bounds into the approval, rechecks them before every action, blocks sensitive windows and credential-shaped text, and stops if the window changes.
 
+Presence shows a privacy/access selector directly in each chat composer, including split-view chats. **Read only** disables writes, program execution, desktop/private-computer access, and external accounts for that request. **Workspace** keeps configured project tools available while blocking private-computer, desktop/browser control, and external-account tools. **Full access** permits the installation's configured trusted-desktop and external capabilities, but it cannot widen the startup configuration and never replaces exact one-shot approval for consequential actions. The selection is stored locally per chat; after a Presence restart, recovered queued work falls back to Workspace rather than replaying broader authority implicitly.
+
 Screen Companion is an opt-in Presence panel for active-window help. It starts disabled. **Observe** retains only redacted foreground application/title metadata in process memory and performs no action. **Suggest** may capture only the active window into transient memory and queue advice; raw pixels are never written to SQLite. **Collaborate** enables operator-authored per-app/title routines, but it does not weaken tool policy or approvals. Credential managers and sensitive-looking login, banking, private-browsing, password, and wallet windows are excluded automatically; extra apps can be excluded in the UI. The panel provides immediate pause, manual suggestion, rule cooldown, and forget controls. Queued routine jobs use Presence's durable job ledger; rule receipts store only hashes and status, not screen contents.
 
 Run `install_worker.ps1` to start the worker automatically when you sign in. `uninstall_worker.ps1` removes only that owned scheduled task; neither script deletes files or memory. Custom `JARVIS_DATA` locations are preserved in the task definition and work during uninstall. A kernel-backed lock permits exactly one continuous worker pool per data directory, while `JARVIS_WORKER_CONCURRENCY` bounds the independent SQLite-leased agent slots inside that pool. Every slot owns its own database connection and Agent instance; a task carries its project, purpose-bound specialist identity, and fixed model profile. Ordinary recurring learning is assigned to Archivist on the configured reasoning profile; code, cyber, network, and operations assignments use their fixed profiles. Local-model workers yield to foreground requests to avoid multiplying PC load; an all-cloud configuration can run foreground and background agents together.
@@ -419,8 +438,45 @@ is required; Jarvis still controls effort, context, tools, and verification:
 - All profiles use a fixed 16K context by default, avoiding unnecessary context-size model reloads on supported local runtimes.
 - Ollama keeps the selected model loaded for `JARVIS_OLLAMA_KEEP_ALIVE` (30 minutes by default) after each request to avoid repeated model-load delays. `JARVIS_OLLAMA_PRELOAD=true` pays the cold-load cost during Agent startup instead of on the first task.
 - The manual `deep` profile uses `JARVIS_DEEP_CONTEXT_LENGTH` (4K by default) and `JARVIS_OLLAMA_DEEP_KEEP_ALIVE=0`, releasing the large model after every request instead of leaving CPU RAM and VRAM occupied.
+- Tool-free Ollama replies stream as bounded token deltas, so interactive local conversation can display the first text before the full generation finishes. Cancellation closes the active response, retries stop after the first visible delta to prevent duplicated text, and tool or structured-output turns remain buffered until their deterministic contract can be checked.
 - `JARVIS_OLLAMA_MAX_OUTPUT_TOKENS=2048` maps to Ollama's `num_predict` for every local generation. Ollama otherwise permits unbounded generation, so this cap limits reply/tool-call latency and CPU spill without changing the separate input context.
 - `JARVIS_OLLAMA_NUM_THREAD` places an explicit ceiling on CPU inference threads. It is unset by default because the best value is hardware-specific.
+
+### Optional local coding library
+
+The disabled-by-default Local Coding Context library can make a smaller Ollama
+coding model aware of relevant patterns from prior projects without changing model
+weights or loading another model. It uses a separate local SQLite full-text/symbol
+index and only reads tracked source from Git projects that the operator explicitly
+registers:
+
+```powershell
+python -m jarvis.local_coding_context register example-app C:\Projects\example-app
+python -m jarvis.local_coding_context index example-app
+python -m jarvis.local_coding_context status
+python -m jarvis.local_coding_context search bounded retry backoff
+```
+
+Start with `JARVIS_LOCAL_CODING_CONTEXT=shadow`. Shadow lookups record count and
+latency metadata but add nothing to a prompt. After reviewing search results and
+latency, set the mode to `enabled`; only Ollama requests that the deterministic
+router marked as coding intent can then receive the bounded context. That marker
+also follows a bounded coding job that starts on, or a coding job that falls back
+to, the local fast model. Non-coding fast/reasoning/deep, cloud, subscription,
+memory, routing, tool, approval, and verification behavior remains unchanged.
+`JARVIS_LOCAL_CODING_CONTEXT_MAX_TOKENS` defaults to 2,048 and accepts 256–4,096.
+The runtime reduces or omits that block when the active Ollama context has less
+room, and disables it during a sealed strategy-transfer trial.
+
+Indexing rejects untracked files, links, hard links, binaries, files over 256 KiB,
+secret-shaped content, private identifiers, dependency/build/data directories, and
+unsupported file types. Each excerpt keeps its project slug, relative path, file
+digest, checked-out commit anchor, and line range and is labeled as untrusted
+tracked source whose test status is not attested. A digest covers the exact current
+working-tree bytes; uncommitted bytes are not claimed to be present in the commit.
+See the
+[Local Coding Context threat model](docs/LOCAL_CODING_CONTEXT_THREAT_MODEL.md) for
+the complete boundary, limits, rollback, and evaluation gates.
 
 ## Cybersecurity and network engineering specialist
 

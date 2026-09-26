@@ -439,6 +439,45 @@ class AgentCapabilityRoutingTests(unittest.TestCase):
             "capability claim contradicted - retrying an already offered tool"
         ), 1)
 
+    def test_filesystem_or_terminal_disclaimer_retries_the_offered_write_tool(self) -> None:
+        toolbox = CapabilityToolBox()
+        arguments = {
+            "path": "notes/local-llm-tuning.md",
+            "content": "# Local LLM tuning\n",
+        }
+        client = ScriptedClient([
+            FakeResponse(content=(
+                "I cannot directly run code on your computer because I don't have "
+                "access to your local file system or a terminal environment to execute "
+                "Python scripts."
+            )),
+            FakeResponse(tool_calls=[tool_call("write_file", arguments)]),
+            FakeResponse(content="Created the requested notes file."),
+        ])
+        events: list[str] = []
+        agent = Agent(
+            self.config,
+            self.memory,
+            events.append,
+            client=client,
+            coding_review=False,
+            coding_planning=False,
+        )
+        agent.toolbox = toolbox
+
+        result = agent.run("Create a notes file summarizing local LLM tuning.")
+
+        self.assertEqual(result.status, "complete")
+        self.assertIn(
+            "capability claim contradicted - retrying an already offered tool",
+            events,
+        )
+        recovered = {
+            item["function"]["name"] for item in client.requests[1]["tools"]
+        }
+        self.assertIn("write_file", recovered)
+        self.assertEqual(toolbox.calls, [("write_file", arguments)])
+
     def test_genuine_missing_capability_keeps_bounded_catalog_recovery(self) -> None:
         toolbox = CapabilityToolBox()
         client = ScriptedClient([

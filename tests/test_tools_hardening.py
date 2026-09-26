@@ -45,7 +45,10 @@ EXPECTED_SENSITIVE_TOOLS = frozenset({
     "connector_install",
     "connector_call",
     "feature_setup_decide",
+    "browser_confirm_click",
 })
+# Sensitive tools a host (the Agent Hub) adds to the toolbox; the gate is the same.
+HOST_INJECTED_SENSITIVE_TOOLS = frozenset({"browser_confirm_click"})
 
 
 class ToolCapabilityHardeningTests(unittest.TestCase):
@@ -307,7 +310,7 @@ class ToolCapabilityHardeningTests(unittest.TestCase):
             "build_document_preview", "image_visual_qa", "image_generation_status",
             "generate_image", "edit_attached_image",
             "start_process", "process_status", "process_logs", "stop_process",
-            "http_health", "remember", "recall", "session_search", "skill_list", "skill_read",
+            "http_health", "web_app_check", "remember", "recall", "session_search", "skill_list", "skill_read",
             "screen_companion_status", "screen_companion_control",
             "schedule_create", "schedule_list", "schedule_set_enabled", "schedule_delete",
             "skill_create", "skill_update", "skill_github_sync",
@@ -330,7 +333,7 @@ class ToolCapabilityHardeningTests(unittest.TestCase):
         }
         execution_tools = {
             "run_process", "start_process", "process_status", "process_logs",
-            "stop_process", "http_health",
+            "stop_process", "http_health", "web_app_check",
         }
         cases = (
             ("autonomous", "trusted-host", all_tools),
@@ -559,7 +562,8 @@ class ToolCapabilityHardeningTests(unittest.TestCase):
             "resolved_export_mime_type": None,
         })
         self.assertEqual(set(SENSITIVE_ACTIONS), EXPECTED_SENSITIVE_TOOLS)
-        self.assertTrue(EXPECTED_SENSITIVE_TOOLS.issubset(toolbox.tools))
+        self.assertTrue((EXPECTED_SENSITIVE_TOOLS - HOST_INJECTED_SENSITIVE_TOOLS).issubset(toolbox.tools))
+        toolbox.browser_snapshot = dict
         schema = {
             "type": "object",
             "properties": {"target": {"type": "string"}},
@@ -571,7 +575,8 @@ class ToolCapabilityHardeningTests(unittest.TestCase):
             SENSITIVE_ACTIONS.items(), start=1
         ):
             with self.subTest(tool=name):
-                self.assertIn(name, toolbox.tools)
+                if name not in HOST_INJECTED_SENSITIVE_TOOLS:
+                    self.assertIn(name, toolbox.tools)
                 calls = []
 
                 def handler(target, *, _name=name, _calls=calls):

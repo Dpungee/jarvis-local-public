@@ -1,0 +1,584 @@
+{
+  "benchmark": "calibration",
+  "created_at": "2026-09-05T03:02:39.686433+00:00",
+  "base": {
+    "kind": "phase2_base_file_manifest",
+    "manifest_sha256": "6616688bfcc072eefffc2708c5846e53f556d8d597b972465f84e310b8f3f9b1",
+    "base_commit": "35d5344",
+    "branch": "claude/roadmap-phase1",
+    "manifest_file_count": 364,
+    "committed": false
+  },
+  "provider": {
+    "name": "ollama",
+    "version": "0.32.15"
+  },
+  "configuration_class": {
+    "summary": "isolated JARVIS_WORKSPACE/JARVIS_DATA; ollama qwen3.5:9b pinned on every model profile; cloud providers, host execution, desktop access and external access all disabled; one fresh process and one fresh conversation per case; every case verified against seeded or computed ground truth",
+    "switches": {
+      "JARVIS_CLOUD_ENABLED": "false",
+      "JARVIS_OLLAMA_ENABLED": "true",
+      "JARVIS_EXTERNAL_ACCESS": "disabled",
+      "JARVIS_EXECUTION_MODE": "disabled",
+      "JARVIS_COMPUTER_ACCESS": "disabled",
+      "JARVIS_MODEL": "qwen3.5:9b",
+      "JARVIS_FAST_MODEL": "qwen3.5:9b",
+      "JARVIS_REASONING_MODEL": "qwen3.5:9b",
+      "JARVIS_CODING_MODEL": "qwen3.5:9b",
+      "JARVIS_DEEP_MODEL": "qwen3.5:9b",
+      "JARVIS_LEARNING_MODEL": "qwen3.5:9b"
+    }
+  },
+  "command": "python scripts/run_phase2_calibration.py sandbox --root <sandbox> --per-family 20 --run-out <run-1> ; python scripts/run_phase2_calibration.py sandbox --root <sandbox> --per-family 20 --retry-from <run-1> --run-out <run-2> ; python scripts/run_phase2_calibration.py merge-run --run-file <run-1> --run-file <run-2> --out <merged> ; python scripts/run_phase2_calibration.py report --database <sandbox>/data/jarvis.db --run-file <merged> --evidence-out docs/evidence --manifest-file <phase 2 base manifest>",
+  "platform": {
+    "os": "Windows",
+    "python": "3.13.7"
+  },
+  "result": "3 calibrated families (conversation, file_ops, security_analysis); 60 counted outcomes Read with care: conversation and security_analysis have no evidence to check, so the runtime records a finished turn as complete and the observed success rate is 1.0 by construction - it is calibration about completing the turn, not about being correct. initiative_eligibility counts calibrated families across all eleven PREDICTION_FAMILIES, so 'three calibrated families' does not mean three families with real-world effects; see docs/CALIBRATION_RUNBOOK.md. 1 prediction(s) in this database are unresolved and therefore uncounted by competence(): a case killed at the per-case timeout has already recorded its prediction but the agent never reaches the run boundary that would resolve it, which is the first attempt at conversation_pow_a (re-run successfully afterwards).",
+  "known_limitations": [
+    "Read-only report over a database copy; the source file is never opened for writing.",
+    "Only interactive, worker and proactive outcomes are counted; practice and companion origins are excluded by Memory.competence.",
+    "Sandbox rows are not the operator's rows and do not move his initiative gate; see docs/CALIBRATION_RUNBOOK.md (plan G-2/G-4).",
+    "One local model on one host; the numbers are a historical observation, not a product guarantee.",
+    "For conversation and security_analysis the runtime's verification is not_applicable, so a finished turn is recorded complete whether or not the answer was correct. This harness's independent verification is reported separately for exactly that reason.",
+    "Only families that need no additional capability were exercised: file_ops, conversation, security_analysis. Coding families need JARVIS_EXECUTION_MODE=trusted-host and research families need JARVIS_EXTERNAL_ACCESS=trusted-external.",
+    "The agreement-with-ground-truth figure is an upper bound for conversation and security_analysis: those families are graded from the reply text, the answer verifier was tightened after this run to reject a denial standing next to the expected token, and replies are not stored, so an earlier reply that stated the right number only to disown it may have been counted as agreement.",
+    "The outcome rows in this run were produced before the boundary-comparison fix in Memory.calibration_gate (calibration error is now rounded to nine decimals before the strict comparison). No row changed; the only difference is that a family whose error is exactly the 0.15 tolerance is no longer refused by floating-point representation alone."
+  ],
+  "sandbox_disclaimer": "These rows were produced in an isolated JARVIS_DATA sandbox. They are not the operator's rows and they do not move the operator's initiative gate, which reads his own database.",
+  "report": {
+    "report_version": 1,
+    "generated_at": "2026-09-05T03:02:39.660262+00:00",
+    "gate_source": "jarvis.proactive.calibrated_meta_gate",
+    "threshold_source": "jarvis/proactive.py",
+    "thresholds": {
+      "minimum_attempts": 20,
+      "maximum_brier": 0.25,
+      "maximum_calibration_error": 0.15
+    },
+    "counted_origins": [
+      "interactive",
+      "proactive",
+      "worker"
+    ],
+    "excluded_origins": [
+      "companion_action",
+      "companion_suggestion",
+      "practice"
+    ],
+    "families": [
+      {
+        "family": "code_build",
+        "allowed": false,
+        "attempts": 0,
+        "brier": null,
+        "mean_predicted": null,
+        "observed_success": null,
+        "evidence_applicable": 0,
+        "evidence_rate": null,
+        "calibration_error": null,
+        "requirements": {
+          "minimum_attempts": 20,
+          "maximum_brier": 0.25,
+          "maximum_calibration_error": 0.15,
+          "minimum_success_rate": 0.7,
+          "minimum_evidence_rate": 0.7
+        },
+        "reasons": [
+          "requires 20 outcomes; has 0",
+          "Brier score must be <= 0.25; unknown",
+          "calibration error must be <= 0.15; unknown",
+          "observed success must be >= 0.70; unknown"
+        ],
+        "authority": [],
+        "never_authorizes": [
+          "model_routing",
+          "tool_exposure",
+          "approval_bypass",
+          "verification_changes",
+          "safety_policy_changes"
+        ],
+        "mean_steps": null,
+        "max_steps": null,
+        "top_failures": [],
+        "drift_signals": []
+      },
+      {
+        "family": "code_fix",
+        "allowed": false,
+        "attempts": 0,
+        "brier": null,
+        "mean_predicted": null,
+        "observed_success": null,
+        "evidence_applicable": 0,
+        "evidence_rate": null,
+        "calibration_error": null,
+        "requirements": {
+          "minimum_attempts": 20,
+          "maximum_brier": 0.25,
+          "maximum_calibration_error": 0.15,
+          "minimum_success_rate": 0.7,
+          "minimum_evidence_rate": 0.7
+        },
+        "reasons": [
+          "requires 20 outcomes; has 0",
+          "Brier score must be <= 0.25; unknown",
+          "calibration error must be <= 0.15; unknown",
+          "observed success must be >= 0.70; unknown"
+        ],
+        "authority": [],
+        "never_authorizes": [
+          "model_routing",
+          "tool_exposure",
+          "approval_bypass",
+          "verification_changes",
+          "safety_policy_changes"
+        ],
+        "mean_steps": null,
+        "max_steps": null,
+        "top_failures": [],
+        "drift_signals": []
+      },
+      {
+        "family": "code_refactor",
+        "allowed": false,
+        "attempts": 0,
+        "brier": null,
+        "mean_predicted": null,
+        "observed_success": null,
+        "evidence_applicable": 0,
+        "evidence_rate": null,
+        "calibration_error": null,
+        "requirements": {
+          "minimum_attempts": 20,
+          "maximum_brier": 0.25,
+          "maximum_calibration_error": 0.15,
+          "minimum_success_rate": 0.7,
+          "minimum_evidence_rate": 0.7
+        },
+        "reasons": [
+          "requires 20 outcomes; has 0",
+          "Brier score must be <= 0.25; unknown",
+          "calibration error must be <= 0.15; unknown",
+          "observed success must be >= 0.70; unknown"
+        ],
+        "authority": [],
+        "never_authorizes": [
+          "model_routing",
+          "tool_exposure",
+          "approval_bypass",
+          "verification_changes",
+          "safety_policy_changes"
+        ],
+        "mean_steps": null,
+        "max_steps": null,
+        "top_failures": [],
+        "drift_signals": []
+      },
+      {
+        "family": "code_test",
+        "allowed": false,
+        "attempts": 0,
+        "brier": null,
+        "mean_predicted": null,
+        "observed_success": null,
+        "evidence_applicable": 0,
+        "evidence_rate": null,
+        "calibration_error": null,
+        "requirements": {
+          "minimum_attempts": 20,
+          "maximum_brier": 0.25,
+          "maximum_calibration_error": 0.15,
+          "minimum_success_rate": 0.7,
+          "minimum_evidence_rate": 0.7
+        },
+        "reasons": [
+          "requires 20 outcomes; has 0",
+          "Brier score must be <= 0.25; unknown",
+          "calibration error must be <= 0.15; unknown",
+          "observed success must be >= 0.70; unknown"
+        ],
+        "authority": [],
+        "never_authorizes": [
+          "model_routing",
+          "tool_exposure",
+          "approval_bypass",
+          "verification_changes",
+          "safety_policy_changes"
+        ],
+        "mean_steps": null,
+        "max_steps": null,
+        "top_failures": [],
+        "drift_signals": []
+      },
+      {
+        "family": "conversation",
+        "allowed": true,
+        "attempts": 20,
+        "brier": 0.0012500000000000022,
+        "mean_predicted": 0.975,
+        "observed_success": 1.0,
+        "evidence_applicable": 0,
+        "evidence_rate": null,
+        "calibration_error": 0.025,
+        "requirements": {
+          "minimum_attempts": 20,
+          "maximum_brier": 0.25,
+          "maximum_calibration_error": 0.15,
+          "minimum_success_rate": 0.7,
+          "minimum_evidence_rate": 0.7
+        },
+        "reasons": [],
+        "authority": [
+          "same_family_lesson_retrieval",
+          "same_family_learned_skill_retrieval",
+          "verified_same_family_skill_distillation",
+          "bounded_initiative_eligibility"
+        ],
+        "never_authorizes": [
+          "model_routing",
+          "tool_exposure",
+          "approval_bypass",
+          "verification_changes",
+          "safety_policy_changes"
+        ],
+        "mean_steps": 0.0,
+        "max_steps": 0,
+        "top_failures": [],
+        "drift_signals": []
+      },
+      {
+        "family": "deep_research",
+        "allowed": false,
+        "attempts": 0,
+        "brier": null,
+        "mean_predicted": null,
+        "observed_success": null,
+        "evidence_applicable": 0,
+        "evidence_rate": null,
+        "calibration_error": null,
+        "requirements": {
+          "minimum_attempts": 20,
+          "maximum_brier": 0.25,
+          "maximum_calibration_error": 0.15,
+          "minimum_success_rate": 0.7,
+          "minimum_evidence_rate": 0.7
+        },
+        "reasons": [
+          "requires 20 outcomes; has 0",
+          "Brier score must be <= 0.25; unknown",
+          "calibration error must be <= 0.15; unknown",
+          "observed success must be >= 0.70; unknown"
+        ],
+        "authority": [],
+        "never_authorizes": [
+          "model_routing",
+          "tool_exposure",
+          "approval_bypass",
+          "verification_changes",
+          "safety_policy_changes"
+        ],
+        "mean_steps": null,
+        "max_steps": null,
+        "top_failures": [],
+        "drift_signals": []
+      },
+      {
+        "family": "desktop_file_ops",
+        "allowed": false,
+        "attempts": 0,
+        "brier": null,
+        "mean_predicted": null,
+        "observed_success": null,
+        "evidence_applicable": 0,
+        "evidence_rate": null,
+        "calibration_error": null,
+        "requirements": {
+          "minimum_attempts": 20,
+          "maximum_brier": 0.25,
+          "maximum_calibration_error": 0.15,
+          "minimum_success_rate": 0.7,
+          "minimum_evidence_rate": 0.7
+        },
+        "reasons": [
+          "requires 20 outcomes; has 0",
+          "Brier score must be <= 0.25; unknown",
+          "calibration error must be <= 0.15; unknown",
+          "observed success must be >= 0.70; unknown"
+        ],
+        "authority": [],
+        "never_authorizes": [
+          "model_routing",
+          "tool_exposure",
+          "approval_bypass",
+          "verification_changes",
+          "safety_policy_changes"
+        ],
+        "mean_steps": null,
+        "max_steps": null,
+        "top_failures": [],
+        "drift_signals": []
+      },
+      {
+        "family": "external_publish",
+        "allowed": false,
+        "attempts": 0,
+        "brier": null,
+        "mean_predicted": null,
+        "observed_success": null,
+        "evidence_applicable": 0,
+        "evidence_rate": null,
+        "calibration_error": null,
+        "requirements": {
+          "minimum_attempts": 20,
+          "maximum_brier": 0.25,
+          "maximum_calibration_error": 0.15,
+          "minimum_success_rate": 0.7,
+          "minimum_evidence_rate": 0.7
+        },
+        "reasons": [
+          "requires 20 outcomes; has 0",
+          "Brier score must be <= 0.25; unknown",
+          "calibration error must be <= 0.15; unknown",
+          "observed success must be >= 0.70; unknown"
+        ],
+        "authority": [],
+        "never_authorizes": [
+          "model_routing",
+          "tool_exposure",
+          "approval_bypass",
+          "verification_changes",
+          "safety_policy_changes"
+        ],
+        "mean_steps": null,
+        "max_steps": null,
+        "top_failures": [],
+        "drift_signals": []
+      },
+      {
+        "family": "file_ops",
+        "allowed": true,
+        "attempts": 20,
+        "brier": 0.22839507510705775,
+        "mean_predicted": 0.786916904904521,
+        "observed_success": 0.7,
+        "evidence_applicable": 20,
+        "evidence_rate": 0.8,
+        "calibration_error": 0.086916905,
+        "requirements": {
+          "minimum_attempts": 20,
+          "maximum_brier": 0.25,
+          "maximum_calibration_error": 0.15,
+          "minimum_success_rate": 0.7,
+          "minimum_evidence_rate": 0.7
+        },
+        "reasons": [],
+        "authority": [
+          "same_family_lesson_retrieval",
+          "same_family_learned_skill_retrieval",
+          "verified_same_family_skill_distillation",
+          "bounded_initiative_eligibility"
+        ],
+        "never_authorizes": [
+          "model_routing",
+          "tool_exposure",
+          "approval_bypass",
+          "verification_changes",
+          "safety_policy_changes"
+        ],
+        "mean_steps": 1.5,
+        "max_steps": 6,
+        "top_failures": [
+          {
+            "failure_class": "verification_absent",
+            "n": 4
+          },
+          {
+            "failure_class": "unknown",
+            "n": 2
+          }
+        ],
+        "drift_signals": []
+      },
+      {
+        "family": "learning_brief",
+        "allowed": false,
+        "attempts": 0,
+        "brier": null,
+        "mean_predicted": null,
+        "observed_success": null,
+        "evidence_applicable": 0,
+        "evidence_rate": null,
+        "calibration_error": null,
+        "requirements": {
+          "minimum_attempts": 20,
+          "maximum_brier": 0.25,
+          "maximum_calibration_error": 0.15,
+          "minimum_success_rate": 0.7,
+          "minimum_evidence_rate": 0.7
+        },
+        "reasons": [
+          "requires 20 outcomes; has 0",
+          "Brier score must be <= 0.25; unknown",
+          "calibration error must be <= 0.15; unknown",
+          "observed success must be >= 0.70; unknown"
+        ],
+        "authority": [],
+        "never_authorizes": [
+          "model_routing",
+          "tool_exposure",
+          "approval_bypass",
+          "verification_changes",
+          "safety_policy_changes"
+        ],
+        "mean_steps": null,
+        "max_steps": null,
+        "top_failures": [],
+        "drift_signals": []
+      },
+      {
+        "family": "security_analysis",
+        "allowed": true,
+        "attempts": 20,
+        "brier": 0.04500000000000001,
+        "mean_predicted": 0.85,
+        "observed_success": 1.0,
+        "evidence_applicable": 0,
+        "evidence_rate": null,
+        "calibration_error": 0.15,
+        "requirements": {
+          "minimum_attempts": 20,
+          "maximum_brier": 0.25,
+          "maximum_calibration_error": 0.15,
+          "minimum_success_rate": 0.7,
+          "minimum_evidence_rate": 0.7
+        },
+        "reasons": [],
+        "authority": [
+          "same_family_lesson_retrieval",
+          "same_family_learned_skill_retrieval",
+          "verified_same_family_skill_distillation",
+          "bounded_initiative_eligibility"
+        ],
+        "never_authorizes": [
+          "model_routing",
+          "tool_exposure",
+          "approval_bypass",
+          "verification_changes",
+          "safety_policy_changes"
+        ],
+        "mean_steps": 0.0,
+        "max_steps": 0,
+        "top_failures": [],
+        "drift_signals": []
+      }
+    ],
+    "calibrated_families": [
+      "conversation",
+      "file_ops",
+      "security_analysis"
+    ],
+    "calibrated_family_count": 3,
+    "families_with_outcomes": [
+      "conversation",
+      "file_ops",
+      "security_analysis"
+    ],
+    "resolved_outcomes_counted": 60,
+    "open_predictions": 1,
+    "calibration_bins": [
+      {
+        "bucket": 6,
+        "n": 2,
+        "mean_predicted": 0.688259109311741,
+        "observed": 1.0
+      },
+      {
+        "bucket": 7,
+        "n": 18,
+        "mean_predicted": 0.7145455488592742,
+        "observed": 0.8333333333333334
+      },
+      {
+        "bucket": 8,
+        "n": 10,
+        "mean_predicted": 0.85,
+        "observed": 0.7
+      },
+      {
+        "bucket": 9,
+        "n": 30,
+        "mean_predicted": 0.9833333333333333,
+        "observed": 1.0
+      }
+    ],
+    "drift": {
+      "window": 30,
+      "baseline": 90,
+      "minimum_samples": 10,
+      "families_with_signals": [],
+      "findings": []
+    }
+  },
+  "model": {
+    "requested": "qwen3.5:9b",
+    "served": "qwen3.5:9b"
+  },
+  "run": {
+    "model": "qwen3.5:9b",
+    "families_requested": [
+      "file_ops",
+      "conversation",
+      "security_analysis"
+    ],
+    "per_family": 20,
+    "commands": [
+      "python scripts/run_phase2_calibration.py sandbox --root <sandbox> --per-family 20 --run-out <run-1>",
+      "python scripts/run_phase2_calibration.py sandbox --root <sandbox> --per-family 20 --retry-from <run-1> --run-out <run-2>",
+      "python scripts/run_phase2_calibration.py merge-run --run-file <run-1> --run-file <run-2> --out <merged>",
+      "python scripts/run_phase2_calibration.py report --database <sandbox>/data/jarvis.db --run-file <merged> --evidence-out docs/evidence --manifest-file <phase 2 base manifest>"
+    ],
+    "retried_after_host_failure": [
+      "conversation_avg_a",
+      "conversation_pow_a",
+      "conversation_rev_a",
+      "file_ops_replace_02",
+      "security_analysis_cvss_max",
+      "security_analysis_mtls"
+    ],
+    "timed_out_cases": [
+      "conversation_pow_a"
+    ],
+    "retry_reason": "These cases recorded no outcome on the first attempt and were re-run into the same sandbox. The runtime reported: TimeoutExpired; no result (exit 3221225794). Each retried case clears the paths its verifier reads and re-seeds them, so no repeat was pre-satisfied, and the sandbox refuses to re-run a case that already recorded an outcome.",
+    "by_observed_family": {
+      "conversation": {
+        "cases": 20,
+        "recorded_complete": 20,
+        "independently_verified": 18,
+        "agreement": 18
+      },
+      "file_ops": {
+        "cases": 20,
+        "recorded_complete": 14,
+        "independently_verified": 14,
+        "agreement": 20
+      },
+      "security_analysis": {
+        "cases": 20,
+        "recorded_complete": 20,
+        "independently_verified": 19,
+        "agreement": 19
+      }
+    },
+    "cases_run": 60,
+    "cases_recorded": 60,
+    "runtime_complete": 54,
+    "independently_verified": 51,
+    "agreement_with_ground_truth": 57,
+    "agreement_is_an_upper_bound_for": [
+      "conversation",
+      "security_analysis"
+    ],
+    "total_seconds": 1575.2
+  }
+}

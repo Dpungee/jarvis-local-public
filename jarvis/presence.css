@@ -1138,6 +1138,29 @@ textarea {
 .prompt-counter { color: var(--faint); font-size: var(--fs-xs); font-variant-numeric: tabular-nums; }
 .prompt-counter.warn { color: var(--warning); }
 .prompt-counter[hidden] { display: none; }
+.access-mode-control {
+  min-width: 0; height: 30px; padding: 0 7px; display: inline-flex;
+  align-items: center; gap: 5px; border: 1px solid transparent; border-radius: 8px;
+  color: var(--muted); background: transparent;
+  transition: color .15s ease, background .15s ease, border-color .15s ease;
+}
+.access-mode-control:hover { color: var(--text); background: var(--surface-hover); }
+.access-mode-control:focus-within { border-color: var(--border-strong); }
+.access-mode-control.full-access { color: #ff9b4a; background: rgba(255,145,65,.07); }
+.access-mode-icon { flex: 0 0 auto; font-size: 10px; }
+.access-mode-control select { max-width: 116px; padding: 0 16px 0 0; color: inherit; background: transparent; font-size: 11px; font-weight: 650; }
+.access-mode-control select:disabled { color: var(--faint); cursor: not-allowed; }
+.access-mode-control option { color: var(--text); background: var(--surface); }
+.companion-recorder { border-color: var(--danger-soft); }
+.companion-recording-status { margin: 10px 0; color: var(--muted); }
+.companion-record-button.recording { color: #fff; border-color: rgba(255,105,105,.55); background: #8b3035; }
+.demonstration-skill-dialog { width: min(760px, calc(100% - 28px)); }
+.demonstration-skill-fields { max-height: calc(78dvh - 150px); padding: 16px 18px; overflow-y: auto; display: grid; gap: 12px; }
+.demonstration-skill-fields label { display: grid; gap: 6px; color: var(--text); font-size: 10px; font-weight: 650; }
+.demonstration-skill-fields input,
+.demonstration-skill-fields textarea { width: 100%; box-sizing: border-box; padding: 10px 11px; color: var(--text); border: 1px solid var(--border-strong); border-radius: 8px; background: var(--surface); font: inherit; }
+.demonstration-skill-fields textarea { resize: vertical; line-height: 1.5; }
+.demonstration-skill-actions { padding: 0 18px 18px; justify-content: flex-end; }
 .image-preview {
   width: min(var(--content-w), 100%);
   margin: 7px auto 0;

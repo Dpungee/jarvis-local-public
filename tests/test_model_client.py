@@ -2740,6 +2740,14 @@ class FakeOllama:
         self.calls.append((messages, tools, model, kwargs))
         return ChatResponse({"role": "assistant", "content": "local"}, {"done": True, "model": model})
 
+    def chat_stream(self, messages, tools, model, on_delta, **kwargs):
+        self.calls.append((messages, tools, model, kwargs))
+        on_delta("local")
+        return ChatResponse(
+            {"role": "assistant", "content": "local"},
+            {"done": True, "model": model},
+        )
+
 
 class FakeCloud:
     def __init__(self, default_model, answer):
@@ -2817,11 +2825,33 @@ class MultiplexerTests(unittest.TestCase):
             "codex-cli:auto",
             deltas.append,
             think=False,
+            keep_alive="0",
         )
 
         self.assertEqual(deltas, ["live text"])
         self.assertEqual(response["content"], "live text")
         self.assertEqual(codex.calls[0][2], "auto")
+        self.assertNotIn("keep_alive", codex.calls[0][3])
+
+    def test_local_stream_dispatches_deltas_and_preserves_resource_controls(self):
+        ollama = FakeOllama(["qwen3.5:9b"])
+        client = ModelClient(ollama)
+        deltas = []
+
+        response = client.chat_stream(
+            [{"role": "user", "content": "hello"}],
+            [],
+            "ollama:qwen3.5:9b",
+            deltas.append,
+            think=False,
+            keep_alive="0",
+        )
+
+        self.assertEqual(deltas, ["local"])
+        self.assertEqual(response["content"], "local")
+        self.assertEqual(ollama.calls[0][2], "qwen3.5:9b")
+        self.assertEqual(ollama.calls[0][3]["keep_alive"], "0")
+        self.assertFalse(ollama.calls[0][3]["think"])
 
     def test_provider_wide_failure_short_circuits_same_provider_models(self):
         opener = SequenceOpen(urllib.error.URLError("offline"))

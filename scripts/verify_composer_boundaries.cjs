@@ -1,0 +1,51 @@
+// Additional headless checks use only the disposable synthetic preview.
+const {chromium} = require('playwright');
+const assert = require('node:assert/strict');
+(async()=>{
+  const browser=await chromium.launch({channel:'msedge',headless:true});
+  const page=await browser.newPage({viewport:{width:1440,height:1000}});
+  try {
+    await page.goto(process.env.JARVIS_TEST_URL);
+    await page.locator('#agent-switch').selectOption({label:'Atlas'});
+    await page.getByRole('button',{name:'＋ New conversation',exact:true}).click();
+    await page.locator('#chat-form input').fill('Composer boundary checks');
+    await page.getByRole('button',{name:'Create conversation',exact:true}).click();
+    await page.getByRole('heading',{name:'Composer boundary checks',exact:true}).waitFor();
+    await page.getByRole('button',{name:'Permissions',exact:true}).click();
+    await page.locator('#grant-attachments').check();
+    await page.getByRole('button',{name:'Close permissions',exact:true}).click();
+    await page.locator('#attachment-picker').setInputFiles({name:'local-example.txt',mimeType:'text/plain',buffer:Buffer.from('Synthetic text only')});
+    await page.locator('#staged-attachments').getByText(/local-example/).waitFor();
+    await page.getByRole('button',{name:'Permissions',exact:true}).click();
+    await page.locator('#grant-attachments').uncheck();
+    await page.getByRole('button',{name:'Close permissions',exact:true}).click();
+    await page.locator('#message-body').fill('This must stay a draft when attachment permission is revoked.');
+    await page.locator('#send-message').click();
+    await page.locator('#toast').getByText(/permission has been revoked/).waitFor();
+    assert.match(await page.locator('#message-body').inputValue(),/must stay a draft/);
+    await page.locator('#staged-attachments').getByRole('button',{name:'Remove'}).click();
+    await page.waitForFunction(()=>!document.querySelector('#staged-attachments').textContent.trim());
+    await page.getByRole('button',{name:'Permissions',exact:true}).click();
+    await page.locator('#grant-attachments').check();
+    await page.getByRole('button',{name:'Close permissions',exact:true}).click();
+    await page.locator('#attachment-picker').setInputFiles({name:'local-example.txt',mimeType:'text/plain',buffer:Buffer.from('Synthetic text only')});
+    await page.locator('#staged-attachments').getByText(/local-example/).waitFor();
+    await page.locator('#send-message').click();
+    await page.locator('#messages').getByText(/Attached locally only: local-example/).waitFor();
+    await page.locator('#agent-switch').selectOption({label:'Nova'});
+    await page.getByRole('heading',{name:'Nova',exact:true}).waitFor();
+    await page.getByRole('button',{name:'Permissions',exact:true}).click();
+    assert.equal(await page.locator('#grant-attachments').isChecked(),false);
+    await page.getByRole('button',{name:'Close permissions',exact:true}).click();
+    await page.getByRole('button',{name:'Agent settings',exact:true}).click();
+    await page.locator('#model-provider').selectOption('codex-cli');
+    await page.locator('#model-name').fill('operator-label');
+    await page.getByRole('button',{name:'Save model for future work',exact:true}).click();
+    await page.locator('#agent-status').getByText('Live chat unavailable',{exact:true}).waitFor();
+    await page.locator('#message-body').fill('Blocked live discussion.');
+    await page.locator('#send-message').click();
+    await page.locator('#messages').getByText('BLOCKED',{exact:true}).waitFor();
+    assert.match(await page.locator('#context-usage').innerText(),/capacity unavailable/);
+    console.log(JSON.stringify({result:'PASS',checks:['attachment revocation blocks send','draft retained on rejection','removal after revocation','local-only attachment receipt','per-agent grant isolation','future model selection','live chat visibly blocked','usage unavailable']}));
+  } finally {await browser.close();}
+})().catch(error=>{console.error(error);process.exitCode=1;});

@@ -7,6 +7,11 @@ description: Navigate public and authenticated web workflows while verifying pag
 
 ## Workflow
 
+When the requested outcome clearly needs an interactive browser and the chat is
+running with Full access, use the browser path without requiring the operator to name
+the control mechanism. The selected access mode never authorizes a different site,
+account, submission, or external effect.
+
 1. Identify the intended site, account context, target object, and success condition.
 2. Prefer a typed connector or official API for repeatable semantic operations; use browser control for interactive state that lacks one.
 3. Confirm the current origin and visible page state before entering data or clicking.

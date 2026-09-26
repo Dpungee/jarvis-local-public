@@ -187,10 +187,29 @@ LANE_ABSTAINED_CLAUSE = (
     "The main memory lane could not tell which stored subject this names; "
     "the chain below starts from an exactly matching name."
 )
-# The graph holdout's runtime pin covers exactly these four files, in this
+# The graph holdout's runtime pin covers these files, including extracted memory, in this
 # order; ``agent.py`` is deliberately not pinned (design §1.4, review R12).
 MEMORY_GRAPH_RUNTIME_FILES: tuple[str, ...] = (
     "memory.py", "memory_graph.py", "memory_retrieval.py", "redaction.py",
+    "memory_embeddings.py",
+    "memory_runtime.py",
+    "memory_schema_migrations.py",
+    "memory_projects_budget.py",
+    "memory_predictions.py",
+    "memory_conversations.py",
+    "memory_presence_companion.py",
+    "memory_ordinary_recall.py",
+    "memory_claims.py",
+    "memory_embedding_store.py",
+    "memory_lessons.py",
+    "memory_strategy_transfer.py",
+    "memory_strategy_trial.py",
+    "memory_tasks_scheduling.py",
+    "memory_operator_state.py",
+    "memory_approvals.py",
+    "memory_learning_ladder.py",
+    "memory_governance.py",
+    "memory_conversation_compaction.py",
 )
 
 # A value the write path already rewrote: ``remember_claim`` stores a

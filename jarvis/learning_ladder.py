@@ -136,12 +136,32 @@ LADDER_FAMILIES: frozenset[str] = frozenset({
 #: which a read gated on LADDER_FAMILIES would have silently withdrawn.
 LADDER_READ_FAMILIES: frozenset[str] = LADDER_FAMILIES | LADDER_EXCLUDED_FAMILIES
 
-#: The four files the sealed ladder holdout pins, in a fixed order.
+#: The sealed ladder's original files plus extracted memory implementations.
 LADDER_RUNTIME_FILES: tuple[str, ...] = (
     "jarvis/learning_ladder.py",
     "jarvis/memory.py",
     "jarvis/skill_evolution.py",
     "jarvis/skill_library.py",
+    "jarvis/memory_retrieval.py",
+    "jarvis/memory_embeddings.py",
+    "jarvis/memory_runtime.py",
+    "jarvis/memory_schema_migrations.py",
+    "jarvis/memory_projects_budget.py",
+    "jarvis/memory_predictions.py",
+    "jarvis/memory_conversations.py",
+    "jarvis/memory_presence_companion.py",
+    "jarvis/memory_ordinary_recall.py",
+    "jarvis/memory_claims.py",
+    "jarvis/memory_embedding_store.py",
+    "jarvis/memory_lessons.py",
+    "jarvis/memory_strategy_transfer.py",
+    "jarvis/memory_strategy_trial.py",
+    "jarvis/memory_tasks_scheduling.py",
+    "jarvis/memory_operator_state.py",
+    "jarvis/memory_approvals.py",
+    "jarvis/memory_learning_ladder.py",
+    "jarvis/memory_governance.py",
+    "jarvis/memory_conversation_compaction.py",
 )
 
 _FAMILY_SHAPE = re.compile(r"[a-z][a-z0-9_]{0,39}\Z")
@@ -1621,9 +1641,9 @@ def run_ladder_pass(
 # --- 1.5 the runtime pin ---------------------------------------------------
 
 def learning_ladder_runtime_sha256(root: Path | None = None) -> str:
-    """The sealed holdout's runtime pin: canonical JSON of four file digests.
+    """The sealed holdout's runtime pin: canonical JSON of implementation digests.
 
-    Digest-only, and over exactly the four files the ladder's scoring path
+    Digest-only, and over the files the ladder's scoring path
     executes.  ``jarvis/agent.py``, ``jarvis/proactive.py`` and
     ``jarvis/tools.py`` are deliberately not pinned.
     """

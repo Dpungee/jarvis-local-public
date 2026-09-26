@@ -13,7 +13,7 @@ import sys
 import tempfile
 import threading
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from contextlib import redirect_stderr, redirect_stdout
 from dataclasses import is_dataclass, replace
 from datetime import UTC, datetime, timedelta
@@ -21,7 +21,7 @@ from pathlib import Path
 from typing import Any, TextIO
 from uuid import uuid4
 
-from . import learning_ladder, memory_compaction, memory_graph
+from . import learning_ladder, memory_bridge, memory_compaction, memory_graph
 from .agent import Agent, AgentResult
 from .attachments import ImageAttachment
 from .config import Config, create_project_workspace, resolve_project_workspace
@@ -52,7 +52,7 @@ from .governed_memory import (
     redact_skill_promotion_command,
     skill_promotion_receipt,
 )
-from .memory import DEFAULT_LEASE_SECONDS, Memory
+from .memory import DEFAULT_LEASE_SECONDS, Memory, now_iso
 from .memory_embeddings import EmbeddingError, run_memory_index_batch
 from .memory_spine import SpineError
 from .model_client import ModelClient, build_model_client, split_model_reference
@@ -808,6 +808,15 @@ def _run_compaction(args: argparse.Namespace) -> int:
         if args.compaction_command == "run":
             return _run_compaction_run(memory, args)
     return 2
+def _execution_backend_summary(execution_mode: str, execution_backend: str) -> str:
+    """Say where allowlisted workspace commands would run and how contained that is."""
+    if execution_backend == "docker":
+        detail = "ephemeral networkless container from the pinned sandbox image"
+    else:
+        detail = "contained host executor using your Windows account; not an OS sandbox"
+    if execution_mode != "trusted-host":
+        return f"{execution_backend} ({detail}); inactive while host execution is {execution_mode}"
+    return f"{execution_backend} ({detail})"
 
 
 def doctor(*, deep: bool = False) -> int:
@@ -823,6 +832,11 @@ def doctor(*, deep: bool = False) -> int:
     print(f"  Workspace: {config.workspace}")
     execution_mode = getattr(config, "execution_mode", "disabled")
     print(f"  Host execution: {execution_mode}")
+    execution_backend = str(getattr(config, "execution_backend", "host") or "host")
+    print(
+        "  Execution backend: "
+        + _execution_backend_summary(str(execution_mode), execution_backend)
+    )
     computer_access = getattr(config, "computer_access", "disabled")
     print(f"  Desktop access: {computer_access}")
     if computer_access == "trusted-desktop":
@@ -1900,6 +1914,10 @@ def worker(
                     f"closed {recovered['failed']} exhausted task(s)."
                 )
 
+            # Remembered so a repeated bridge outcome is reported on an
+            # escalating schedule instead of once per poll forever.
+            last_bridge_status: str | None = None
+            bridge_status_repeats = 0
             while stop_event is None or not stop_event.is_set():
                 if max_cycles is not None and cycles >= max_cycles:
                     break
@@ -1920,6 +1938,28 @@ def worker(
                     if control_state == "paused":
                         _wait(poll_seconds, stop_event, sleep)
                         continue
+
+                    # Bounded runtime->memory ingest.  Placed after the
+                    # runtime-control gate above on purpose: an operator pause
+                    # or emergency stop suppresses ingestion exactly as it
+                    # suppresses task execution.  Disabled unless the operator
+                    # sets JARVIS_MEMORY_BRIDGE=worker.
+                    bridge_result = _run_bridge_pass(config, memory, worker_id)
+                    bridge_status_text = str(bridge_result.get("status", ""))
+                    # Count this pass before reporting it, so the ordinal the
+                    # throttle sees includes the pass being reported.  Counting
+                    # afterwards lags by one and turns the intended 1, 2, 4, 8
+                    # schedule into 1, 2, 3, 5, 9 -- one extra line at onset.
+                    bridge_status_repeats = (
+                        bridge_status_repeats + 1
+                        if bridge_status_text == last_bridge_status else 0
+                    )
+                    for line in _bridge_pass_report(
+                        memory, bridge_result, last_bridge_status,
+                        bridge_status_repeats,
+                    ):
+                        print(line)
+                    last_bridge_status = bridge_status_text
 
                     queued = memory.queue_due_learning()
                     if queued:
@@ -5362,6 +5402,499 @@ def _run_graph(args: argparse.Namespace) -> int:
         return 0
 
 
+def _bridge_runtime_reader(runtime_path: Path) -> Any:
+    """Open the runtime store and return a bounded, classifying replay reader.
+
+    The memory bridge never imports the runtime module; the dependency lives
+    here, in the worker, and points one way only.  The reader is the *trusted*
+    replay path and is never handed to a model, a tool or an agent.
+
+    This adapter is also the only place that knows what the runtime's
+    exceptions mean, so it is where they are classified.  The bridge acts on
+    the classification and never on the message, because a message is free
+    text from another authority and the decision it drives -- halt the bridge
+    until an operator intervenes, or retry next pass -- is too consequential
+    to hang on string matching.
+
+    The mapping:
+
+    * ``RuntimeConflictError`` -> ``reader_cursor_mismatch``.  The store's
+      history does not contain the predecessor our cursor names: a different
+      store, a replaced store, or a truncated one.  Structural.
+    * ``RuntimeStoreError`` -> ``reader_history_invalid``.  The right history,
+      not replayable: a sequence gap, a content digest mismatch, or legacy
+      schema-1 events that carry no reconstructible content.  Structural.
+    * Any other runtime error, ``ValueError`` or ``TypeError`` ->
+      ``reader_contract_violation``.  We called the replay API wrongly.  A
+      bug rather than bad data, but retrying it unchanged cannot help.
+    * ``sqlite3.Error`` and ``OSError`` -> operational.  The store could not
+      be read *right now*.  No halt: the next pass tries again.
+    """
+    try:
+        from .multi_agent_runtime import (
+            MultiAgentRuntimeError,
+            MultiAgentRuntimeStore,
+            RuntimeConflictError,
+            RuntimeStoreError,
+        )
+    except ImportError:
+        return None
+    if not runtime_path.exists():
+        return None
+    try:
+        store = MultiAgentRuntimeStore(runtime_path)
+    except Exception:
+        # Opening is operational: a locked, busy or absent store is a reason
+        # to try again later, not a reason to stop the bridge for good.
+        return None
+
+    def read(after_sequence: int, after_event_id: str | None, limit: int) -> Any:
+        try:
+            return store.replay_events(
+                after_sequence=int(after_sequence),
+                after_event_id=after_event_id,
+                limit=int(limit),
+            )
+        except RuntimeConflictError as error:
+            raise memory_bridge.ReaderFailure(
+                "runtime replay refused this consumer cursor",
+                code="reader_cursor_mismatch",
+                detail={"at": int(after_sequence)},
+            ) from error
+        except RuntimeStoreError as error:
+            raise memory_bridge.ReaderFailure(
+                "runtime replay history is not replayable",
+                code="reader_history_invalid",
+                detail={"at": int(after_sequence)},
+            ) from error
+        except (MultiAgentRuntimeError, ValueError, TypeError) as error:
+            raise memory_bridge.ReaderFailure(
+                "runtime replay was called outside its contract",
+                code="reader_contract_violation",
+                detail={"at": int(after_sequence)},
+            ) from error
+        except (sqlite3.Error, OSError) as error:
+            raise memory_bridge.ReaderFailure(
+                "the runtime store could not be read on this pass",
+                detail={"at": int(after_sequence)},
+            ) from error
+
+    return store, read
+
+
+#: Worker-side wording for each bridge pass outcome.  Closed, so a status
+#: with no entry prints its code rather than an invented sentence.
+_BRIDGE_PASS_MESSAGES: dict[str, str] = {
+    "halted": (
+        "Bridge is HALTED and is ingesting nothing. Run 'jarvis bridge "
+        "status' for the halt code and the exact resume command."
+    ),
+    "halt_not_recorded": (
+        "Bridge hit a structural failure and could NOT persist the halt. "
+        "It is not halted and not healthy; run 'jarvis bridge status'."
+    ),
+    "reader_unavailable": (
+        "Bridge could not read the runtime store on this pass. Nothing "
+        "is halted; the next cycle retries."
+    ),
+    "reader_error": (
+        "Bridge reader failed in a way the adapter did not classify. "
+        "Nothing is halted and nothing was ingested."
+    ),
+    "lease_lost": (
+        "Bridge lost its ingest lease mid-pass; another worker holds it. "
+        "Nothing was committed by this worker."
+    ),
+    "runtime_unavailable": (
+        "Bridge could not open the configured runtime store; ingestion "
+        "is not running."
+    ),
+    "error": "Bridge pass failed; ingestion did not run this cycle.",
+    "schema_missing": "Bridge schema is absent from this store; ingestion is off.",
+}
+
+
+def _bridge_pass_report(
+    memory: Any,
+    result: Mapping[str, Any],
+    previous_status: str | None,
+    repeats: int,
+) -> list[str]:
+    """Lines a worker should print for this pass, if any.
+
+    ``repeats`` is how many consecutive earlier passes ended with this same
+    status, counted by the caller in process.  It has no default on purpose: a
+    caller that forgets it would silently reset the throttle on every pass,
+    which is the exact failure this parameter exists to prevent.  Every repeated outcome is
+    throttled through it -- say it when it starts, then on an exponential
+    schedule -- because the first version of this function throttled only the
+    *failing* statuses and let ``bounded`` print on every single cycle.
+
+    That gap mattered more than the one it was written to close.  A halted
+    bridge is an incident someone fixes; a bridge that is merely behind is the
+    ordinary steady state under a small per-pass bound, so ``bounded`` is the
+    status most likely to repeat forever, and it was the one with no throttle.
+    Driving a real worker loop is what surfaced it: six cycles, six lines.
+
+    In-process rather than durable counting, deliberately: the question a log
+    throttle answers is "have I already said this", which is about this
+    process.  A restarted worker should state the condition once more.  The
+    durable occurrence count is still used, but only to say *how many* times a
+    failure has happened, which is a different question.
+
+    A failure never prints as a success, and a backlog is reported as a lower
+    bound because a lower bound is what the bridge can actually prove.
+    """
+    status = str(result.get("status", ""))
+    if status in {"disabled", "unconfigured"}:
+        return []
+    if status == "ok" and result.get("events"):
+        return [
+            f"Bridge ingested {result['events']} runtime event(s) in "
+            f"{result.get('batches', 0)} batch(es)."
+        ]
+    # Every other healthy outcome is routine and silent.  Derived from the
+    # vocabulary rather than listed here, so a status added later is quiet by
+    # default instead of noisy by omission -- which is how `foreground_yield`
+    # briefly started announcing itself on every cycle.
+    if status in memory_bridge.HEALTHY_PASS_STATUSES and status != "bounded":
+        return []
+
+    occurrences = 1
+    behind: Any = None
+    caught_up: Any = None
+    measured = False
+    try:
+        health = memory_bridge.bridge_health(memory.db)
+        for incident in health.get("incidents") or ():
+            if str(incident["code"]) == status:
+                occurrences = int(incident["occurrences"])
+        behind = health.get("behind_at_least")
+        caught_up = health.get("caught_up")
+        measured = True
+    except Exception:
+        # Health is unavailable.  That is a reason to say less, never a reason
+        # to say something reassuring.
+        measured = False
+
+    # One throttle for every repeated outcome.  ``repeats`` counts consecutive
+    # earlier passes with this status, so ``repeats + 1`` is this pass's
+    # ordinal and the rule is the same one used for failures.
+    if not memory_bridge.should_report_pass(
+        previous_status, status, int(repeats) + 1
+    ):
+        return []
+
+    if status == "bounded":
+        # Not a failure, so it is not an incident -- but a bridge that is
+        # permanently bounded is permanently behind, and that must be said.
+        del measured
+        if caught_up is True:
+            return [
+                "Bridge reached its per-pass bound and caught up on this pass."
+            ]
+        if caught_up is False:
+            return [
+                f"Bridge reached its per-pass bound with at least {behind or 1} "
+                f"runtime event(s) still waiting."
+            ]
+        # Unknown: the backlog probe failed, or health could not be read.  The
+        # one thing that must not happen here is claiming it caught up.
+        return [
+            "Bridge reached its per-pass bound; whether runtime events remain "
+            "could not be measured on this pass."
+        ]
+
+    message = _BRIDGE_PASS_MESSAGES.get(
+        status, f"Bridge pass ended with {status}; ingestion did not run."
+    )
+    if occurrences > 1:
+        message = f"{message} ({occurrences} occurrence(s) so far.)"
+    return [message]
+
+
+def _bridge_pass_outcome(
+    memory: Any, status: str, *, halt_code: str | None = None
+) -> dict[str, Any]:
+    """Record a worker-side pass outcome and return it.
+
+    ``ingest_once`` records its own outcomes, but the pass can end before it
+    is ever called -- an unopenable runtime store, an operator pause, a
+    refusal raised at the boundary.  Those used to return a dict to a caller
+    that printed nothing, so a bridge that could not open its runtime store
+    for a week looked exactly like a bridge with nothing to do.
+    """
+    outcome: dict[str, Any] = {"status": status}
+    if halt_code is not None:
+        outcome["halt_code"] = halt_code
+    try:
+        with memory._immediate_transaction():
+            memory_bridge.record_pass(
+                memory.db, status=status, now=now_iso(),
+                detail=({"halt": halt_code} if halt_code else None),
+            )
+    except Exception:
+        # Diagnostics never fail a pass, and never invent one either.
+        pass
+    return outcome
+
+
+def _run_bridge_pass(config: Config, memory: Any, worker_id: str) -> dict[str, Any]:
+    """One bounded runtime->memory ingest pass, or a reason it did not run.
+
+    Called from the worker loop only after the runtime-control gate, so an
+    operator pause or emergency stop suppresses ingestion exactly as it
+    suppresses task execution.  Bounded by ``MAX_INGEST_EVENTS_PER_PASS`` and
+    guarded by a lease, so two workers against one store cannot both ingest and
+    a pass cannot hold the memory write lock indefinitely.
+    """
+    if getattr(config, "memory_bridge", "disabled") != "worker":
+        return {"status": "disabled"}
+    raw_path = str(getattr(config, "memory_bridge_runtime_db", "") or "").strip()
+    if not raw_path:
+        return {"status": "unconfigured"}
+    if not getattr(memory, "_bridge_ready", False):
+        return {"status": "schema_missing"}
+    # Only now is it worth writing anything down: a store with the bridge
+    # switched off must not accumulate health rows for passes that never ran.
+    # Defence in depth.  The worker loop already gates on runtime_control before
+    # reaching here, but ingestion writes durable memory state, so it re-checks
+    # rather than trusting its call site: a future caller that forgets the gate
+    # must not be able to ingest through a pause or an emergency stop.
+    control_state = _runtime_state(memory)
+    if control_state != "running":
+        return _bridge_pass_outcome(memory, f"runtime_{control_state}")
+    # Respect the foreground yield that already governs every other kind of
+    # worker work.  The bridge pass runs at the top of the cycle, *before* the
+    # yield check further down, so without this an active foreground request
+    # turns the cycle into a one-second loop that ingests on every pass --
+    # holding the memory write lock most often exactly while somebody is
+    # waiting on it.  The yield existed; ingestion was simply outside it.
+    #
+    # The condition is deliberately broader than the task path's, which also
+    # requires local models: what the bridge competes for is the SQLite write
+    # lock, not the CPU a cloud model would not use.
+    if _foreground_request_active(config.data_dir):
+        return _bridge_pass_outcome(memory, "foreground_yield")
+    # Opening the runtime store is itself fallible, so it happens inside the
+    # guarded block: an exception here used to escape into the worker loop.
+    store = None
+    try:
+        opened = _bridge_runtime_reader(Path(raw_path))
+        if opened is None:
+            return _bridge_pass_outcome(memory, "runtime_unavailable")
+        store, reader = opened
+        return memory_bridge.ingest_once(
+            memory.db,
+            reader,
+            now=now_iso(),
+            owner=worker_id,
+            transaction=memory._immediate_transaction,
+            clock=now_iso,
+        )
+    except memory_bridge.BridgeHalted as halted:
+        return _bridge_pass_outcome(
+            memory, "halted", halt_code=halted.code
+        )
+    except memory_bridge.LeaseLost:
+        return _bridge_pass_outcome(memory, "lease_lost")
+    except memory_bridge.BridgeError:
+        # A bridge refusal is an operational condition, not a worker crash: the
+        # halt (if any) is already durable, and the next pass will report it.
+        # The exception type is not recorded -- the incident ledger carries a
+        # closed code, and a Python class name is not one.
+        return _bridge_pass_outcome(memory, "error")
+    except Exception:
+        # The worker must survive a runtime-side surprise.  Nothing is claimed
+        # about memory state here: whatever committed, committed.
+        return _bridge_pass_outcome(memory, "error")
+    finally:
+        close = getattr(store, "close", None)
+        if callable(close):
+            close()
+
+
+def _bridge_status_state(report: Mapping[str, Any]) -> str:
+    """The one-word verdict at the top of ``jarvis bridge status``.
+
+    A bridge whose cursor is ``active`` but whose last pass failed is not
+    running normally, and printing it as plain ACTIVE is precisely the
+    "failed ingestion reported as healthy" case: the cursor field alone cannot
+    distinguish a bridge with nothing to do from one that cannot read its
+    runtime store.
+    """
+    state = str(report.get("status", "")).upper()
+    health = report.get("health") or {}
+    if state == "ACTIVE" and health.get("healthy") is False:
+        return "ACTIVE, DEGRADED"
+    return state
+
+
+def _bridge_health_lines(health: Mapping[str, Any]) -> list[str]:
+    """Operator-facing ingest health: codes, counts and timestamps only.
+
+    Backlog is printed as a lower bound because that is what the bridge can
+    prove.  The runtime exposes no cheap head-sequence accessor, so the
+    follower learns 'at least N more events exist' from one bounded probe
+    read and nothing more; printing a precise backlog would be a guess.
+    """
+    if not health or not health.get("known"):
+        return ["  ingest health: no pass recorded yet."]
+    lines = []
+    status = health.get("last_pass_status")
+    verdict = "healthy" if health.get("healthy") else "NOT healthy"
+    lines.append(
+        f"  ingest health: {verdict}; last pass {status} at "
+        f"{health.get('last_pass_at')}"
+    )
+    failures = int(health.get("consecutive_failures") or 0)
+    if failures:
+        lines.append(f"  {failures} consecutive failing pass(es).")
+    caught_up = health.get("caught_up")
+    behind = health.get("behind_at_least")
+    if caught_up is True:
+        lines.append(
+            f"  backlog: caught up as of {health.get('observed_at')}."
+        )
+    elif caught_up is False:
+        lines.append(
+            f"  backlog: behind by at least {behind or 1} runtime event(s) "
+            f"as of {health.get('observed_at')}."
+        )
+    else:
+        lines.append("  backlog: unknown; no pass has measured it yet.")
+    stalled = health.get("stalled_seconds")
+    if stalled is not None and stalled >= 60:
+        lines.append(
+            f"  no ingest progress for {int(stalled)}s "
+            f"(last progress {health.get('last_progress_at')})."
+        )
+    incidents = health.get("incidents") or []
+    if incidents:
+        summary = ", ".join(
+            f"{item['code']}x{item['occurrences']}" for item in incidents[:6]
+        )
+        lines.append(f"  incidents: {summary}. See 'jarvis bridge incidents'.")
+    return lines
+
+
+def _run_bridge(args: argparse.Namespace) -> int:
+    """Operator surfaces over the replay bridge.
+
+    Prints counts, codes and identifiers only.  No projection content and no
+    runtime payload text is ever rendered here, and neither subcommand exposes a
+    retrieval surface to any agent.
+    """
+    config = Config.load()
+    json_output = bool(getattr(args, "json", False))
+    with Memory(config.data_dir / "jarvis.db") as memory:
+        if not getattr(memory, "_bridge_ready", False):
+            print("The memory bridge schema is not present in this store.")
+            return 1
+        if args.bridge_command == "status":
+            report = memory_bridge.bridge_status(memory.db, now=now_iso())
+            if json_output:
+                print(json.dumps(report, ensure_ascii=False, indent=2, default=str))
+                return 0
+            health = report.get("health") or {}
+            state = _bridge_status_state(report)
+            print(
+                f"Bridge {state}: generation {report['generation_id']}, "
+                f"cursor {report['last_sequence']}, "
+                f"reducer v{report['reducer_version']}, "
+                f"screen v{report['screen_version']}."
+            )
+            for line in _bridge_health_lines(health):
+                print(line)
+            if report["status"] == "halted":
+                print(
+                    f"  halted: {report['halt_code']} at sequence "
+                    f"{report['halt_sequence']}. Resume with: jarvis bridge resume "
+                    f"--operator <name> --acknowledge {report['halt_code']}"
+                )
+            lease = report.get("lease") or {}
+            if lease.get("held"):
+                print(f"  ingest lease held by {lease.get('owner')} until {lease.get('expires_at')}.")
+            rejected = report.get("last_rejected_rebuild")
+            if rejected:
+                # A refused rebuild leaves the store looking untouched, which is
+                # the point -- and the reason it has to be said out loud here.
+                print(
+                    f"  {report['rejected_rebuilds']} rejected rebuild(s); the last "
+                    f"was a {rejected['kind']} refused with {rejected['halt_code']} "
+                    f"at {rejected['attempted_at']}. The previous generation is "
+                    f"still serving."
+                )
+            projected = sum(int(value) for value in report["projection_counts"].values())
+            print(
+                f"  {projected} projected row(s); "
+                f"{report['quarantined_items']} quarantined field(s); "
+                f"{report['active_suppressions']} active suppression(s); "
+                f"{report['resumes']} recorded resume(s)."
+            )
+            print(
+                "  ignored event types: "
+                + (", ".join(report["ignored_types"]) or "none")
+            )
+            print("  agent-facing retrieval: disabled.")
+            return 0
+        if args.bridge_command == "incidents":
+            health = memory_bridge.bridge_health(memory.db, now=now_iso())
+            if getattr(args, "clear", False):
+                with memory._immediate_transaction():
+                    cleared = memory_bridge.clear_incidents(memory.db)
+                print(f"Cleared {cleared} incident record(s).")
+                print(
+                    "  Clearing the ledger does not fix a cause: a halted "
+                    "bridge is still halted and a failing pass will record "
+                    "again on its next cycle."
+                )
+                return 0
+            if json_output:
+                print(json.dumps(health, ensure_ascii=False, indent=2, default=str))
+                return 0
+            incidents = health.get("incidents") or []
+            if not incidents:
+                print("No bridge ingest incidents recorded.")
+                return 0
+            print(f"{len(incidents)} bridge ingest incident code(s):")
+            for incident in incidents:
+                print(
+                    f"  {incident['code']}: {incident['occurrences']} "
+                    f"occurrence(s), first {incident['first_seen']}, "
+                    f"last {incident['last_seen']}"
+                    + (f" [{incident['detail']}]" if incident.get("detail") else "")
+                )
+            return 0
+        if args.bridge_command == "resume":
+            state = memory_bridge.read_cursor(memory.db)
+            if str(state["status"]) != "halted":
+                print("The bridge is not halted; nothing to resume.")
+                return 1
+            try:
+                with memory._immediate_transaction():
+                    outcome = memory_bridge.resume(
+                        memory.db,
+                        operator=args.operator,
+                        acknowledge=args.acknowledge,
+                        now=now_iso(),
+                        note=getattr(args, "note", None),
+                    )
+            except memory_bridge.BridgeError as error:
+                print(f"Resume refused: {error}")
+                return 1
+            print(
+                f"Bridge resumed from {outcome['resumed_from']} by "
+                f"{outcome['operator']}; cursor stays at {outcome['at_sequence']}."
+            )
+            print(
+                "  The offending event was not skipped. If its cause is unfixed, "
+                "the next pass halts again on the same sequence."
+            )
+            return 0
+    return 1
+
+
 def _run_spine(args: argparse.Namespace) -> int:
     """Operator surfaces over the memory spine; prints keys and counts only."""
     config = Config.load()
@@ -6352,6 +6885,48 @@ def _parser() -> argparse.ArgumentParser:
     skill_show.add_argument("name")
     skill_forget = skill_sub.add_parser("forget")
     skill_forget.add_argument("name")
+    bridge = sub.add_parser(
+        "bridge",
+        help=(
+            "inspect the runtime->memory replay bridge (status, incidents) "
+            "and clear a halt (resume); no command exposes projection content"
+        ),
+    )
+    bridge_sub = bridge.add_subparsers(dest="bridge_command", required=True)
+    bridge_status = bridge_sub.add_parser(
+        "status", help="cursor, generation, halt state, lease and counts"
+    )
+    bridge_status.add_argument("--json", action="store_true")
+    bridge_incidents = bridge_sub.add_parser(
+        "incidents",
+        help=(
+            "aggregated ingest failures by closed code, with counts and "
+            "first/last timestamps; --clear drops the ledger"
+        ),
+    )
+    bridge_incidents.add_argument("--json", action="store_true")
+    bridge_incidents.add_argument(
+        "--clear",
+        action="store_true",
+        help="forget recorded incidents; does not resume or repair anything",
+    )
+    bridge_resume = bridge_sub.add_parser(
+        "resume",
+        help=(
+            "clear a durable halt; requires an operator name and the exact halt "
+            "code, never advances the cursor and never skips the failing event"
+        ),
+    )
+    bridge_resume.add_argument(
+        "--operator", required=True, help="who is clearing the halt"
+    )
+    bridge_resume.add_argument(
+        "--acknowledge",
+        required=True,
+        help="the exact halt code being cleared; a mismatch is refused",
+    )
+    bridge_resume.add_argument("--note", default=None, help="optional audit note")
+
     spine = sub.add_parser(
         "spine",
         help=(
@@ -6823,6 +7398,8 @@ def main(argv: list[str] | None = None) -> None:
             code = _run_compaction(args)
         elif args.command == "graph":
             code = _run_graph(args)
+        elif args.command == "bridge":
+            code = _run_bridge(args)
         elif args.command == "spine":
             code = _run_spine(args)
         elif args.command == "preference":

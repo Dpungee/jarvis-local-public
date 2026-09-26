@@ -109,7 +109,7 @@ class ConstantsTests(unittest.TestCase):
         self.assertEqual(ladder.LADDER_PRIOR_DOCUMENT_RETAINED, 1)
         self.assertEqual(ladder.LADDER_PROOF_WINDOW_DAYS, 180)
 
-    def test_the_runtime_pin_covers_exactly_four_files_and_is_a_digest(self) -> None:
+    def test_the_runtime_pin_covers_original_and_extracted_files_and_is_a_digest(self) -> None:
         self.assertEqual(
             ladder.LADDER_RUNTIME_FILES,
             (
@@ -117,6 +117,26 @@ class ConstantsTests(unittest.TestCase):
                 "jarvis/memory.py",
                 "jarvis/skill_evolution.py",
                 "jarvis/skill_library.py",
+                "jarvis/memory_retrieval.py",
+                "jarvis/memory_embeddings.py",
+                "jarvis/memory_runtime.py",
+                "jarvis/memory_schema_migrations.py",
+                "jarvis/memory_projects_budget.py",
+                "jarvis/memory_predictions.py",
+                "jarvis/memory_conversations.py",
+                "jarvis/memory_presence_companion.py",
+                "jarvis/memory_ordinary_recall.py",
+                "jarvis/memory_claims.py",
+                "jarvis/memory_embedding_store.py",
+                "jarvis/memory_lessons.py",
+                "jarvis/memory_strategy_transfer.py",
+                "jarvis/memory_strategy_trial.py",
+                "jarvis/memory_tasks_scheduling.py",
+                "jarvis/memory_operator_state.py",
+                "jarvis/memory_approvals.py",
+                "jarvis/memory_learning_ladder.py",
+                "jarvis/memory_governance.py",
+                "jarvis/memory_conversation_compaction.py",
             ),
         )
         self.assertNotIn("jarvis/agent.py", ladder.LADDER_RUNTIME_FILES)

@@ -12,10 +12,29 @@
     "tick_seconds": 7
   },
   "runtime_sha256": {
-    "jarvis/memory.py": "7fc91cd9b53f9f9a7ee24f29b73ce7ba6636a8e984d4dcc08a755ac34666cc5b",
-    "jarvis/memory_graph.py": "ebb04ce47b2064636c3c6b0fd86510ee1c9263850b797d4b03d5e40c2a1fbf59",
+    "jarvis/memory.py": "c3ee4d8a00d17e68bf7bc79794da61743f58ee53edd15f886678cc8e1d49d4e7",
+    "jarvis/memory_graph.py": "233a43af0f3eb0a126fb65ca05d71f99b9074afaa437823fb05d98a1e337d8a7",
     "jarvis/memory_retrieval.py": "b9d3fc23e06691a1f2023402c412c837c063c9cc1c598006b7fe3dab562e76f1",
-    "jarvis/redaction.py": "49e28e6ed1ac4d0bfde9cd4fbf90780591a04ad24464ed2977cebfd14289403a"
+    "jarvis/redaction.py": "4a55a3242fd4cfa67e74dfcdc2ce3680c0b4173e9366f0b5812cdc53e4f073cb",
+    "jarvis/memory_embeddings.py": "dea8149751789657a27ad5387beb21bdeb8e9e4a57bf1f123e77315ae5b12e5b",
+    "jarvis/memory_runtime.py": "077047c0143a09f242a35a5afbbd262cc2823b19c720ab9765e5b63586504431",
+    "jarvis/memory_schema_migrations.py": "8e9d99ef2e7fc12e5f6cd06dd4f9157f3e9f928940ec807aa007607014e669a2",
+    "jarvis/memory_projects_budget.py": "473bb5a69427eb0dab496d64025ee9b9353fec6d3cf9a67d7cc4200e82b60956",
+    "jarvis/memory_predictions.py": "2720e807ac05d73a073faaab4c6167267e7ecdd4df7d6dd110e5c0c34d4fdc28",
+    "jarvis/memory_conversations.py": "92398395a5749cb8bae24fd742c9ad9da1c878cbc04411ceda7929f4ffde80b9",
+    "jarvis/memory_presence_companion.py": "4cc260c3a04667a8d1876a49c4b5216b9e42738b8206142bc9a024efe9981937",
+    "jarvis/memory_ordinary_recall.py": "fa0efe0c35b05acfee9392b5c0f6ab2ce9c1ced1f227bb8c59a9067af7bba02e",
+    "jarvis/memory_claims.py": "f6362c6de1f679b9fddefb588ba10f4b62276aee098412dc215ade20f5dfebc4",
+    "jarvis/memory_embedding_store.py": "018ef6fa3a5a7018b11cafb8c7dfef82b1e308cf963b13b67244cbc33ba4e967",
+    "jarvis/memory_lessons.py": "840a2b080d2fd0cebc03c0267c0e90ea71bbaf8be476750dbc6a9d5b2655e21f",
+    "jarvis/memory_strategy_transfer.py": "4368f6d870db2e1c745a1587d729b751423dff6620799471902d0bc8463db24d",
+    "jarvis/memory_strategy_trial.py": "8075b637b262fb2f8c64e8c274fe4f072d65246bb4c476185d7becb514e588c9",
+    "jarvis/memory_tasks_scheduling.py": "31038a6cd7dbd05bd2b625807ed95e4364685ca7bb7900ab519a91051f7b2f94",
+    "jarvis/memory_operator_state.py": "157a5aca860af2f23230c53a2372a1388be6ec2793ea29e9948a6332b8758297",
+    "jarvis/memory_approvals.py": "ce20f157f89df5892ff101ae607387b653ade73c50706904bca73fa6bc372980",
+    "jarvis/memory_learning_ladder.py": "051d35a7a3ae8868233b95001f283e4d98238f1ee6cd7efda0beaaf372179bab",
+    "jarvis/memory_governance.py": "45186cf8092e4b81e89a2fb9b8530190bd5422510a5ef601a1bc54c1ce44787c",
+    "jarvis/memory_conversation_compaction.py": "35e4aa69fffc1f23b2ad1c1237e092bfdbc3647ecd22f0c7bed82f340b76d8ca"
   },
   "thresholds": {
     "chain_precision": 1.0,

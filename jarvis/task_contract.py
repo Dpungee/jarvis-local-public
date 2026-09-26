@@ -458,7 +458,7 @@ TASK_CONTRACT_RESPONSE_SCHEMA: dict[str, Any] = {
         "artifact_kind": {"type": "string", "enum": sorted(ARTIFACT_KINDS)},
         "evidence_source": {"type": "string", "enum": sorted(EVIDENCE_SOURCES)},
         "requested_effect": {"type": "string", "enum": sorted(REQUESTED_EFFECTS)},
-        "goal": {"type": "string", "minLength": 1, "maxLength": 2_000},
+        "goal": {"type": "string", "minLength": 1, "maxLength": 2_001},
         "target": {
             "anyOf": [
                 {"type": "null"},

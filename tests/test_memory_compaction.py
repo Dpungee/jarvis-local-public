@@ -3196,10 +3196,31 @@ class TombstoneChunkingTests(unittest.TestCase):
 # --- 14. the runtime pin ----------------------------------------------------
 
 class RuntimePinTests(unittest.TestCase):
-    def test_the_pin_covers_the_designs_four_files_and_not_the_agent(self):
+    def test_the_pin_covers_original_and_extracted_files_and_not_the_agent(self):
         self.assertEqual(mc.COMPACTION_RUNTIME_FILES, (
             "jarvis/memory.py", "jarvis/memory_compaction.py",
-            "jarvis/memory_spine.py", "jarvis/redaction.py"))
+            "jarvis/memory_spine.py", "jarvis/redaction.py",
+            "jarvis/memory_retrieval.py",
+            "jarvis/memory_embeddings.py",
+            "jarvis/memory_runtime.py",
+            "jarvis/memory_schema_migrations.py",
+            "jarvis/memory_projects_budget.py",
+            "jarvis/memory_predictions.py",
+            "jarvis/memory_conversations.py",
+            "jarvis/memory_presence_companion.py",
+            "jarvis/memory_ordinary_recall.py",
+            "jarvis/memory_claims.py",
+            "jarvis/memory_embedding_store.py",
+            "jarvis/memory_lessons.py",
+            "jarvis/memory_strategy_transfer.py",
+            "jarvis/memory_strategy_trial.py",
+            "jarvis/memory_tasks_scheduling.py",
+            "jarvis/memory_operator_state.py",
+            "jarvis/memory_approvals.py",
+            "jarvis/memory_learning_ladder.py",
+            "jarvis/memory_governance.py",
+            "jarvis/memory_conversation_compaction.py",
+        ))
         self.assertNotIn("jarvis/agent.py", mc.COMPACTION_RUNTIME_FILES)
         self.assertIs(mc.memory_compaction_runtime_sha256,
                       mc.compaction_runtime_sha256)

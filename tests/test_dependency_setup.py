@@ -23,12 +23,13 @@ TEMP_ROOT.mkdir(exist_ok=True)
 
 class DependencySetupTests(unittest.TestCase):
     def setUp(self) -> None:
-        self.test_dir = TEMP_ROOT / f"dependencies-{os.getpid()}-{self._testMethodName}"
-        if self.test_dir.exists():
-            shutil.rmtree(self.test_dir)
+        # Keep generated paths bounded even under a long Windows TEMP root.
+        # The unittest report already identifies the method; repeating its full
+        # name here can exceed MAX_PATH inside node_modules staging.
+        self.test_dir = Path(tempfile.mkdtemp(prefix="dep-", dir=TEMP_ROOT))
         self.workspace = self.test_dir / "workspace"
         self.data_dir = self.test_dir / "data"
-        self.workspace.mkdir(parents=True)
+        self.workspace.mkdir()
         self.data_dir.mkdir()
         self.config = replace(
             Config.load(),

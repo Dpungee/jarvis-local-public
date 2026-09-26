@@ -389,6 +389,36 @@ def build_tool_specs(
             },
             "required": ["url"]
         }, 'http_health'),
+        ToolSpec("web_app_check", "Open a local web app (loopback http URL, ideally served by a managed process started with start_process) in a disposable headless browser, perform input actions, and report what happened: HTTP status, script and console errors, whether anything rendered, and whether the page responded to input. Use it before claiming a web app or game works; an HTTP 200 alone is not evidence that it renders or plays. Actions: key (key name such as ArrowLeft, ArrowUp, Space, Enter or a letter, optional repeat), click (CSS selector or x/y), drag (x/y to to_x/to_y with the mouse button held, for painting, sliders and dragging), type (text), wait (ms), inspect (a read-only JavaScript expression such as window.appState.score; evaluation that would change page state is refused). A page that animates on its own proves input response only through changed page text or an inspect value read before and after the input, so expose a small read-only state object (for example window.appState) in games. Requests to anything other than this computer are blocked during the check and listed.", {
+            "type": "object",
+            "properties": {
+                "url": {"type": "string"},
+                "process_id": {"type": "string"},
+                "actions": {
+                    "type": "array", "maxItems": 40,
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "type": {"type": "string", "enum": ["key", "click", "drag", "type", "wait", "inspect"]},
+                            "key": {"type": "string"},
+                            "repeat": {"type": "integer", "minimum": 1, "maximum": 20},
+                            "selector": {"type": "string"},
+                            "x": {"type": "number"},
+                            "y": {"type": "number"},
+                            "to_x": {"type": "number"},
+                            "to_y": {"type": "number"},
+                            "text": {"type": "string"},
+                            "ms": {"type": "integer", "minimum": 0, "maximum": 5000},
+                            "expression": {"type": "string"}
+                        },
+                        "required": ["type"]
+                    }
+                },
+                "settle_ms": {"type": "integer", "minimum": 0, "maximum": 5000},
+                "timeout_seconds": {"type": "integer", "minimum": 5, "maximum": 90}
+            },
+            "required": ["url", "actions"]
+        }, 'web_app_check'),
         ToolSpec("remember", "Store a short durable preference, fact, or research note. Verified lessons are created only from exact successful outcomes; instructions and secrets are refused.", {
             "type": "object", "properties": {"content": {"type": "string"}, "kind": {"type": "string", "enum": ["fact", "preference", "research"]}, "source": {"type": "string"}}, "required": ["content"]
         }, 'remember'),

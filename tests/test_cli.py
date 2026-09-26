@@ -1151,6 +1151,28 @@ class ValidationAndDoctorTests(unittest.TestCase):
                 cli.main(["worker", "--poll", "0"])
         self.assertEqual(raised.exception.code, 2)
 
+    def test_execution_backend_summary_names_the_containment(self):
+        host = cli._execution_backend_summary("trusted-host", "host")
+        self.assertIn("not an OS sandbox", host)
+        self.assertNotIn("inactive", host)
+        docker = cli._execution_backend_summary("trusted-host", "docker")
+        self.assertIn("networkless container", docker)
+        self.assertIn("pinned sandbox image", docker)
+        idle = cli._execution_backend_summary("disabled", "host")
+        self.assertIn("inactive while host execution is disabled", idle)
+
+    def test_doctor_reports_the_execution_backend(self):
+        client = SimpleNamespace(models=Mock(return_value=["fast:1"]))
+        stdout = io.StringIO()
+        with (
+            patch.object(cli.Config, "load", return_value=fake_config()),
+            patch.object(cli, "_local_health_errors", return_value=[]),
+            patch.object(cli, "_new_client", return_value=client),
+            patch("sys.stdout", stdout),
+        ):
+            cli.doctor()
+        self.assertIn("Execution backend: host (contained host executor", stdout.getvalue())
+
     def test_doctor_requires_every_specialist_model(self):
         client = SimpleNamespace(models=Mock(return_value=["fast:1"]))
         stdout = io.StringIO()

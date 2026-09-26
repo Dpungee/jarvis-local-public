@@ -24,6 +24,26 @@ class FakeResponse:
         return False
 
 
+class FakeStreamResponse:
+    def __init__(self, *payloads, headers=None):
+        self.lines = [json.dumps(payload).encode("utf-8") + b"\n" for payload in payloads]
+        self.headers = {} if headers is None else headers
+        self.read_sizes = []
+
+    def readline(self, size=-1):
+        self.read_sizes.append(size)
+        if not self.lines:
+            return b""
+        line = self.lines.pop(0)
+        return line if size < 0 else line[:size]
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, traceback):
+        return False
+
+
 class SequenceOpen:
     def __init__(self, *items):
         self.items = list(items)
@@ -201,6 +221,83 @@ class ClientTests(unittest.TestCase):
 
         payloads = [json.loads(request.data) for request in opener.requests]
         self.assertEqual([payload["keep_alive"] for payload in payloads], ["0", "30m"])
+
+    def test_chat_stream_delivers_local_deltas_and_retains_final_metrics(self):
+        opener = SequenceOpen(FakeStreamResponse(
+            {
+                "model": "qwen3.5:9b",
+                "message": {"role": "assistant", "content": "hel"},
+                "done": False,
+            },
+            {
+                "model": "qwen3.5:9b",
+                "message": {"role": "assistant", "content": "lo"},
+                "done": False,
+            },
+            {
+                "model": "qwen3.5:9b",
+                "message": {"role": "assistant", "content": ""},
+                "done": True,
+                "done_reason": "stop",
+                "prompt_eval_count": 12,
+                "eval_count": 2,
+                "total_duration": 100,
+            },
+        ))
+        client = make_client(opener, keep_alive="30m")
+        deltas = []
+
+        response = client.chat_stream(
+            [{"role": "user", "content": "hello"}],
+            [],
+            "qwen3.5:9b",
+            deltas.append,
+            context_length=8192,
+            think=False,
+            keep_alive="5m",
+        )
+
+        self.assertEqual(deltas, ["hel", "lo"])
+        self.assertEqual(dict(response), {"role": "assistant", "content": "hello"})
+        self.assertEqual(response.done_reason, "stop")
+        self.assertEqual(response.metrics.prompt_tokens, 12)
+        self.assertEqual(response.metrics.completion_tokens, 2)
+        self.assertTrue(response.model_attested)
+        payload = json.loads(opener.requests[0].data)
+        self.assertTrue(payload["stream"])
+        self.assertEqual(payload["keep_alive"], "5m")
+        self.assertEqual(payload["options"]["num_ctx"], 8192)
+        self.assertFalse(payload["think"])
+
+    def test_chat_stream_cancellation_stops_before_another_delta(self):
+        opener = SequenceOpen(FakeStreamResponse(
+            {"message": {"role": "assistant", "content": "first"}, "done": False},
+            {"message": {"role": "assistant", "content": "second"}, "done": False},
+            {"message": {"role": "assistant", "content": ""}, "done": True},
+        ))
+        client = make_client(opener)
+        deltas = []
+
+        with self.assertRaisesRegex(OllamaError, "cancelled"):
+            client.chat_stream(
+                [],
+                [],
+                "qwen3.5:9b",
+                deltas.append,
+                cancellation_guard=lambda: bool(deltas),
+            )
+
+        self.assertEqual(deltas, ["first"])
+
+    def test_chat_stream_enforces_one_cumulative_response_limit(self):
+        stream = FakeStreamResponse(
+            {"message": {"role": "assistant", "content": "x" * 900}, "done": False},
+            {"message": {"role": "assistant", "content": "y" * 900}, "done": True},
+        )
+        client = make_client(SequenceOpen(stream), max_response_bytes=1024)
+
+        with self.assertRaisesRegex(OllamaError, "size limit"):
+            client.chat_stream([], [], "qwen3.5:9b", lambda _text: None)
 
     def test_local_resource_controls_and_preload_are_forwarded(self):
         opener = SequenceOpen(

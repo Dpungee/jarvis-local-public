@@ -64,7 +64,7 @@ jobs:
   test:
     name: Python ${{ matrix.python-version }} on Windows
     runs-on: windows-latest
-    timeout-minutes: 30
+    timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
@@ -82,9 +82,14 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
           cache: pip
+          cache-dependency-path: requirements/*.txt
 
-      - name: Install Jarvis
-        run: python -m pip install --disable-pip-version-check -e ".[documents]"
+      - name: Install Jarvis from the repository-owned locks
+        shell: bash
+        run: |
+          python -m pip install --disable-pip-version-check --require-hashes -r requirements/build-backend.txt
+          python -m pip install --disable-pip-version-check --require-hashes -r requirements/runtime-documents.txt
+          python -m pip install --disable-pip-version-check --no-deps --no-build-isolation -e .
 
       - name: Prepare stable test workspace
         shell: pwsh
@@ -104,7 +109,9 @@ jobs:
   quality:
     name: Coverage, browser syntax, and distribution
     runs-on: windows-latest
-    timeout-minutes: 35
+    # Full branch tracing, child-process collection, and package installation
+    # need separate headroom from the unchanged coverage acceptance threshold.
+    timeout-minutes: 60
     steps:
       - name: Check out source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -117,19 +124,29 @@ jobs:
         with:
           python-version: "3.13"
           cache: pip
+          cache-dependency-path: requirements/*.txt
 
       - name: Install quality tooling and Jarvis
         shell: pwsh
         run: |
-          python -m pip install --disable-pip-version-check --upgrade "pip>=26.2"
-          if ($LASTEXITCODE -ne 0) { throw "pip upgrade failed with exit code $LASTEXITCODE" }
-          python -m pip install --disable-pip-version-check coverage build pip-audit ruff bandit
-          if ($LASTEXITCODE -ne 0) { throw "Quality-tool installation failed with exit code $LASTEXITCODE" }
-          python -m pip install --disable-pip-version-check -e ".[documents]"
+          python -m pip install --disable-pip-version-check --require-hashes -r requirements/build-backend.txt
+          if ($LASTEXITCODE -ne 0) { throw "Build-backend lock installation failed with exit code $LASTEXITCODE" }
+          python -m pip install --disable-pip-version-check --require-hashes -r requirements/runtime-documents.txt
+          if ($LASTEXITCODE -ne 0) { throw "Runtime lock installation failed with exit code $LASTEXITCODE" }
+          python -m pip install --disable-pip-version-check --require-hashes -r requirements/ci-tools.txt
+          if ($LASTEXITCODE -ne 0) { throw "Quality-tool lock installation failed with exit code $LASTEXITCODE" }
+          python -m pip install --disable-pip-version-check --no-deps --no-build-isolation -e .
           if ($LASTEXITCODE -ne 0) { throw "Jarvis installation failed with exit code $LASTEXITCODE" }
 
-      - name: Check Presence JavaScript syntax
-        run: node --check jarvis/presence.js
+      - name: Check browser JavaScript syntax
+        shell: pwsh
+        run: |
+          node --check jarvis/presence.js
+          if ($LASTEXITCODE -ne 0) { throw "Presence JavaScript syntax check failed" }
+          node --check jarvis/command_center.js
+          if ($LASTEXITCODE -ne 0) { throw "Command Center JavaScript syntax check failed" }
+          node --check jarvis/agent_hub_static/hub.js
+          if ($LASTEXITCODE -ne 0) { throw "Agent Hub JavaScript syntax check failed" }
 
       - name: Run static correctness and high-severity security checks
         shell: pwsh
@@ -156,6 +173,8 @@ jobs:
         run: |
           coverage run --branch --source=jarvis,scripts -m unittest discover -s tests
           if ($LASTEXITCODE -ne 0) { throw "Coverage test run failed with exit code $LASTEXITCODE" }
+          coverage combine
+          if ($LASTEXITCODE -ne 0) { throw "Subprocess coverage combine failed with exit code $LASTEXITCODE" }
           coverage report --fail-under=75
           if ($LASTEXITCODE -ne 0) { throw "Coverage threshold failed with exit code $LASTEXITCODE" }
 
@@ -165,7 +184,7 @@ jobs:
           $sourceEpoch = (git log -1 --pretty=%ct).Trim()
           if ($LASTEXITCODE -ne 0 -or $sourceEpoch -notmatch '^\d+$') { throw "Could not derive a valid source epoch" }
           $env:SOURCE_DATE_EPOCH = $sourceEpoch
-          python -m build
+          python -m build --no-isolation
           if ($LASTEXITCODE -ne 0) { throw "Distribution build failed with exit code $LASTEXITCODE" }
 
       - name: Smoke-test the built wheel outside the source tree
@@ -180,16 +199,20 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw "Smoke virtual environment creation failed with exit code $LASTEXITCODE" }
           $python = Join-Path $smoke "Scripts\python.exe"
           $scripts = Join-Path $smoke "Scripts"
+          # Operator-path check, intentionally unpinned: the published wheel must resolve
+          # its own metadata the way a user installs it, without the repository locks.
           & $python -m pip install --disable-pip-version-check $wheel
           if ($LASTEXITCODE -ne 0) { throw "Wheel installation failed with exit code $LASTEXITCODE" }
           New-Item -ItemType Directory -Force -Path $outside, $data | Out-Null
           Push-Location $outside
           try {
             $env:JARVIS_DATA = $data
-            & $python -c "import importlib.metadata as m; eps={e.name:e for e in m.entry_points(group='console_scripts') if e.dist and e.dist.name=='jarvis-local'}; expected={'jarvis','jarvis-ui','jarvis-presence','jarvis-public-presence'}; assert expected <= set(eps); [eps[name].load() for name in sorted(expected)]"
+            & $python -c "import importlib.metadata as m; eps={e.name:e for e in m.entry_points(group='console_scripts') if e.dist and e.dist.name=='jarvis-local'}; expected={'jarvis','jarvis-ui','jarvis-presence','jarvis-public-presence','jarvis-command-center'}; assert expected <= set(eps); [eps[name].load() for name in sorted(expected)]"
             if ($LASTEXITCODE -ne 0) { throw "Installed entry-point import smoke test failed with exit code $LASTEXITCODE" }
             & $python -c "import importlib.metadata as m; from importlib.resources import files; from jarvis.long_horizon import LongHorizonStore; reqs=m.requires('jarvis-local') or []; assert any(r.lower().startswith('cryptography') for r in reqs); fixture=files('jarvis').joinpath('evaluation_fixtures/long_horizon_restart_holdout_v1.json'); assert fixture.is_file(); assert LongHorizonStore is not None"
             if ($LASTEXITCODE -ne 0) { throw "Installed Phase 5 runtime/fixture smoke test failed with exit code $LASTEXITCODE" }
+            & $python -c "from importlib.resources import files; from jarvis.agent_hub import STATIC_DIR; assets=files('jarvis').joinpath('agent_hub_static'); names=('index.html','hub.css','hub.js'); assert all(assets.joinpath(n).is_file() and assets.joinpath(n).read_text(encoding='utf-8').strip() for n in names); assert all((STATIC_DIR/n).is_file() for n in names)"
+            if ($LASTEXITCODE -ne 0) { throw "Installed Agent Hub asset smoke test failed with exit code $LASTEXITCODE" }
             & (Join-Path $scripts "jarvis.exe") --help | Out-Null
             if ($LASTEXITCODE -ne 0) { throw "jarvis --help failed with exit code $LASTEXITCODE" }
             & (Join-Path $scripts "jarvis.exe") workflow --help | Out-Null

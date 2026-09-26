@@ -101,7 +101,29 @@ def long_horizon_runtime_sha256() -> str:
     root = Path(__file__).parent
     material = {
         name: hashlib.sha256((root / name).read_bytes()).hexdigest()
-        for name in ("long_horizon.py", "memory.py", "long_horizon_eval_worker.py")
+        for name in (
+            "long_horizon.py", "memory.py", "long_horizon_eval_worker.py",
+            "memory_retrieval.py",
+            "memory_embeddings.py",
+            "memory_runtime.py",
+            "memory_schema_migrations.py",
+            "memory_projects_budget.py",
+            "memory_predictions.py",
+            "memory_conversations.py",
+            "memory_presence_companion.py",
+            "memory_ordinary_recall.py",
+            "memory_claims.py",
+            "memory_embedding_store.py",
+            "memory_lessons.py",
+            "memory_strategy_transfer.py",
+            "memory_strategy_trial.py",
+            "memory_tasks_scheduling.py",
+            "memory_operator_state.py",
+            "memory_approvals.py",
+            "memory_learning_ladder.py",
+            "memory_governance.py",
+            "memory_conversation_compaction.py",
+        )
     }
     return sha256_json(material)
 

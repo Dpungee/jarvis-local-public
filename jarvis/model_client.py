@@ -11,6 +11,7 @@ import os
 import queue
 import re
 import socket
+import sqlite3
 import ssl
 import stat
 import subprocess
@@ -478,6 +479,8 @@ class _CloudHTTPClient:
                 try:
                     exc.close()
                 except Exception:
+                    # Closing the error response is best-effort cleanup; the HTTP failure
+                    # itself is classified and handled below and must not be masked.
                     pass
                 retryable = status_code in TRANSIENT_HTTP_STATUS
                 # A rate limit applies to the provider/account, not one model.
@@ -600,6 +603,8 @@ class _CloudHTTPClient:
             try:
                 exc.close()
             except Exception:
+                # Closing the error response is best-effort cleanup; the HTTP failure
+                # itself is classified and handled below and must not be masked.
                 pass
             raise ModelProviderError(
                 self.provider,
@@ -1587,8 +1592,8 @@ def _codex_cli_launchable(executable: Path) -> bool:
     )
 
 
-def resolve_codex_cli_executable() -> Path | None:
-    """Resolve Codex CLI to a native executable without invoking a shell wrapper."""
+def codex_cli_candidates() -> tuple[str, ...]:
+    """Codex CLI candidate paths in Jarvis's preference order (unvalidated)."""
     appdata = os.environ.get("APPDATA")
     userprofile = os.environ.get("USERPROFILE")
     winget_native = _resolved_winget_link("codex.exe")
@@ -1642,7 +1647,12 @@ def resolve_codex_cli_executable() -> Path | None:
         # an app update cannot unexpectedly replace Jarvis's preferred CLI.
         str(plugin_appserver_native) if plugin_appserver_native is not None else None,
     )
-    for candidate in candidates:
+    return tuple(candidate for candidate in candidates if candidate)
+
+
+def resolve_codex_cli_executable() -> Path | None:
+    """Resolve Codex CLI to a native executable without invoking a shell wrapper."""
+    for candidate in codex_cli_candidates():
         if candidate:
             resolved = _validated_native_executable(candidate)
             if (
@@ -1717,11 +1727,64 @@ def _claude_cli_output_schema(
     }
 
 
+# The CLI prints these (and then runs at its default effort) when it does not apply the
+# effort it was given. With an operator-chosen effort that is a silent substitution, so the
+# call fails instead.
+_CLAUDE_EFFORT_NOT_APPLIED = re.compile(
+    r"Unknown --effort value[^\n]*|[^\n]*exceeds the cap[^\n]*|[^\n]*ultracode is not available[^\n]*"
+    r"|Failed to set effort level[^\n]*",
+    re.IGNORECASE,
+)
+
+
 class ClaudeCLIClient:
     """Bounded, tool-less Claude Code subprocess used as a Jarvis model backend."""
 
     provider = "claude-cli"
     default_model = DEFAULT_CLAUDE_CLI_MODEL
+    # Efforts the operator can pin (``claude --effort``; ``ultracode`` is xhigh plus Claude
+    # Code's workflow mode). ``None`` keeps the per-route mapping ("auto").
+    FIXED_EFFORTS = frozenset({"low", "medium", "high", "xhigh", "max", "ultracode"})
+    fixed_effort: str | None = None
+
+    def set_fixed_effort(self, effort: str | None) -> None:
+        """Use one effort for every call, replacing the per-route mapping; ``None`` restores it."""
+        if effort is not None and effort not in self.FIXED_EFFORTS:
+            raise ValueError(f"{self.provider} does not accept effort {effort!r}")
+        self.fixed_effort = effort
+
+    def _note_usage(self, model: str, context_tokens: Any, output_tokens: Any,
+                    context_window: Any = None) -> None:
+        def count(value: Any) -> int | None:
+            return value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else None
+
+        usage = getattr(self, "call_usage", None)
+        if usage is None:
+            usage = self.call_usage = []
+        usage.append({"model": str(model)[:200], "context_tokens": count(context_tokens),
+                      "output_tokens": count(output_tokens), "context_window": count(context_window),
+                      "at": time.time()})
+        del usage[:-64]
+
+    def _note_claude_usage(self, result: dict[str, Any], model: str) -> None:
+        usage = result.get("usage") if isinstance(result.get("usage"), dict) else {}
+        parts = [usage.get(key) for key in ("input_tokens", "cache_read_input_tokens",
+                                            "cache_creation_input_tokens")]
+        context = sum(p for p in parts if isinstance(p, int) and not isinstance(p, bool)) if any(
+            isinstance(p, int) for p in parts) else None
+        windows = [entry.get("contextWindow") for entry in (result.get("modelUsage") or {}).values()
+                   if isinstance(entry, dict)] if isinstance(result.get("modelUsage"), dict) else []
+        window = max((w for w in windows if isinstance(w, int)), default=None)
+        self._note_usage(model, context, usage.get("output_tokens"), window)
+
+    def _note_rate_limits(self, info: dict[str, Any]) -> None:
+        windows = {}
+        for name, window in (info.get("unifiedWindows") or {}).items():
+            if isinstance(window, dict) and isinstance(window.get("utilization"), (int, float)):
+                windows[str(name)[:40]] = {"utilization": float(window["utilization"]),
+                                           "resets_at": window.get("resetsAt")}
+        self.rate_limits = {"status": str(info.get("status") or "")[:40], "windows": windows,
+                            "observed_at": time.time()}
 
     def __init__(
         self,
@@ -1735,10 +1798,21 @@ class ClaudeCLIClient:
         runner: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
         sleep: Callable[[float], None] = time.sleep,
         working_directory_owner: tempfile.TemporaryDirectory[str] | None = None,
+        unthinking_effort: str | None = None,
     ) -> None:
         self.executable = str(executable)
         self.working_directory = str(working_directory)
         self._working_directory_owner = working_directory_owner
+        if unthinking_effort is not None and unthinking_effort not in {"low", "medium"}:
+            raise ValueError("Claude CLI unthinking effort must be low or medium")
+        # ``think=False`` means the Jarvis route asked for no extended thinking. When set,
+        # it is sent as this explicit effort instead of leaving the CLI's default in force.
+        self.unthinking_effort = unthinking_effort
+        # What each call really cost in context (input plus cached input the model read)
+        # and the latest subscription rate-limit windows the CLI reported. Operational
+        # numbers only; no prompt or response text is kept.
+        self.call_usage: list[dict[str, Any]] = []
+        self.rate_limits: dict[str, Any] | None = None
         self.generation_timeout = _bounded_float(
             generation_timeout, "Claude CLI generation timeout", 1.0, 3600.0
         )
@@ -1831,6 +1905,174 @@ class ClaudeCLIClient:
             except subprocess.TimeoutExpired:
                 pending_input = None
 
+    def _run_cli_streaming(
+        self,
+        args: list[str],
+        *,
+        prompt: str,
+        timeout: float,
+        flags: int,
+        cancellation_guard: Callable[[], bool] | None,
+        on_text: Callable[[str], None],
+    ) -> subprocess.CompletedProcess[str]:
+        """Run one ``stream-json`` turn, forwarding visible text deltas as they arrive.
+
+        Returns a completed process whose stdout is only the final ``result`` record, which
+        has the same shape as ``--output-format json``, so parsing and every check after
+        the call are identical to the non-streaming path. The same deadline, cancellation
+        and response-size bounds apply.
+        """
+        process = subprocess.Popen(
+            args,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            encoding="utf-8",
+            errors="strict",
+            cwd=self.working_directory,
+            env=self._subprocess_environment(),
+            creationflags=flags,
+        )
+        lines: queue.Queue[str | None] = queue.Queue()
+        stderr_parts: list[str] = []
+
+        def write_prompt() -> None:
+            try:
+                assert process.stdin is not None
+                process.stdin.write(prompt)
+                process.stdin.close()
+            except (OSError, ValueError):
+                pass
+
+        def read_stdout() -> None:
+            try:
+                assert process.stdout is not None
+                for line in process.stdout:
+                    lines.put(line)
+            except (OSError, ValueError, UnicodeDecodeError):
+                pass
+            finally:
+                lines.put(None)
+
+        def read_stderr() -> None:
+            try:
+                assert process.stderr is not None
+                stderr_parts.append(process.stderr.read(self.max_response_bytes + 1))
+            except (OSError, ValueError, UnicodeDecodeError):
+                pass
+
+        threads = [threading.Thread(target=target, daemon=True)
+                   for target in (write_prompt, read_stdout, read_stderr)]
+        for thread in threads:
+            thread.start()
+
+        def close_pipes() -> None:
+            for thread in threads:
+                thread.join(1.0)
+            for stream in (process.stdout, process.stderr):
+                try:
+                    if stream is not None:
+                        stream.close()
+                except OSError:
+                    pass
+
+        def stop() -> None:
+            process.kill()
+            process.wait()
+            close_pipes()
+
+        deadline = time.monotonic() + timeout
+        received = 0
+        result_line = ""
+        try:
+            while True:
+                if cancellation_guard is not None and cancellation_guard():
+                    stop()
+                    raise ModelProviderError(self.provider, "request was cancelled")
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    stop()
+                    raise subprocess.TimeoutExpired(args, timeout)
+                try:
+                    line = lines.get(timeout=min(0.1, remaining))
+                except queue.Empty:
+                    continue
+                if line is None:
+                    break
+                received += len(line.encode("utf-8", errors="replace"))
+                if received > self.max_response_bytes:
+                    stop()
+                    raise ModelProviderError(
+                        self.provider, "response exceeded the configured size limit"
+                    )
+                try:
+                    item = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if not isinstance(item, dict):
+                    continue
+                if item.get("type") == "rate_limit_event" and isinstance(item.get("rate_limit_info"), dict):
+                    self._note_rate_limits(item["rate_limit_info"])
+                    continue
+                if item.get("type") == "result":
+                    result_line = line.strip()
+                    continue
+                event = item.get("event") if item.get("type") == "stream_event" else None
+                delta = event.get("delta") if isinstance(event, dict) else None
+                if (
+                    isinstance(event, dict)
+                    and event.get("type") == "content_block_delta"
+                    and isinstance(delta, dict)
+                    and delta.get("type") == "text_delta"
+                    and isinstance(delta.get("text"), str)
+                    and delta["text"]
+                ):
+                    on_text(delta["text"])
+            remaining = max(1.0, deadline - time.monotonic())
+            try:
+                process.wait(timeout=remaining)
+            except subprocess.TimeoutExpired:
+                stop()
+                raise
+            close_pipes()
+        except BaseException:
+            if process.poll() is None:
+                stop()
+            raise
+        return subprocess.CompletedProcess(
+            args, int(process.returncode), result_line, "".join(stderr_parts)
+        )
+
+    def chat_stream(
+        self,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]],
+        model: str,
+        on_delta: Callable[[str], None],
+        context_length: int = 16384,
+        think: bool | str | None = None,
+        temperature: float = 0.2,
+        response_format: str | dict[str, Any] | None = None,
+        seed: int | None = None,
+        cancellation_guard: Callable[[], bool] | None = None,
+    ) -> ChatResponse:
+        """Stream a plain visible answer; structured and tool turns use ``chat`` unchanged."""
+        if not callable(on_delta):
+            raise ValueError("stream delta callback must be callable")
+        return self.chat(
+            messages,
+            tools,
+            model,
+            context_length=context_length,
+            think=think,
+            temperature=temperature,
+            response_format=response_format,
+            seed=seed,
+            cancellation_guard=cancellation_guard,
+            _on_delta=on_delta if not tools and response_format is None else None,
+        )
+
     def chat(
         self,
         messages: list[dict[str, Any]],
@@ -1842,6 +2084,7 @@ class ClaudeCLIClient:
         response_format: str | dict[str, Any] | None = None,
         seed: int | None = None,
         cancellation_guard: Callable[[], bool] | None = None,
+        _on_delta: Callable[[str], None] | None = None,
     ) -> ChatResponse:
         del context_length, temperature, seed
         if not isinstance(messages, list) or any(not isinstance(item, dict) for item in messages):
@@ -1865,11 +2108,12 @@ class ClaudeCLIClient:
         )
         if len(prompt.encode("utf-8")) > 16 * 1024 * 1024:
             raise ModelProviderError(self.provider, "request exceeded the 16 MiB safety limit")
+        streaming = _on_delta is not None and plain_response
         args = [
             self.executable,
             "--print",
             "--output-format",
-            "json",
+            *(("stream-json", "--verbose", "--include-partial-messages") if streaming else ("json",)),
             "--no-session-persistence",
             "--safe-mode",
             "--disable-slash-commands",
@@ -1908,13 +2152,24 @@ class ClaudeCLIClient:
         effort: str | None = None
         if think is True:
             effort = "medium"
+        elif think is False and self.unthinking_effort is not None:
+            effort = self.unthinking_effort
         elif isinstance(think, str) and think.casefold() in {
             "low", "medium", "high", "xhigh", "max"
         }:
             effort = think.casefold()
+        if self.fixed_effort is not None:
+            effort = self.fixed_effort
         if effort is not None:
             args.extend(("--effort", effort))
         flags = getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0
+        streamed_text = False
+
+        def forward_delta(text: str) -> None:
+            nonlocal streamed_text
+            streamed_text = True
+            assert _on_delta is not None
+            _on_delta(text)
         deadline = time.monotonic() + self.generation_timeout
         completed: subprocess.CompletedProcess[str] | None = None
         stdout = ""
@@ -1931,12 +2186,23 @@ class ClaudeCLIClient:
                     provider_unavailable=True,
                 )
             try:
-                completed = self._run_cli(
-                    args,
-                    prompt=prompt,
-                    timeout=remaining,
-                    flags=flags,
-                    cancellation_guard=cancellation_guard,
+                completed = (
+                    self._run_cli_streaming(
+                        args,
+                        prompt=prompt,
+                        timeout=remaining,
+                        flags=flags,
+                        cancellation_guard=cancellation_guard,
+                        on_text=forward_delta,
+                    )
+                    if streaming
+                    else self._run_cli(
+                        args,
+                        prompt=prompt,
+                        timeout=remaining,
+                        flags=flags,
+                        cancellation_guard=cancellation_guard,
+                    )
                 )
             except subprocess.TimeoutExpired:
                 raise ModelProviderError(
@@ -1957,6 +2223,15 @@ class ClaudeCLIClient:
             ):
                 raise ModelProviderError(
                     self.provider, "response exceeded the configured size limit"
+                )
+            ignored = (
+                _CLAUDE_EFFORT_NOT_APPLIED.search(stderr) if self.fixed_effort is not None else None
+            )
+            if ignored is not None:
+                raise ModelProviderError(
+                    self.provider,
+                    f"the CLI did not apply the chosen effort '{self.fixed_effort}': "
+                    + " ".join(ignored.group(0).split())[:200],
                 )
             if completed.returncode == 0:
                 break
@@ -1983,7 +2258,14 @@ class ClaudeCLIClient:
                         )
                     )
                 )
-            if authentication_failure or max_turns_exhausted or attempt >= self.max_retries:
+            if (
+                authentication_failure
+                or max_turns_exhausted
+                or attempt >= self.max_retries
+                # A retry after visible streamed text would show the operator a second,
+                # different draft appended to the first; fail this call visibly instead.
+                or streamed_text
+            ):
                 raise ModelProviderError(
                     self.provider,
                     (
@@ -2022,6 +2304,7 @@ class ClaudeCLIClient:
             raise ModelProviderError(self.provider, "returned malformed JSON") from None
         if not isinstance(result, dict) or result.get("is_error") is True:
             raise ModelProviderError(self.provider, "returned an unsuccessful result")
+        self._note_claude_usage(result, model)
         if plain_response:
             content = result.get("result")
             if not isinstance(content, str):
@@ -2308,6 +2591,7 @@ class _CodexAppServerConversation:
 
 
 class _CodexAppServerTransport:
+    fixed_effort: str | None = None
     """Supervise one subscription-authenticated Codex app-server JSONL process."""
 
     _MAX_PROTOCOL_LINE_BYTES = 16 * 1024 * 1024
@@ -2985,6 +3269,8 @@ class _CodexAppServerTransport:
                 "none", "low", "medium", "high", "xhigh", "max"
             }:
                 effort = "xhigh" if think.casefold() == "max" else think.casefold()
+            if self.fixed_effort is not None:
+                effort = self.fixed_effort
             if effort is not None:
                 turn_params["effort"] = effort
             if model.casefold() not in {"auto", "default"}:
@@ -3144,6 +3430,13 @@ class CodexCLIClient(ClaudeCLIClient):
 
     provider = "codex-cli"
     default_model = DEFAULT_CODEX_CLI_MODEL
+    FIXED_EFFORTS = frozenset({"none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"})
+
+    def set_fixed_effort(self, effort: str | None) -> None:
+        super().set_fixed_effort(effort)
+        with self._app_server_lock:
+            if self._app_server is not None:
+                self._app_server.fixed_effort = effort
 
     def __init__(
         self,
@@ -3223,6 +3516,8 @@ class CodexCLIClient(ClaudeCLIClient):
         try:
             self.close()
         except BaseException:
+            # Finalizers must never raise: interpreter shutdown can leave the transport
+            # half-closed, and an exception here would only be printed and discarded.
             pass
 
     def probe_authentication(self) -> str:
@@ -3553,6 +3848,9 @@ class CodexCLIClient(ClaudeCLIClient):
             "none", "low", "medium", "high", "xhigh", "max"
         }:
             effort = "xhigh" if think.casefold() == "max" else think.casefold()
+        if self.fixed_effort is not None:
+            # Sent as chosen: the catalogue, not this mapping, decides what the model takes.
+            effort = self.fixed_effort
         if effort is not None:
             args.extend(("--config", f'model_reasoning_effort="{effort}"'))
         if model.casefold() not in {"auto", "default"}:
@@ -3757,6 +4055,7 @@ class CodexCLIClient(ClaudeCLIClient):
                 "prompt_eval_count": usage.get("input_tokens"),
                 "eval_count": usage.get("output_tokens"),
             }
+            self._note_usage(model, usage.get("input_tokens"), usage.get("output_tokens"))
             self.authentication_method = "chatgpt"
             return ChatResponse(message, synthetic)
         finally:
@@ -3888,6 +4187,7 @@ class CodexCLIClient(ClaudeCLIClient):
                 generation_timeout=self.generation_timeout,
                 max_response_bytes=self.max_response_bytes,
             )
+            current.fixed_effort = self.fixed_effort
             self._app_server = current
             return current
 
@@ -3955,6 +4255,20 @@ class CodexCLIClient(ClaudeCLIClient):
 class ModelClient:
     """Dispatch Jarvis's chat contract to local, API, or bounded CLI providers."""
 
+    def chat_released(self, gate, *, ticket: str, actor: str, model: str) -> ChatResponse:
+        """Host-only approved-context entry point, without arbitrary request kwargs.
+
+        No attachments, tool schemas, tool execution or continuation inheritance.
+        Existing chat entry points are not globally gated by this opt-in method.
+        """
+        from .cloud_release import CloudReleaseDenied, CloudReleaseGate
+
+        if type(gate) is not CloudReleaseGate:
+            raise CloudReleaseDenied("invalid_gate")
+        messages = gate.consume(ticket=ticket, actor=actor, model=model)
+        with model_conversation_scope("release-" + ticket):
+            return self.chat(messages, [], model)
+
     def __init__(
         self,
         ollama: OllamaClient | None,
@@ -3964,6 +4278,9 @@ class ModelClient:
         claude_cli: ClaudeCLIClient | None = None,
         codex_cli: CodexCLIClient | None = None,
         configured_models: tuple[str, ...] = (),
+        local_coding_database: Path | None = None,
+        local_coding_context: str = "disabled",
+        local_coding_context_max_tokens: int = 2048,
         provider_circuits: dict[str, tuple[float, ModelProviderError]] | None = None,
         provider_circuits_lock: threading.Lock | None = None,
     ) -> None:
@@ -3973,6 +4290,11 @@ class ModelClient:
         self.claude_cli = claude_cli
         self.codex_cli = codex_cli
         self.configured_models = tuple(configured_models)
+        self.local_coding_database = (
+            Path(local_coding_database) if local_coding_database is not None else None
+        )
+        self.local_coding_context = str(local_coding_context).strip().casefold()
+        self.local_coding_context_max_tokens = int(local_coding_context_max_tokens)
         self._models_cache: tuple[str, ...] = ()
         self._ollama_online: bool | None = None
         self._ollama_error: OllamaError | None = None
@@ -4089,7 +4411,7 @@ class ModelClient:
     def _cloud_chat_stream(
         self,
         provider: str,
-        client: OpenAIClient | AnthropicClient | CodexCLIClient,
+        client: OpenAIClient | AnthropicClient | ClaudeCLIClient | CodexCLIClient,
         messages: list[dict[str, Any]],
         tools: list[dict[str, Any]],
         provider_model: str,
@@ -4209,6 +4531,69 @@ class ModelClient:
             return False
         return self.ollama.supports_thinking(provider_model)
 
+    def _local_coding_messages(
+        self,
+        messages: list[dict[str, Any]],
+        model: str,
+        provider: str,
+        *,
+        tools: list[dict[str, Any]] | None = None,
+        context_length: int | None = None,
+    ) -> list[dict[str, Any]]:
+        """Inject bounded project evidence only for routed Ollama coding calls."""
+        if (
+            provider != "ollama"
+            or not bool(getattr(model, "jarvis_coding_intent", False))
+            or self.local_coding_context == "disabled"
+            or self.local_coding_database is None
+        ):
+            return messages
+        user_index: int | None = None
+        query = ""
+        for index in range(len(messages) - 1, -1, -1):
+            message = messages[index]
+            if str(message.get("role") or "") != "user":
+                continue
+            content = message.get("content")
+            if isinstance(content, str) and content.strip():
+                user_index = index
+                query = content[:16_000]
+                break
+        if user_index is None:
+            return messages
+        retrieval_tokens = self.local_coding_context_max_tokens
+        if self.local_coding_context == "enabled" and context_length is not None:
+            output_tokens = int(getattr(self.ollama, "max_output_tokens", 2048))
+            input_budget_chars = max(0, (int(context_length) - output_tokens) * 3)
+            request_chars = len(json.dumps(
+                [messages, tools or []],
+                ensure_ascii=False,
+                separators=(",", ":"),
+                default=str,
+            ))
+            remaining_chars = input_budget_chars - request_chars - 256
+            retrieval_tokens = min(retrieval_tokens, remaining_chars // 4)
+            if retrieval_tokens < 256:
+                return messages
+        try:
+            from .local_coding_context import LocalCodingLibrary
+
+            result = LocalCodingLibrary(self.local_coding_database).retrieve(
+                query,
+                mode=self.local_coding_context,
+                max_tokens=retrieval_tokens,
+            )
+        except (OSError, sqlite3.Error, TypeError, ValueError, RuntimeError):
+            return messages
+        if self.local_coding_context != "enabled" or not result.prompt_block:
+            return messages
+        contextualized = list(messages)
+        contextualized.insert(user_index, {
+            "role": "user",
+            "content": result.prompt_block,
+        })
+        return contextualized
+
     def chat(
         self,
         messages: list[dict[str, Any]],
@@ -4281,6 +4666,13 @@ class ModelClient:
             )
         if self.ollama is None:
             raise ModelProviderError("Ollama", "is disabled by configuration")
+        messages = self._local_coding_messages(
+            messages,
+            model,
+            provider,
+            tools=tools,
+            context_length=kwargs.get("context_length"),
+        )
         return self.ollama.chat(
             messages,
             tools,
@@ -4297,16 +4689,35 @@ class ModelClient:
         on_delta: Callable[[str], None],
         **kwargs: Any,
     ) -> ChatResponse:
-        """Stream supported cloud text while retaining chat() as the fallback contract."""
+        """Stream supported provider text while retaining chat() as the fallback contract."""
         if not callable(on_delta):
             raise ValueError("stream delta callback must be callable")
         provider, provider_model = split_model_reference(model)
-        kwargs.pop("keep_alive", None)
+        keep_alive = kwargs.pop("keep_alive", None)
         cancellation_guard = kwargs.pop("cancellation_guard", None)
         if cancellation_guard is not None and not callable(cancellation_guard):
             raise ValueError("cancellation guard must be callable")
         if cancellation_guard is not None and cancellation_guard():
             raise ModelProviderError(provider, "request was cancelled")
+        if provider == "ollama":
+            if self.ollama is None:
+                raise ModelProviderError("Ollama", "is disabled by configuration")
+            messages = self._local_coding_messages(
+                messages,
+                model,
+                provider,
+                tools=tools,
+                context_length=kwargs.get("context_length"),
+            )
+            return self.ollama.chat_stream(
+                messages,
+                tools,
+                provider_model,
+                on_delta,
+                keep_alive=keep_alive,
+                cancellation_guard=cancellation_guard,
+                **kwargs,
+            )
         if provider == "openai" and self.openai is not None:
             return self._cloud_chat_stream(
                 provider,
@@ -4340,7 +4751,18 @@ class ModelClient:
                 cancellation_guard=cancellation_guard,
                 **kwargs,
             )
-        # Local and remaining CLI providers retain the exact non-streaming behavior.
+        if provider == "claude-cli" and self.claude_cli is not None:
+            return self._cloud_chat_stream(
+                provider,
+                self.claude_cli,
+                messages,
+                tools,
+                provider_model,
+                on_delta,
+                cancellation_guard=cancellation_guard,
+                **kwargs,
+            )
+        # Local providers retain the exact non-streaming behavior.
         return self.chat(
             messages,
             tools,
@@ -4467,6 +4889,20 @@ def build_model_client(config: Any) -> ModelClient:
         claude_cli=claude_cli,
         codex_cli=codex_cli,
         configured_models=configured,
+        local_coding_database=(
+            Path(config.data_dir) / "local_coding_context.db"
+            if getattr(config, "data_dir", None) is not None
+            else None
+        ),
+        local_coding_context=(
+            "disabled"
+            if str(getattr(config, "strategy_transfer", "disabled")).casefold()
+            == "trial"
+            else getattr(config, "local_coding_context", "disabled")
+        ),
+        local_coding_context_max_tokens=getattr(
+            config, "local_coding_context_max_tokens", 2048
+        ),
         provider_circuits=shared_circuits,
         provider_circuits_lock=_SHARED_PROVIDER_CIRCUITS_LOCK,
     )

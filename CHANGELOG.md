@@ -5,6 +5,34 @@ semantic versioning for tagged releases.
 
 ## [Unreleased]
 
+### Autonomous multi-agent upgrade preparation
+
+- Correct the running-task prerequisite invariant and add schema-2 immutable
+  event content snapshots with validated event-only replay. Preserve legacy
+  history without fabricating missing content; document the pending runtime-memory
+  integration choices separately from implemented runtime behavior.
+
+- Complete the Phase A non-memory architecture audit and add the first persistent
+  peer-agent runtime: stable identities, direct mailboxes, rooms, task ownership
+  and delegation, discovery, lifecycle/model independence, separate autonomy and
+  authority, scoped capability grants, acyclic task dependencies,
+  content-addressed artifact references, opt-in help broadcasts, targeted
+  review/opinion/vote/evidence requests, recipient-owned delivery/read receipts,
+  monotonic room-consumption cursors, ordered causal events, and restart recovery.
+- Add adversarial coverage for idempotent retries, concurrent writers, transaction
+  rollback, project and membership boundaries, current-owner task transitions,
+  capability expiration/revocation, dependency cycles, artifact provenance,
+  peer-request eligibility, database authority, and the two-agent restart acceptance
+  path. Memory schemas and Claude's M0-M5 ownership remain untouched.
+- Prepare the operator's autonomous multi-agent roadmap, phased plan, and Claude
+  memory handoff against the merged schema-50 VTMF baseline.
+- Update Google authentication dependencies to google-auth 2.57.0 and
+  google-auth-httplib2 0.4.2.
+- Bound dependency-test temporary directory names on Windows and explicitly use
+  the data extraction filter for legacy Git-archive tests where available.
+- Clarify the synthetic leakage fixture flagged by CodeQL; no live credential is
+  written by that test.
+
 ### The learning ladder: governed skill promotion (VTMF M4)
 
 - A single verified outcome no longer writes a live, model-visible learned

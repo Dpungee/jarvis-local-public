@@ -609,6 +609,9 @@ class FeatureOnboardingStore:
                             expected_current_existed=True,
                         )
                     except BaseException:
+                        # Rollback must run to completion even under KeyboardInterrupt; the
+                        # original failure `exc` is reported after this step and a rollback error
+                        # must not replace it.
                         pass
                 restored_existed = os.path.lexists(self.env_path)
                 try:
@@ -644,6 +647,9 @@ class FeatureOnboardingStore:
                             error_code="configuration_changed_during_decision",
                         )
                     except BaseException:
+                        # Rollback must run to completion even under KeyboardInterrupt; the
+                        # original failure `exc` is reported after this step and a rollback error
+                        # must not replace it.
                         pass
                 if isinstance(exc, FeatureOnboardingConflict):
                     raise

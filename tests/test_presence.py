@@ -19,7 +19,9 @@ from jarvis.agent import AgentRunCancelled
 from jarvis.approvals import approval_resource
 from jarvis.config import Config
 from jarvis.memory import Memory
+from jarvis.local_broker import LocalBrokerClient, LocalBrokerError
 from jarvis.ollama_client import OllamaError
+from jarvis.presence import _launch_indicator, start_presence_broker
 from jarvis.network_inventory import NetworkInventoryRateLimited
 from jarvis.public_presence_store import PublicPresenceStopped, PublicPresenceStore
 from jarvis.presence import (
@@ -67,6 +69,15 @@ class _FakeRuntime:
             "expires_at": time.time() + 45,
         }
         self.companion_suggestion_decisions = []
+        self.demonstration_state = {
+            "recording": False,
+            "state": "idle",
+            "draft": None,
+            "frame_count": 0,
+            "transition_count": 0,
+            "raw_screens_persisted": False,
+        }
+        self.demonstration_draft_payload = None
         self.public_presence_state = {
             "configured_enabled": False,
             "control": {
@@ -239,6 +250,14 @@ class _FakeRuntime:
             "pending_approvals": 0,
             "provider": {"openai_configured": True, "ollama_online": False},
             "models": {"fast": "openai:gpt-test"},
+            "access_policy": {
+                "default": "workspace",
+                "modes": [
+                    {"id": "read-only", "label": "Read only", "available": True},
+                    {"id": "workspace", "label": "Workspace", "available": True},
+                    {"id": "full", "label": "Full access", "available": True},
+                ],
+            },
             "screen_companion": self.companion_state,
             "public_presence": self.public_presence_state,
             "fatal_error": None,
@@ -359,7 +378,41 @@ class _FakeRuntime:
         return self.public_presence_state
 
     def screen_companion_status(self):
-        return self.companion_state
+        return {**self.companion_state, "demonstration": self.demonstration_state}
+
+    def demonstration_recording_status(self):
+        return self.demonstration_state
+
+    def start_demonstration_recording(self):
+        self.demonstration_state.update({"recording": True, "state": "recording"})
+        return self.demonstration_state
+
+    def stop_demonstration_recording(self):
+        self.demonstration_state.update({
+            "recording": False,
+            "state": "analyzing",
+            "analysis_pass": 0,
+        })
+        return self.demonstration_state
+
+    def edit_demonstration_skill_draft(self, payload):
+        self.demonstration_draft_payload = dict(payload)
+        self.demonstration_state.update({"state": "draft_ready", "draft": dict(payload)})
+        return {"state": "draft_ready", "draft": dict(payload)}
+
+    def create_demonstration_skill(self, payload):
+        self.demonstration_draft_payload = dict(payload)
+        self.demonstration_state.update({"state": "created", "draft": None})
+        return {
+            "name": payload["name"],
+            "description": payload["description"],
+            "sha256": "f" * 64,
+        }
+
+    def delete_demonstration_skill_draft(self):
+        deleted = self.demonstration_state.get("draft") is not None
+        self.demonstration_state.update({"state": "idle", "draft": None})
+        return {"deleted": deleted}
 
     def screen_companion_indicator_status(self):
         state = {
@@ -497,8 +550,16 @@ class _FakeRuntime:
         self.deleted_conversations.append(conversation_id)
         return {"id": conversation_id, "project_id": 1}
 
-    def submit(self, conversation_id, prompt, model, attachments=None):
-        self.submitted = (conversation_id, prompt, model, attachments)
+    def submit(
+        self,
+        conversation_id,
+        prompt,
+        model,
+        attachments=None,
+        *,
+        access_mode="workspace",
+    ):
+        self.submitted = (conversation_id, prompt, model, attachments, access_mode)
         return "a" * 32
 
     def cancel(self, job_id):
@@ -697,10 +758,13 @@ class PresenceHelpersTests(unittest.TestCase):
                     f"Incomplete: Approval request #{approval_id} is waiting for an operator decision. Review it.",
                 )
             runtime = PresenceRuntime(config)
+            runtime._conversation_access_modes[conversation_id] = "full"
             with patch.object(runtime, "submit", return_value="a" * 32) as submit:
                 self.assertTrue(runtime.decide_approval(approval_id, True))
 
-            submit.assert_called_once_with(conversation_id, prompt, "auto")
+            submit.assert_called_once_with(
+                conversation_id, prompt, "auto", access_mode="full"
+            )
             with Memory(data / "jarvis.db") as memory:
                 self.assertEqual(memory.get_approval(approval_id)["status"], "approved")
 
@@ -757,7 +821,9 @@ class PresenceHelpersTests(unittest.TestCase):
                 grant_id = runtime.decide_approval_always(approval_id)
 
             self.assertIsInstance(grant_id, int)
-            submit.assert_called_once_with(conversation_id, prompt, "auto")
+            submit.assert_called_once_with(
+                conversation_id, prompt, "auto", access_mode="workspace"
+            )
             with Memory(data / "jarvis.db") as memory:
                 self.assertEqual(
                     memory.list_persistent_approvals(include_revoked=False)[0]["id"],
@@ -781,7 +847,9 @@ class PresenceHelpersTests(unittest.TestCase):
                     session_approval_id
                 )
             self.assertIsInstance(session_grant_id, int)
-            submit.assert_called_once_with(conversation_id, prompt, "auto")
+            submit.assert_called_once_with(
+                conversation_id, prompt, "auto", access_mode="workspace"
+            )
             with Memory(data / "jarvis.db") as memory:
                 session_grant = memory.list_persistent_approvals(
                     include_revoked=False
@@ -1181,6 +1249,205 @@ class PresenceHelpersTests(unittest.TestCase):
                     self.assertNotIn("raw detail", rendered)
                     self.assertIn("request was preserved", rendered.casefold())
                     self.assertFalse(runtime.status()["provider"]["openai_healthy"])
+                finally:
+                    runtime.shutdown()
+
+    def test_broker_request_dispatches_only_companion_operations(self):
+        runtime = PresenceRuntime.__new__(PresenceRuntime)
+        runtime.screen_companion_indicator_status = lambda: {"mode": "observe"}
+        runtime.screen_companion_action_status = (
+            lambda identifier: {"job_id": identifier} if identifier == "b" * 32 else None
+        )
+        runtime.control_screen_companion = (
+            lambda *, action, mode=None: {"action": action, "mode": mode}
+        )
+        runtime.respond_screen_companion_suggestion = (
+            lambda identifier, *, accept: {"accepted": accept, "id": identifier}
+        )
+        self.assertEqual(
+            runtime.broker_request({"kind": "companion.indicator", "payload": {}}),
+            {"mode": "observe"},
+        )
+        self.assertEqual(
+            runtime.broker_request({"kind": "companion.action", "payload": {"id": "b" * 32}}),
+            {"action": {"job_id": "b" * 32}},
+        )
+        with self.assertRaises(LookupError):
+            runtime.broker_request({"kind": "companion.action", "payload": {"id": "c" * 32}})
+        with self.assertRaises(ValueError):
+            runtime.broker_request({"kind": "companion.action", "payload": {"id": "bad"}})
+        self.assertEqual(
+            runtime.broker_request({"kind": "companion.control", "payload": {"action": "pause"}}),
+            {"state": {"action": "pause", "mode": None}},
+        )
+        self.assertEqual(
+            runtime.broker_request(
+                {"kind": "companion.suggestion", "payload": {"id": "a" * 32, "accept": False}}
+            ),
+            {"accepted": False, "id": "a" * 32},
+        )
+        with self.assertRaises(ValueError):
+            runtime.broker_request(
+                {"kind": "companion.suggestion", "payload": {"id": "a" * 32, "accept": "yes"}}
+            )
+        for kind in ("status", "companion.forget", "companion.rules", "", "presence.shutdown"):
+            with self.subTest(kind=kind):
+                with self.assertRaises(LookupError):
+                    runtime.broker_request({"kind": kind, "payload": {}})
+        with self.assertRaises(ValueError):
+            runtime.broker_request({"kind": "companion.indicator", "payload": []})
+
+    def test_indicator_launches_only_through_a_running_broker(self):
+        calls: list[dict] = []
+
+        def fake_start(host, port, *, pipe_name=None):
+            calls.append({"host": host, "port": port, "pipe_name": pipe_name})
+            return SimpleNamespace(poll=lambda: None)
+
+        enabled = SimpleNamespace(screen_companion_indicator=True)
+        disabled = SimpleNamespace(screen_companion_indicator=False)
+        broker = SimpleNamespace(name="\\\\.\\pipe\\jarvis-test-launch")
+        with patch("jarvis.presence.start_indicator_process", fake_start):
+            self.assertIsNone(_launch_indicator(enabled, None, "127.0.0.1", 8787))
+            self.assertIsNone(_launch_indicator(disabled, broker, "127.0.0.1", 8787))
+            self.assertIsNotNone(_launch_indicator(enabled, broker, "127.0.0.1", 8787))
+        self.assertEqual(calls, [{"host": "127.0.0.1", "port": 8787, "pipe_name": broker.name}])
+
+    def test_start_presence_broker_fails_closed_and_reports(self):
+        events: list[tuple[str, dict]] = []
+        runtime = SimpleNamespace(
+            emit=lambda kind, **payload: events.append((kind, payload)),
+            broker_request=lambda request: {"echo": request["kind"]},
+        )
+        with tempfile.TemporaryDirectory() as data:
+            with patch("jarvis.presence.LocalBrokerServer") as fake:
+                fake.return_value.start.side_effect = LocalBrokerError(
+                    "the broker pipe name already exists"
+                )
+                self.assertIsNone(start_presence_broker(runtime, Path(data)))
+            self.assertEqual(events[-1][0], "local_broker_unavailable")
+            self.assertIn("already exists", events[-1][1]["reason"])
+            if os.name != "nt":
+                return
+            events.clear()
+            broker = start_presence_broker(runtime, Path(data))
+            self.assertIsNotNone(broker)
+            try:
+                self.assertEqual(events[-1][0], "local_broker_started")
+                self.assertEqual(events[-1][1]["pipe"], broker.name)
+                self.assertEqual(
+                    LocalBrokerClient(broker.name).call("companion.indicator"),
+                    {"echo": "companion.indicator"},
+                )
+            finally:
+                broker.stop()
+
+    def test_broker_rejection_bursts_are_rate_limited_and_flushed(self):
+        events: list[tuple[str, dict]] = []
+        runtime = SimpleNamespace(
+            emit=lambda kind, **payload: events.append((kind, payload)),
+            broker_request=lambda request: {"echo": request["kind"]},
+        )
+        captured: dict = {}
+
+        def fake_server(name, handler, **kwargs):
+            captured.update(kwargs)
+            return SimpleNamespace(start=lambda: None, stop=lambda: None, name=name)
+
+        with tempfile.TemporaryDirectory() as data:
+            with patch("jarvis.presence.broker_available", return_value=True):
+                with patch("jarvis.presence.LocalBrokerServer", side_effect=fake_server):
+                    self.assertIsNotNone(start_presence_broker(runtime, Path(data)))
+        on_reject = captured["on_reject"]
+        for index in range(50):
+            on_reject(f"malformed request {index}")
+        rejected = [payload for kind, payload in events if kind == "local_broker_rejected"]
+        self.assertEqual(len(rejected), 1)
+        self.assertEqual(rejected[0]["count"], 1)
+        deadline = time.monotonic() + 3.0
+        while time.monotonic() < deadline:
+            rejected = [payload for kind, payload in events if kind == "local_broker_rejected"]
+            if len(rejected) >= 2:
+                break
+            time.sleep(0.05)
+        self.assertEqual(len(rejected), 2, events)
+        self.assertEqual(rejected[1]["count"], 49)
+        self.assertEqual(rejected[1]["reason"], "malformed request 49")
+
+    def test_lost_transcript_write_is_reported_as_an_event(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            workspace = root / "workspace"
+            data = root / "data"
+            workspace.mkdir()
+            data.mkdir()
+            config = Config(
+                root=root,
+                workspace=workspace,
+                data_dir=data,
+                soul_path=root / "SOUL.md",
+                model="auto",
+                fast_model="openai:gpt-5.6-luna",
+                reasoning_model="openai:gpt-5.6-terra",
+                coding_model="openai:gpt-5.6-sol",
+                deep_model="openai:gpt-5.6-sol",
+                ollama_url="http://127.0.0.1:11434",
+                ollama_api_key=None,
+                max_steps=5,
+                context_length=4096,
+                command_timeout=30,
+                autonomy="autonomous",
+                presence_max_agents=1,
+            )
+
+            class CancellingAgent:
+                def __init__(self, task_config, _memory, _event=None, **kwargs):
+                    self.config = task_config
+                    self.client = kwargs.get("client") or SimpleNamespace(
+                        provider_status={"openai_configured": True},
+                    )
+
+                def run(self, prompt, *, cancellation_guard, **_kwargs):
+                    raise AgentRunCancelled("cancelled")
+
+            original_add_message = Memory.add_message
+
+            def failing_add_message(self, conversation_id, role, content, *args, **kwargs):
+                if role == "assistant" and content == "Request stopped.":
+                    raise sqlite3.OperationalError("database is locked")
+                return original_add_message(self, conversation_id, role, content, *args, **kwargs)
+
+            with (
+                patch("jarvis.presence.Agent", CancellingAgent),
+                patch.object(Memory, "add_message", failing_add_message),
+            ):
+                runtime = PresenceRuntime(config)
+                runtime.start()
+                try:
+                    project = runtime.create_project("Alpha")
+                    conversation = runtime.create_conversation("First", project["id"])
+                    job = runtime.submit(conversation, "alpha", "auto")
+                    deadline = time.time() + 10
+                    events = []
+                    while time.time() < deadline:
+                        events = runtime.events_after(0, limit=500)
+                        if any(
+                            event["kind"] == "cancelled"
+                            and event["payload"].get("job_id") == job
+                            for event in events
+                        ):
+                            break
+                        time.sleep(0.02)
+                    lost = [
+                        event for event in events
+                        if event["kind"] == "transcript_write_failed"
+                    ]
+                    self.assertEqual(len(lost), 1, events)
+                    self.assertEqual(lost[0]["payload"].get("job_id"), job)
+                    self.assertEqual(lost[0]["payload"].get("conversation_id"), conversation)
+                    self.assertEqual(lost[0]["payload"].get("error"), "OperationalError")
+                    kinds = [event["kind"] for event in events]
+                    self.assertIn("cancelled", kinds)
                 finally:
                     runtime.shutdown()
 
@@ -1616,8 +1883,8 @@ class PresenceHelpersTests(unittest.TestCase):
 
                 def run(self, _prompt, *, stream_callback, **_kwargs):
                     self.on_event("processing - step 7")
-                    stream_callback("Hello ")
-                    stream_callback(f"api_key={secret}")
+                    stream_callback("Hello api_")
+                    stream_callback(f"key={secret}")
                     return Result(f"Hello api_key={secret}")
 
             with patch("jarvis.presence.Agent", StreamingAgent):
@@ -2337,6 +2604,10 @@ class PresenceHTTPTests(unittest.TestCase):
             self.assertIn('id="project-description"', page)
             self.assertIn('id="project-context"', page)
             self.assertIn('id="delete-chat-dialog"', page)
+            self.assertIn('id="demonstration-skill-dialog"', page)
+            self.assertIn('id="create-demonstration-skill"', page)
+            self.assertIn('id="edit-demonstration-skill"', page)
+            self.assertIn('id="delete-demonstration-skill"', page)
             self.assertIn('id="confirm-delete-chat"', page)
             self.assertIn('id="attach-image"', page)
             self.assertIn('id="image-input"', page)
@@ -2344,6 +2615,9 @@ class PresenceHTTPTests(unittest.TestCase):
             self.assertIn('id="secondary-pane"', page)
             self.assertIn('id="secondary-conversation"', page)
             self.assertIn('id="secondary-composer"', page)
+            self.assertIn('id="access-mode"', page)
+            self.assertIn('id="secondary-access-mode"', page)
+            self.assertIn("Full access", page)
             self.assertIn('id="secondary-stop"', page)
             self.assertIn('accept="image/png,image/jpeg,image/webp,image/gif"', page)
             self.assertIn("AGENTS", page)
@@ -2376,6 +2650,9 @@ class PresenceHTTPTests(unittest.TestCase):
             self.assertIn("function newSecondaryConversation", script)
             self.assertIn("function setSplitView", script)
             self.assertIn("function submitSecondaryPrompt", script)
+            self.assertIn("function accessModeForConversation", script)
+            self.assertIn("function syncAccessModeControls", script)
+            self.assertIn("access_mode: accessModeForConversation", script)
             self.assertIn("function cancelSecondaryActive", script)
             self.assertIn("conversation_id: state.secondaryConversationId", script)
             self.assertIn('localStorage.setItem("jarvis.presence.split-view"', script)
@@ -2456,6 +2733,11 @@ class PresenceHTTPTests(unittest.TestCase):
             self.assertIn("Bluetooth device first observed by Jarvis", page)
             self.assertIn("function renderCompanion", script)
             self.assertIn("/api/screen-companion", script)
+            self.assertIn("function showDemonstrationSkillDraft", script)
+            self.assertIn("/api/screen-companion/recording/start", script)
+            self.assertIn("/api/screen-companion/recording/stop", script)
+            self.assertIn("/api/screen-companion/recording/draft/create", script)
+            self.assertIn("never records keystrokes, audio", script)
             self.assertIn("function renderPublicPresence", script)
             self.assertIn("/api/public-presence", script)
             self.assertIn("No public listener, account connection, social API, or publishing method", script)
@@ -2485,6 +2767,8 @@ class PresenceHTTPTests(unittest.TestCase):
             self.assertIn(".network-defense-signal", stylesheet)
             self.assertIn(".new-network-device-card", stylesheet)
             self.assertIn(".secondary-pane", stylesheet)
+            self.assertIn(".access-mode-control", stylesheet)
+            self.assertIn(".access-mode-control.full-access", stylesheet)
             self.assertIn("body.split-view .workspace", stylesheet)
             self.assertIn("repeat(2, minmax(0, 1fr))", stylesheet)
             self.assertIn(".secondary-messages", stylesheet)
@@ -2530,11 +2814,16 @@ class PresenceHTTPTests(unittest.TestCase):
             self.assertEqual(json.load(response)["conversation_id"], 7)
         with self.request(
             "/api/chat",
-            payload={"conversation_id": 7, "prompt": "hello", "model": "fast"},
+            payload={
+                "conversation_id": 7,
+                "prompt": "hello",
+                "model": "fast",
+                "access_mode": "full",
+            },
         ) as response:
             self.assertEqual(response.status, 202)
             self.assertEqual(json.load(response)["job_id"], "a" * 32)
-        self.assertEqual(self.runtime.submitted, (7, "hello", "fast", None))
+        self.assertEqual(self.runtime.submitted, (7, "hello", "fast", None, "full"))
 
         encoded = "iVBORw0KGgo="
         with self.request(
@@ -2549,6 +2838,7 @@ class PresenceHTTPTests(unittest.TestCase):
             self.assertEqual(response.status, 202)
         self.assertEqual(self.runtime.submitted[0:3], (7, "what is in this image?", "auto"))
         self.assertEqual(self.runtime.submitted[3][0]["data"], encoded)
+        self.assertEqual(self.runtime.submitted[4], "workspace")
 
         with self.request(
             "/api/conversations/7", method="DELETE"
@@ -2833,6 +3123,41 @@ class PresenceHTTPTests(unittest.TestCase):
         ) as response:
             self.assertTrue(json.load(response)["changed"])
         self.assertEqual(self.runtime.deleted_companion_rule, 41)
+
+    def test_demonstration_recording_and_skill_review_routes(self):
+        with self.request("/api/screen-companion/recording") as response:
+            self.assertEqual(json.load(response)["state"], "idle")
+        with self.request(
+            "/api/screen-companion/recording/start", payload={}
+        ) as response:
+            self.assertEqual(response.status, 201)
+            self.assertTrue(json.load(response)["recording"]["recording"])
+        with self.request(
+            "/api/screen-companion/recording/stop", payload={}
+        ) as response:
+            self.assertEqual(response.status, 202)
+            self.assertEqual(json.load(response)["recording"]["state"], "analyzing")
+        draft = {
+            "name": "export-report",
+            "description": "Export a reviewed report.",
+            "what_it_does": "Creates a local report export.",
+            "how_to_use": "Review the destination, then ask JARVIS to export.",
+            "content": "# Workflow\n\n1. Review.\n2. Export.\n3. Verify.",
+        }
+        with self.request(
+            "/api/screen-companion/recording/draft/edit", payload=draft
+        ) as response:
+            self.assertEqual(json.load(response)["draft"]["name"], "export-report")
+        with self.request(
+            "/api/screen-companion/recording/draft/create", payload=draft
+        ) as response:
+            self.assertEqual(response.status, 201)
+            self.assertEqual(json.load(response)["skill"]["name"], "export-report")
+        self.runtime.demonstration_state.update({"state": "draft_ready", "draft": draft})
+        with self.request(
+            "/api/screen-companion/recording/draft/delete", payload={}
+        ) as response:
+            self.assertTrue(json.load(response)["deleted"])
 
     def test_public_presence_routes_are_status_and_control_only(self):
         with self.request("/api/public-presence") as response:

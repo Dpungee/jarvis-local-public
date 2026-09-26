@@ -1993,7 +1993,7 @@ class SpanPartitionTests(CompactionStoreCase):
             if "REFERENCES messages(" in line
         ]
         self.assertEqual(
-            hits, ["memory.py:" + str(self._references_messages_line())],
+            hits, ["memory_schema_migrations.py:" + str(self._references_messages_line())],
             "a new foreign key into messages(id) appeared; add it to the "
             "compaction partition list (design 2.7 step 1b) before this test "
             "is repointed",
@@ -2001,13 +2001,13 @@ class SpanPartitionTests(CompactionStoreCase):
 
     @staticmethod
     def _references_messages_line() -> int:
-        path = Path(__file__).resolve().parents[1] / "jarvis" / "memory.py"
+        path = Path(__file__).resolve().parents[1] / "jarvis" / "memory_schema_migrations.py"
         for number, line in enumerate(
             path.read_text(encoding="utf-8").splitlines(), start=1
         ):
             if "REFERENCES messages(" in line:
                 return number
-        raise AssertionError("memory.py no longer references messages(id)")
+        raise AssertionError("memory_schema_migrations.py no longer references messages(id)")
 
 
 @requires_schema_50
@@ -2416,8 +2416,8 @@ class SchemaFiftyTests(CompactionStoreCase):
     """The storage contract itself: version, immutability, lineage, and the id
     sequence that a tombstoned milestone must not give back."""
 
-    def test_the_schema_version_is_fifty(self) -> None:
-        self.assertEqual(SCHEMA_VERSION, 50)
+    def test_the_schema_version_is_fifty_four(self) -> None:
+        self.assertEqual(SCHEMA_VERSION, 54)
         self.assertEqual(int(self.memory.db.execute(
             "PRAGMA user_version").fetchone()[0]), SCHEMA_VERSION)
         self.assertEqual(memory_spine.SPINE_SCHEMA_VERSION, 49)

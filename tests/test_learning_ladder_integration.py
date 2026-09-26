@@ -24,6 +24,7 @@ import tempfile
 import threading
 import time
 import unittest
+from unittest.mock import patch
 from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
 from pathlib import Path
@@ -189,7 +190,7 @@ class MigrationTo49Tests(_LadderStoreCase):
     """
 
     def test_a_fresh_store_is_current_with_the_ladder_objects_and_no_rows(self) -> None:
-        self.assertEqual(SCHEMA_VERSION, 50)
+        self.assertEqual(SCHEMA_VERSION, 54)
         self.assertEqual(
             int(self.memory.db.execute("PRAGMA user_version").fetchone()[0]),
             SCHEMA_VERSION,
@@ -2956,9 +2957,7 @@ class LearningChannelBudgetTests(unittest.TestCase):
             walks["count"] += 1
             return original(inner_self, workspace)
 
-        Memory._ladder_live_documents = counted
-        self.addCleanup(setattr, Memory, "_ladder_live_documents", original)
-        try:
+        with patch.object(Memory, "_ladder_live_documents", counted):
             documents = memory._ladder_live_documents(self.workspace)
             walks["count"] = 0
             started = time.monotonic()
@@ -2966,8 +2965,6 @@ class LearningChannelBudgetTests(unittest.TestCase):
                 workspace=self.workspace, documents=documents
             )
             elapsed = (time.monotonic() - started) * 1000.0
-        finally:
-            Memory._ladder_live_documents = original
         self.assertEqual(
             walks["count"], 0,
             "ladder_unverified_promotions re-walked the catalog despite "
@@ -3820,7 +3817,10 @@ class RealLegacyStoreMigrationTests(unittest.TestCase):
                 "git archive failed: " + archive.stderr.decode("utf-8", "replace")[:200]
             )
         with tarfile.open(cls.root / "tree.tar") as bundle:
-            bundle.extractall(cls.tree)
+            # data_filter was backported to Python 3.11.8; earlier supported
+            # patch releases extract only this locally generated Git archive.
+            options = {"filter": "data"} if hasattr(tarfile, "data_filter") else {}
+            bundle.extractall(cls.tree, **options)
         builder = cls.root / "build_legacy.py"
         builder.write_text(_LEGACY_BUILDER, encoding="utf-8")
         environment = dict(os.environ)
@@ -4484,10 +4484,9 @@ class UnverifiedPromotionCacheTests(_LadderWorkspaceCase):
             return original(inner_self, row, document)
 
         self._original_defect = original
-        Memory._ladder_promotion_defect = counted
-        self.addCleanup(
-            setattr, Memory, "_ladder_promotion_defect", original
-        )
+        patcher = patch.object(Memory, "_ladder_promotion_defect", counted)
+        patcher.start()
+        self.addCleanup(patcher.stop)
 
     def _approved(self) -> dict[str, Any]:
         self._ready_family()
@@ -4992,23 +4991,18 @@ class SuccessiveApprovalTests(_LadderWorkspaceCase):
         self._more_evidence(lesson_id)
         staged = self._stage()
         # Defeat the retirement so the UNIQUE index is actually hit.
-        original = Memory._apply_ladder_promotion_committed
-
         def conflicting(inner_self, *args, **kwargs):
             raise sqlite3.IntegrityError(
                 "UNIQUE constraint failed: ladder_promotions.project_id, "
                 "ladder_promotions.skill_name"
             )
 
-        Memory._apply_ladder_promotion_committed = conflicting
-        try:
+        with patch.object(Memory, "_apply_ladder_promotion_committed", conflicting):
             result = self.memory.apply_ladder_promotion(
                 staged["promotion_id"],
                 approval_token=staged["approval_token"],
                 workspace=self.workspace,
             )
-        finally:
-            Memory._apply_ladder_promotion_committed = original
         self.assertFalse(result["applied"])
         self.assertEqual(result["reason"], "row_conflict")
 
@@ -5774,18 +5768,13 @@ class OrphanParkingTests(_LadderWorkspaceCase):
 
     def test_park_never_raises_on_a_read_path_error(self) -> None:
         name, _ = self._make_orphan()
-        original = Memory._ladder_named_in_spine
-
         def boom(self_):
             raise sqlite3.DatabaseError("planted read failure")
 
-        Memory._ladder_named_in_spine = boom
-        try:
+        with patch.object(Memory, "_ladder_named_in_spine", boom):
             result = self.memory.park_orphan_document(
                 self.workspace, project_id=1, skill_name=name
             )
-        finally:
-            Memory._ladder_named_in_spine = original
         # Ruling 27: a refusal, never an exception, on the read path.
         self.assertEqual(result["parked"], False)
         self.assertEqual(result["reason"], "read_failed")

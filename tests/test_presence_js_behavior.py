@@ -393,6 +393,62 @@ assert(localStorage.getItem("jarvis.presence.rail-collapsed") === "1", "narrow s
 """,
         )
 
+    def test_access_mode_selector_persists_per_chat_and_honors_server_cap(self) -> None:
+        self.run_harness(
+            (
+                "saveAccessModes",
+                "accessModeDetails",
+                "accessModeForConversation",
+                "setConversationAccessMode",
+                "syncAccessModeControl",
+                "syncAccessModeControls",
+            ),
+            r"""
+const primaryLabel = new Element("label");
+const primary = new Element("select");
+for (const value of ["read-only", "workspace", "full"]) {
+  const option = new Element("option"); option.value = value; primary.append(option);
+}
+primaryLabel.append(primary);
+nodes["access-mode"] = primary;
+nodes["access-mode-description"] = new Element("span");
+const secondaryLabel = new Element("label");
+const secondary = new Element("select");
+for (const value of ["read-only", "workspace", "full"]) {
+  const option = new Element("option"); option.value = value; secondary.append(option);
+}
+secondaryLabel.append(secondary);
+nodes["secondary-access-mode"] = secondary;
+nodes["secondary-access-mode-description"] = new Element("span");
+const state = {
+  conversationId: 7,
+  secondaryConversationId: 8,
+  accessModes: {"7": "full"},
+  accessPolicy: {
+    default: "workspace",
+    modes: [
+      {id: "read-only", available: true, description: "No changes"},
+      {id: "workspace", available: true, description: "Project only"},
+      {id: "full", available: false, description: "Computer", unavailable_reason: "Locked"},
+    ],
+  },
+};
+const accessModeStorageKey = "jarvis.presence.chat-access-modes.v1";
+const validAccessModes = new Set(["read-only", "workspace", "full"]);
+window.localStorage = localStorage;
+assert(accessModeForConversation(7) === "workspace", "unavailable full mode did not fail closed");
+syncAccessModeControls();
+assert(primary.value === "workspace", "visible selector did not show the effective cap");
+assert(primary.querySelectorAll("option")[2].disabled, "unavailable full option stayed enabled");
+state.accessPolicy.modes[2].available = true;
+setConversationAccessMode(7, "full");
+assert(accessModeForConversation(7) === "full", "full access was not selected when configured");
+assert(primaryLabel.classList.contains("full-access"), "full access emphasis was not applied");
+const saved = JSON.parse(localStorage.getItem("jarvis.presence.chat-access-modes.v1"));
+assert(saved["7"] === "full", "per-chat access selection was not persisted");
+""",
+        )
+
     def test_incident_dialog_close_button_binding_closes_the_dialog(self) -> None:
         start = self.source.index('$("close-network-defense-incident").addEventListener(')
         end = self.source.index("\n);", start) + len("\n);")

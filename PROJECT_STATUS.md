@@ -2,6 +2,19 @@
 
 ## Public integration and release verification (2026-09-26)
 
+- Protected PR #28 published the fixture corrections as `0b3efca`; main-branch
+  CodeQL passed and the network-listener finding is fixed, with zero open alerts.
+  Its post-merge Python 3.11 suite exposed a concurrent strategy-promotion result
+  bug: attestation insertion and manifest transition could have different winners,
+  causing both callers to report `promoted=false`. A forced interleaving reproduced
+  it. The correction reports the transaction's state-transition winner, retaining
+  sealed evidence replay, explicit operator confirmation and scope gates. New
+  regressions cover the split winners, pre-recorded receipt recovery and replay
+  idempotency. The historical extraction manifest remains unchanged; its structural
+  test pins both the original and corrected method hashes for this one correction,
+  while all other method bodies remain bound to their original hashes.
+  Runtime reseals change derived digests only; final acceptance and
+  protected publication of this correction remain pending.
 - The reviewed 274-path integration was published through protected PR #26 as
   `63d3f82`. The exact candidate passed 5,481 local tests (nine skips), all three
   hosted Windows Python versions (ten skips each), 76% displayed branch-aware

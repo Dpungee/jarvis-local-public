@@ -1,4 +1,4 @@
-"""Current Memory extraction preserves every method and its governance body."""
+"""Memory extraction baseline plus individually pinned behavioral corrections."""
 from __future__ import annotations
 
 import ast
@@ -18,6 +18,16 @@ from tests.structural_ast import structural_dump
 
 ROOT = Path(__file__).resolve().parents[1]
 MANIFEST = json.loads((ROOT / "tests/fixtures/memory_split_ast_v1.json").read_text())
+# Keep the original extraction proof immutable. A later intentional correction
+# must pin both its historical and corrected bodies, not exempt it from checks.
+# The promotion correction is exercised by forced split-winner and interrupted-
+# promotion recovery tests in test_strategy_transfer_trial_memory.
+REVIEWED_METHOD_CHANGES = {
+    "promote_strategy_transfer_trial": (
+        "0925f4afe65ecb5555fdfb5be9f2adc2b7f968b776a0d15c8770facb7c0fc382",
+        "59b74163d79cf7cfa1c27e6a467b3c8e46f730ef62a15f663fd90f91623349e6",
+    ),
+}
 
 
 class _OriginalGlobals(ast.NodeTransformer):
@@ -55,7 +65,7 @@ class MemorySplitTests(unittest.TestCase):
         self.assertEqual(owners, {name: row["module"] for name, row in MANIFEST["methods"].items()})
         self.assertEqual(set(vars(Memory)) & set(owners), set(MANIFEST["core_methods"]))
 
-    def test_current_bodies_signatures_decorators_and_sql_are_unchanged(self):
+    def test_current_bodies_match_baseline_or_exact_reviewed_correction(self):
         seen = set()
         for module in ["memory", *MANIFEST["domains"]]:
             expected_class = "Memory" if module == "memory" else MANIFEST["domains"][module]
@@ -66,10 +76,25 @@ class MemorySplitTests(unittest.TestCase):
                 with self.subTest(module=module, method=method.name):
                     normalized = _OriginalGlobals().visit(method)
                     digest = hashlib.sha256(structural_dump(normalized).encode()).hexdigest()
-                    self.assertEqual(digest, MANIFEST["methods"][method.name]["sha256"])
+                    expected = MANIFEST["methods"][method.name]["sha256"]
+                    if method.name in REVIEWED_METHOD_CHANGES:
+                        baseline, corrected = REVIEWED_METHOD_CHANGES[method.name]
+                        self.assertEqual(expected, baseline)
+                        expected = corrected
+                    self.assertEqual(digest, expected)
                     self.assertNotIn(method.name, seen)
                     seen.add(method.name)
         self.assertEqual(seen, set(MANIFEST["methods"]))
+
+    def test_reviewed_change_set_is_exact_and_has_adversarial_regressions(self):
+        from tests.test_strategy_transfer_trial_memory import StrategyTransferTrialMemoryTests
+
+        self.assertEqual(set(REVIEWED_METHOD_CHANGES), {"promote_strategy_transfer_trial"})
+        for name in (
+            "test_promotion_reports_transition_winner_when_attestation_winner_waits",
+            "test_promotion_recovers_an_already_recorded_attestation",
+        ):
+            self.assertTrue(callable(getattr(StrategyTransferTrialMemoryTests, name)))
 
     def test_class_constants_keep_their_exact_current_definitions(self):
         cls = next(c for c in _classes("memory") if c.name == "Memory")

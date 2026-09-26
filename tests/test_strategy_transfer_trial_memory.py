@@ -7,6 +7,7 @@ import unittest
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from threading import Event
 from unittest.mock import patch
 
 from jarvis.memory import Memory, SCHEMA_VERSION
@@ -577,6 +578,17 @@ class StrategyTransferTrialMemoryTests(unittest.TestCase):
             self.assertEqual(str(row["resolved_at"]), fixed)
 
     def test_promotion_replays_sealed_evaluator_and_stays_scope_bound(self) -> None:
+        self._assert_promotion_replays_and_stays_scope_bound()
+
+    def test_promotion_reports_transition_winner_when_attestation_winner_waits(self) -> None:
+        self._assert_promotion_replays_and_stays_scope_bound(force_interleaving=True)
+
+    def test_promotion_recovers_an_already_recorded_attestation(self) -> None:
+        self._assert_promotion_replays_and_stays_scope_bound(pre_record=True)
+
+    def _assert_promotion_replays_and_stays_scope_bound(
+        self, *, force_interleaving: bool = False, pre_record: bool = False,
+    ) -> None:
         handle = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
         database = Path(handle.name)
         handle.close()
@@ -613,24 +625,69 @@ class StrategyTransferTrialMemoryTests(unittest.TestCase):
                     {"status": before, "diagnostic": diagnostic},
                 )
                 self.assertFalse(before["causal_attestation_valid"])
+                with self.assertRaises(StrategyTransferTrialError):
+                    memory.promote_strategy_transfer_trial(
+                        manifest["manifest_id"], operator_confirmed=False,
+                    )
+                if pre_record:
+                    artifact = memory.build_strategy_transfer_trial_ab_attestation(
+                        manifest["manifest_id"], run_id="interrupted-promotion",
+                    )
+                    self.assertTrue(memory.record_strategy_transfer_attestation(
+                        "applied_ab", artifact,
+                        evaluator_version=artifact["evaluator_version"],
+                        evaluator_sha256=artifact["evaluator_sha256"],
+                        config_sha256=artifact["config_sha256"],
+                    ))
+
+            other_finished = Event()
+            insert_results = []
+            original_record = Memory.record_strategy_transfer_attestation
+
+            def record(worker, kind, *args, **kwargs):
+                inserted = original_record(worker, kind, *args, **kwargs)
+                if force_interleaving and kind == "applied_ab":
+                    insert_results.append(inserted)
+                    if inserted:
+                        self.assertTrue(
+                            other_finished.wait(30),
+                            "attestation replay worker did not finish promotion",
+                        )
+                return inserted
 
             def promote(_index):
                 with Memory(database) as worker:
-                    return worker.promote_strategy_transfer_trial(
+                    result = worker.promote_strategy_transfer_trial(
                         manifest["manifest_id"], operator_confirmed=True
                     )
+                    other_finished.set()
+                    return result
 
-            with ThreadPoolExecutor(max_workers=2) as pool:
-                promotions = list(pool.map(promote, range(2)))
+            with patch.object(Memory, "record_strategy_transfer_attestation", record):
+                with ThreadPoolExecutor(max_workers=2) as pool:
+                    promotions = list(pool.map(promote, range(2)))
+            if force_interleaving:
+                self.assertEqual(insert_results, [True, False])
             self.assertEqual(
                 sorted(bool(item["promoted"]) for item in promotions),
                 [False, True],
+                promotions,
             )
             self.assertTrue(all(item["status"] == "promoted" for item in promotions))
             self.assertTrue(all(
                 item["source_target_pairs"] >= 3 for item in promotions
             ))
             with Memory(database) as memory:
+                replay = memory.promote_strategy_transfer_trial(
+                    manifest["manifest_id"], operator_confirmed=True,
+                )
+                self.assertFalse(replay["promoted"])
+                self.assertEqual(replay["status"], "promoted")
+                self.assertEqual(memory.db.execute(
+                    "SELECT COUNT(*) FROM strategy_transfer_attestations "
+                    "WHERE kind='applied_ab' AND assignment_manifest_sha256=?",
+                    (manifest["manifest_sha256"],),
+                ).fetchone()[0], 1)
                 exact = memory.strategy_transfer_readiness(
                     mode="advise",
                     project_id=1,

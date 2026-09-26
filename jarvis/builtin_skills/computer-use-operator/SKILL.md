@@ -7,6 +7,12 @@ description: Operate supported Windows desktop applications through bounded, vis
 
 ## Workflow
 
+When the current task clearly requires a visible desktop application effect and the
+chat is running with Full access, use this capability without requiring the operator
+to say a magic phrase such as "use my computer." The selected access mode is only an
+authority cap: it does not replace exact action approval or permit unrelated desktop
+work.
+
 1. Identify the exact application, input artifact, requested output, and whether overwrite is allowed.
 2. Prefer a purpose-built adapter or documented application automation interface over screen coordinates.
 3. Snapshot or hash the input before mutation and preserve the original unless the operator explicitly requests replacement.

@@ -85,7 +85,7 @@ class PresenceShellStaticTests(unittest.TestCase):
         backend = (ROOT / "jarvis" / "presence.py").read_text(encoding="utf-8")
         for route in (
             '"/api/memory/recent"', '"/api/memory/search"', '"/api/activity"',
-            '"/api/preferences"', '"/api/tasks"', '"/api/memory/ladder"',
+            '"/api/preferences"', '"/api/tasks"',
             'r"/api/schedule/(learning|backlog)/([1-9][0-9]{0,18})/(enable|disable)"',
             'r"/api/conversations/([1-9][0-9]{0,18})/rename"',
         ):
@@ -235,28 +235,12 @@ class _FakeRuntime:
         self.toggles: list[tuple[str, int, bool]] = []
         self.renames: list[tuple[int, str]] = []
         self.preferences_set: list[tuple[str, str]] = []
-        self.ladder_limits: list[int] = []
 
     def status(self):
         return {"runtime_epoch": self.runtime_epoch, "ready": True, "uptime_seconds": 1}
 
     def recent_memories(self, limit=30):
         return [{"created_at": "2026-09-02T00:00:00", "kind": "fact", "content": f"limit {limit}", "source": "test"}]
-
-    def learning_ladder(self, limit=20):
-        self.ladder_limits.append(limit)
-        return {
-            "families": [{"family": "code_fix", "gate_allowed": True}],
-            "promotions": [
-                {"id": 1, "family": "code_fix", "stage": "staged",
-                 "skill_name": "learned-code-fix"},
-                {"id": 2, "family": "file_ops", "stage": "unapproved_legacy",
-                 "skill_name": "learned-file-ops"},
-            ],
-            "events": [{"kind": "ladder.staged", "at": "2026-09-04T00:00:00"}],
-            "legacy_documents": 1,
-            "legacy_notice": "1 legacy skills live without approval",
-        }
 
     def search_memory(self, query, limit=20):
         self.searches.append((query, limit))
@@ -321,61 +305,6 @@ class PresenceUpgradeRouteTests(unittest.TestCase):
                 return response.status, json.load(response)
         except urllib.error.HTTPError as error:
             return error.code, json.load(error)
-
-    def test_the_ladder_route_is_read_only_bounded_and_code_free(self):
-        """VTMF M4 design 6.4 and 7.11.
-
-        One additive READ route.  Three things must never appear in its
-        payload: the confirmation code of a staged promotion (S-1 -- only
-        `ladder list`, `ladder show` and `/ladder` show it), any of
-        `proof_sha256` / `staged_sha256` / `coverage_digest` (publishing a
-        digest beside a promotion id is what made draft 1's token derivable,
-        Q-11), and any write counterpart -- a browser button that promotes a
-        skill is the affordance the whole design exists to prevent.
-        """
-        status, payload = self.call("/api/memory/ladder?limit=5")
-        self.assertEqual(status, 200)
-        self.assertEqual(self.runtime.ladder_limits, [5])
-        self.assertEqual(payload["legacy_documents"], 1)
-        # The same sentence `ladder status` and `jarvis doctor` print, so the
-        # three surfaces cannot describe the same state differently (S-4).
-        self.assertEqual(
-            payload["legacy_notice"], "1 legacy skills live without approval"
-        )
-        blob = json.dumps(payload)
-        for forbidden in (
-            "approval_token", "proof_sha256", "staged_sha256", "coverage_digest",
-        ):
-            with self.subTest(forbidden=forbidden):
-                self.assertNotIn(forbidden, blob)
-
-        self.assertEqual(self.call("/api/memory/ladder?limit=999")[0], 400)
-        self.assertEqual(self.call("/api/memory/ladder?limit=abc")[0], 400)
-        self.assertEqual(self.call("/api/memory/ladder?limit=0")[0], 400)
-        # No write counterpart, by any method.  Read the status directly: a
-        # refusal need not answer in JSON, and self.call parses the body.
-        for method in ("POST", "PUT", "DELETE"):
-            with self.subTest(method=method):
-                request = urllib.request.Request(
-                    self.base + "/api/memory/ladder",
-                    data=b"{}",
-                    headers={"Content-Type": "application/json"},
-                    method=method,
-                )
-                try:
-                    with urllib.request.urlopen(request, timeout=2) as response:
-                        status = response.status
-                except urllib.error.HTTPError as error:
-                    status = error.code
-                self.assertNotIn(status, (200, 201, 204))
-
-    def test_no_ladder_write_route_exists_in_the_backend(self):
-        backend = (ROOT / "jarvis" / "presence.py").read_text(encoding="utf-8")
-        ladder_route = backend.count('"/api/memory/ladder"')
-        self.assertEqual(ladder_route, 1)
-        # A POST handler would have to name the path a second time.
-        self.assertNotIn("/api/memory/ladder/approve", backend)
-        self.assertNotIn("/api/memory/ladder/stage", backend)
 
     def test_read_routes_validate_limits(self):
         status, payload = self.call("/api/memory/recent?limit=5")

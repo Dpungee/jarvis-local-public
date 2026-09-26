@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from .config import Config
 from .security_expertise import classify_security_expertise
@@ -93,12 +93,48 @@ def lightweight_coding_intent(prompt: str) -> bool:
     return len(_CODE_FILE_TARGET.findall(text)) <= 1
 
 
+class RoutedModelReference(str):
+    """A wire-compatible model name carrying deterministic routing metadata.
+
+    Provider clients still receive an ordinary string value.  The private
+    attribute exists only long enough for local-only request preparation and
+    is never encoded into a provider request.
+    """
+
+    def __new__(
+        cls,
+        value: str,
+        profile: str,
+        coding_intent: bool,
+    ) -> RoutedModelReference:
+        instance = str.__new__(cls, value)
+        instance.jarvis_route_profile = str(profile)
+        instance.jarvis_coding_intent = bool(coding_intent)
+        return instance
+
+
 @dataclass(frozen=True)
 class Route:
     profile: str
     model: str
     reason: str
     fallback: bool = False
+    coding_intent: bool = field(default=False, repr=False, compare=False)
+
+    def __post_init__(self) -> None:
+        value = str(self.model)
+        coding_intent = bool(self.coding_intent or self.profile == "coding")
+        object.__setattr__(self, "coding_intent", coding_intent)
+        prefix, separator, _remainder = value.partition(":")
+        if separator and prefix.casefold() in {
+            "openai", "anthropic", "codex-cli", "claude-cli"
+        }:
+            return
+        object.__setattr__(
+            self,
+            "model",
+            RoutedModelReference(value, self.profile, coding_intent),
+        )
 
 
 class ModelRouter:
@@ -208,11 +244,18 @@ class ModelRouter:
                 )
         raise ValueError("image input requires a configured vision model")
 
-    def _with_fallback(self, profile: str, reason: str) -> Route:
+    def _with_fallback(
+        self,
+        profile: str,
+        reason: str,
+        *,
+        coding_intent: bool = False,
+    ) -> Route:
+        coding_intent = bool(coding_intent or profile == "coding")
         wanted = self._configured(profile)
         installed = self._installed_name(wanted)
         if installed:
-            return Route(profile, installed, reason)
+            return Route(profile, installed, reason, coding_intent=coding_intent)
 
         for fallback_profile in self._fallback_profiles(profile):
             installed = self._installed_name(self._configured(fallback_profile))
@@ -222,11 +265,15 @@ class ModelRouter:
                     installed,
                     f"{reason}; {wanted} is not installed, using {installed}",
                     True,
+                    coding_intent,
                 )
         if self.available_models:
             model = self.available_models[0]
-            return Route("custom", model, f"No configured models installed; using {model}", True)
-        return Route(profile, wanted, reason, True)
+            return Route(
+                "custom", model, f"No configured models installed; using {model}",
+                True, coding_intent,
+            )
+        return Route(profile, wanted, reason, True, coding_intent)
 
     def failover(self, current: Route, reason: str) -> Route:
         candidates = self.failover_candidates(current, reason)
@@ -246,6 +293,7 @@ class ModelRouter:
                 model,
                 f"{reason}; failing over from {current.model}",
                 True,
+                current.coding_intent,
             ))
 
         for profile in self._fallback_profiles(current.profile):
@@ -302,6 +350,7 @@ class ModelRouter:
                 return self._with_fallback(
                     "fast",
                     "bounded coding unit; automatic coding escalation remains available",
+                    coding_intent=True,
                 )
             return self._with_fallback("coding", f"coding task (score {coding_score})")
         if research_score >= 1:

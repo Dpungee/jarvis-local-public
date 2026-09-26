@@ -164,7 +164,27 @@ def strategy_transfer_runtime_sha256() -> str:
     """Bind the closed transfer runtime without reading user/workspace data."""
     package_dir = Path(__file__).resolve().parent
     module_names = (
-        "agent.py", "memory.py", "strategy_transfer.py",
+        "agent.py", "agent_coding_verification.py", "memory.py", "strategy_transfer.py",
+        "memory_retrieval.py",
+        "memory_embeddings.py",
+        "memory_runtime.py",
+        "memory_schema_migrations.py",
+        "memory_projects_budget.py",
+        "memory_predictions.py",
+        "memory_conversations.py",
+        "memory_presence_companion.py",
+        "memory_ordinary_recall.py",
+        "memory_claims.py",
+        "memory_embedding_store.py",
+        "memory_lessons.py",
+        "memory_strategy_transfer.py",
+        "memory_strategy_trial.py",
+        "memory_tasks_scheduling.py",
+        "memory_operator_state.py",
+        "memory_approvals.py",
+        "memory_learning_ladder.py",
+        "memory_governance.py",
+        "memory_conversation_compaction.py",
         "strategy_transfer_trial.py",
     )
     material = {

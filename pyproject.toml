@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "jarvis-local"
 version = "0.6.3"
-description = "Windows-first, local-first personal AI agent with automatic model routing, provenance-aware memory, bounded tools, and approval-gated automation."
+description = "Local-first AI agent platform with persistent chats, multi-agent coordination, governed memory, and permission-scoped tools."
 readme = "README.md"
 requires-python = ">=3.11,<3.14"
 license = "Apache-2.0"
@@ -42,8 +42,8 @@ Issues = "https://github.com/Dpungee/jarvis-local-public/issues"
 [project.optional-dependencies]
 drive = [
     "google-api-python-client==2.199.0",
-    "google-auth==2.56.3",
-    "google-auth-httplib2==0.4.1",
+    "google-auth==2.57.0",
+    "google-auth-httplib2==0.4.2",
     "google-auth-oauthlib==1.4.0",
 ]
 documents = [
@@ -70,6 +70,7 @@ jarvis = "jarvis.cli:main"
 jarvis-ui = "jarvis.ui:main"
 jarvis-presence = "jarvis.presence:main"
 jarvis-public-presence = "jarvis.public_presence_service:main"
+jarvis-command-center = "jarvis.command_center:main"
 
 [tool.setuptools]
 packages = ["jarvis", "jarvis.gateway"]
@@ -82,6 +83,12 @@ jarvis = [
     "presence.html",
     "presence.css",
     "presence.js",
+    "command_center.html",
+    "command_center.css",
+    "command_center.js",
+    "agent_hub_static/*.html",
+    "agent_hub_static/*.css",
+    "agent_hub_static/*.js",
     "evaluation_fixtures/*.json",
     "builtin_skills/*/SKILL.md",
     "builtin_skills/*/agents/*.yaml",

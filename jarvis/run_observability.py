@@ -114,6 +114,7 @@ _TEXT_FIELDS = frozenset(
         "model",
         "profile",
         "provider",
+        "recovered_failure_kind",
         "route_reason",
         "status",
         "stream_transport",

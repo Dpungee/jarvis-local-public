@@ -189,7 +189,7 @@ class MigrationTo49Tests(_LadderStoreCase):
     """
 
     def test_a_fresh_store_is_current_with_the_ladder_objects_and_no_rows(self) -> None:
-        self.assertEqual(SCHEMA_VERSION, 50)
+        self.assertEqual(SCHEMA_VERSION, 54)
         self.assertEqual(
             int(self.memory.db.execute("PRAGMA user_version").fetchone()[0]),
             SCHEMA_VERSION,
@@ -3820,7 +3820,10 @@ class RealLegacyStoreMigrationTests(unittest.TestCase):
                 "git archive failed: " + archive.stderr.decode("utf-8", "replace")[:200]
             )
         with tarfile.open(cls.root / "tree.tar") as bundle:
-            bundle.extractall(cls.tree)
+            # data_filter was backported to Python 3.11.8; earlier supported
+            # patch releases extract only this locally generated Git archive.
+            options = {"filter": "data"} if hasattr(tarfile, "data_filter") else {}
+            bundle.extractall(cls.tree, **options)
         builder = cls.root / "build_legacy.py"
         builder.write_text(_LEGACY_BUILDER, encoding="utf-8")
         environment = dict(os.environ)

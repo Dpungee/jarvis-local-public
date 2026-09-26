@@ -1,0 +1,1397 @@
+{
+  "attestation": {
+    "contract_rejected": 7,
+    "exact_model_only": false,
+    "model_attestation_required": true,
+    "model_mismatch": 0,
+    "model_unattested": 0,
+    "provider_error": 0,
+    "provider_model_attestation": "explicit_response_signal_required",
+    "resolved": 59
+  },
+  "base": {
+    "base_commit": "35d5344",
+    "branch": "claude/roadmap-phase1",
+    "committed": false,
+    "kind": "phase2_base_file_manifest",
+    "manifest_file_count": 364,
+    "manifest_sha256": "6616688bfcc072eefffc2708c5846e53f556d8d597b972465f84e310b8f3f9b1",
+    "manifest_sha256_verified": true
+  },
+  "case_observations": {
+    "by_expected_lane": {
+      "configuration": {
+        "lane_correct": 2,
+        "resolved": 6,
+        "total": 6
+      },
+      "creation": {
+        "lane_correct": 10,
+        "resolved": 11,
+        "total": 12
+      },
+      "dialogue": {
+        "lane_correct": 11,
+        "resolved": 11,
+        "total": 12
+      },
+      "external_action": {
+        "lane_correct": 3,
+        "resolved": 9,
+        "total": 12
+      },
+      "inspection": {
+        "lane_correct": 1,
+        "resolved": 11,
+        "total": 12
+      },
+      "research": {
+        "lane_correct": 10,
+        "resolved": 11,
+        "total": 12
+      }
+    },
+    "clarification": {
+      "ambiguity_recall_over_resolved": 1.0,
+      "ambiguous_correct": 11,
+      "ambiguous_missed_case_ids": [],
+      "ambiguous_resolved": 11,
+      "ambiguous_total": 11,
+      "ambiguous_unresolved": 0,
+      "ambiguous_unresolved_case_ids": [],
+      "denominator": "rates are over resolved cases only; fixture totals and unresolved counts are given so the gap is explicit",
+      "specified_correct": 35,
+      "specified_resolved": 48,
+      "specified_total": 55,
+      "specified_unnecessary": 13,
+      "specified_unnecessary_case_ids": [
+        "p2_configuration_01",
+        "p2_creation_12",
+        "p2_dialogue_02",
+        "p2_dialogue_10",
+        "p2_external_04",
+        "p2_external_07",
+        "p2_external_10",
+        "p2_inspection_02",
+        "p2_inspection_03",
+        "p2_inspection_07",
+        "p2_inspection_08",
+        "p2_inspection_10",
+        "p2_research_05"
+      ],
+      "specified_unresolved": 7,
+      "specified_unresolved_case_ids": [
+        "p2_creation_10",
+        "p2_dialogue_06",
+        "p2_external_09",
+        "p2_external_11",
+        "p2_external_12",
+        "p2_inspection_05",
+        "p2_research_04"
+      ],
+      "unnecessary_clarification_rate_over_resolved": 0.270833
+    },
+    "failed_check_case_ids": {
+      "acceptance": [
+        "p2_creation_02",
+        "p2_creation_11",
+        "p2_external_02",
+        "p2_external_04",
+        "p2_external_06",
+        "p2_external_07",
+        "p2_external_10",
+        "p2_research_05"
+      ],
+      "clarification": [
+        "p2_configuration_01",
+        "p2_creation_12",
+        "p2_dialogue_02",
+        "p2_dialogue_10",
+        "p2_external_04",
+        "p2_external_07",
+        "p2_external_10",
+        "p2_inspection_02",
+        "p2_inspection_03",
+        "p2_inspection_07",
+        "p2_inspection_08",
+        "p2_inspection_10",
+        "p2_research_05"
+      ],
+      "constraints": [
+        "p2_configuration_01",
+        "p2_configuration_02",
+        "p2_configuration_05",
+        "p2_configuration_06",
+        "p2_creation_01",
+        "p2_creation_02",
+        "p2_creation_03",
+        "p2_creation_05",
+        "p2_creation_07",
+        "p2_creation_08",
+        "p2_creation_11",
+        "p2_creation_12",
+        "p2_dialogue_04",
+        "p2_dialogue_07",
+        "p2_dialogue_08",
+        "p2_dialogue_09",
+        "p2_external_02",
+        "p2_external_04",
+        "p2_external_06",
+        "p2_external_07",
+        "p2_external_10",
+        "p2_inspection_01",
+        "p2_inspection_02",
+        "p2_inspection_03",
+        "p2_inspection_06",
+        "p2_inspection_07",
+        "p2_inspection_08",
+        "p2_inspection_10",
+        "p2_inspection_12",
+        "p2_research_01",
+        "p2_research_02",
+        "p2_research_05",
+        "p2_research_06",
+        "p2_research_07",
+        "p2_research_08",
+        "p2_research_09",
+        "p2_research_10",
+        "p2_research_11"
+      ],
+      "effect": [
+        "p2_configuration_01",
+        "p2_configuration_02",
+        "p2_configuration_04",
+        "p2_configuration_05",
+        "p2_creation_02",
+        "p2_creation_09",
+        "p2_creation_11",
+        "p2_external_02",
+        "p2_external_03",
+        "p2_external_06",
+        "p2_external_07",
+        "p2_external_08",
+        "p2_external_10",
+        "p2_inspection_03",
+        "p2_inspection_04",
+        "p2_inspection_09",
+        "p2_inspection_10",
+        "p2_inspection_12",
+        "p2_research_03"
+      ],
+      "evidence": [
+        "p2_creation_02",
+        "p2_creation_03",
+        "p2_creation_04",
+        "p2_creation_05",
+        "p2_creation_08",
+        "p2_creation_09",
+        "p2_creation_11",
+        "p2_creation_12",
+        "p2_dialogue_09",
+        "p2_external_01",
+        "p2_external_02",
+        "p2_external_03",
+        "p2_external_04",
+        "p2_external_06",
+        "p2_external_07",
+        "p2_external_08",
+        "p2_external_10",
+        "p2_inspection_01",
+        "p2_inspection_02",
+        "p2_inspection_03",
+        "p2_inspection_04",
+        "p2_inspection_07",
+        "p2_inspection_08",
+        "p2_inspection_09",
+        "p2_inspection_10",
+        "p2_inspection_12"
+      ],
+      "lane": [
+        "p2_configuration_01",
+        "p2_configuration_02",
+        "p2_configuration_04",
+        "p2_configuration_05",
+        "p2_creation_09",
+        "p2_external_02",
+        "p2_external_03",
+        "p2_external_06",
+        "p2_external_07",
+        "p2_external_08",
+        "p2_external_10",
+        "p2_inspection_01",
+        "p2_inspection_02",
+        "p2_inspection_03",
+        "p2_inspection_04",
+        "p2_inspection_06",
+        "p2_inspection_07",
+        "p2_inspection_08",
+        "p2_inspection_09",
+        "p2_inspection_10",
+        "p2_inspection_12",
+        "p2_research_03"
+      ]
+    },
+    "failed_check_counts": {
+      "acceptance": 8,
+      "clarification": 13,
+      "constraints": 38,
+      "effect": 19,
+      "evidence": 26,
+      "lane": 22
+    },
+    "note": "raw receipt counts, not scorer metrics; the scorer produced no metric for this run",
+    "unresolved_case_ids_by_status": {
+      "contract_rejected": [
+        "p2_creation_10",
+        "p2_dialogue_06",
+        "p2_external_09",
+        "p2_external_11",
+        "p2_external_12",
+        "p2_inspection_05",
+        "p2_research_04"
+      ]
+    }
+  },
+  "command": "python scripts/run_phase2_task_contract.py --model ollama:qwen3.5:9b --base-manifest <phase 2 base manifest> --allow-live",
+  "configuration_class": {
+    "summary": "local attesting provider only; no tools, no memory, no workspace, no training, no fallback; one fresh conversation per case",
+    "switches": {
+      "JARVIS_CLOUD_ENABLED": "false",
+      "JARVIS_COMPUTER_ACCESS": "disabled",
+      "JARVIS_EXECUTION_MODE": "disabled",
+      "JARVIS_EXTERNAL_ACCESS": "disabled",
+      "JARVIS_OLLAMA_ENABLED": "true"
+    }
+  },
+  "created_at": "2026-09-05T02:12:19.255357+00:00",
+  "fixture": {
+    "case_count": 66,
+    "exit_criteria": {
+      "acceptance_retention_min": 1.0,
+      "ambiguity_recall_min": 0.9,
+      "constraint_retention_min": 1.0,
+      "continuation_recall_min": 0.9,
+      "effect_accuracy_min": 0.9,
+      "evidence_accuracy_min": 0.9,
+      "false_unavailable_max": 0,
+      "future_queue_receipt_rate_min": 1.0,
+      "immediate_evidence_rate_min": 1.0,
+      "promise_only_immediate_max": 0,
+      "relation_accuracy_min": 0.9,
+      "restart_preservation_rate_min": 1.0,
+      "route_accuracy_min": 0.9,
+      "specified_false_positive_rate_max": 0.1,
+      "unbacked_future_promise_max": 0
+    },
+    "name": "Jarvis Phase 2 synthetic TaskContract holdout v2",
+    "sha256": "b81229d42790ec0be8a8f87d22cf6447feb21351859db6732a8e9d11395d9a8e"
+  },
+  "fixture_exit_criteria_result": null,
+  "gates": [
+    {
+      "comparator": ">=",
+      "gate": 1,
+      "metric_field": "route_accuracy",
+      "name": "broad routing accuracy",
+      "note": "not scored: the run did not resolve all cases",
+      "observed": null,
+      "passed": false,
+      "threshold": 0.9
+    },
+    {
+      "comparator": ">=",
+      "gate": 1,
+      "metric_field": "route_by_lane",
+      "name": "broad routing accuracy, every lane",
+      "note": "not scored: the run did not resolve all cases",
+      "observed": null,
+      "passed": false,
+      "threshold": 0.9
+    },
+    {
+      "comparator": ">=",
+      "gate": 3,
+      "metric_field": "ambiguity_recall",
+      "name": "material-ambiguity clarification recall",
+      "note": "not scored: the run did not resolve all cases",
+      "observed": null,
+      "passed": false,
+      "threshold": 0.9
+    },
+    {
+      "comparator": "<=",
+      "gate": 4,
+      "metric_field": "specified_false_positive_rate",
+      "name": "unnecessary clarification rate",
+      "note": "not scored: the run did not resolve all cases",
+      "observed": null,
+      "passed": false,
+      "threshold": 0.1
+    }
+  ],
+  "gates_passed": false,
+  "known_limitations": [
+    "One run, one model, one host. Benchmark numbers are historical observations, not permanent guarantees, and must be refreshed after any code, model, provider, or hardware change.",
+    "Resolver-level evidence only. This run scores the contract the resolver produced; it does not execute any workflow and says nothing about end-to-end completion.",
+    "Gate 3 has a denominator of 11 material-ambiguity cases in this fixture, so a single miss lands at 0.909 and two miss the 0.90 threshold. The denominator is too thin to carry the gate on its own.",
+    "The fixture's own exit criteria are in places stricter than the roadmap gates and are reported separately, unedited. A run can miss a fixture criterion while clearing the roadmap gate it corresponds to.",
+    "Decoding is pinned to temperature 0.0, seed 0, think disabled, and an 8192-token context. Results are not a claim about the model under other decoding settings.",
+    "Runs are not bit-reproducible. Even at temperature 0.0 with a fixed seed, the local runtime does not guarantee identical output, and a case observed to resolve on one run can be rejected on the next. A single run bounds the resolver's behaviour; it does not pin it.",
+    "The scorer refuses to score a partial set. If any case fails to yield a parseable contract, no routing, ambiguity, or false-positive number is produced at all and every gate row reports no observation. A gate row reading 'not scored' means the run was incomplete, not that the metric was measured and missed.",
+    "The provider version is the value the provider reported at run time; it is recorded, not independently verified.",
+    "The receipt's per-case model_attestation conflates attestation with contract acceptance: a case whose response was attested on the wire but whose contract was then rejected records 'not_observed', and exact_model_only is therefore false whenever any case is rejected for a reason unrelated to attestation. Read the attestation result from model_unattested and model_mismatch, which count only genuine attestation failures. Separating attestation into its own axis is a recorded follow-up for the module owner.",
+    "A rejected case is not a parse failure. The observed rejections come from post-parse reconciliation - reconcile_task_contract_continuation (task_contract.py:1502) and the _validate_consistency check (:877) it reaches through bind_provided_material_continuation - which run after parse_task_contract has already accepted the payload."
+  ],
+  "model": {
+    "requested": "ollama:qwen3.5:9b",
+    "served": "qwen3.5:9b"
+  },
+  "per_lane": {},
+  "platform": {
+    "os": "Windows",
+    "python": "3.13.7"
+  },
+  "provider": {
+    "name": "ollama",
+    "version": "0.32.15"
+  },
+  "receipt": {
+    "benchmark": "task_contract_holdout_v2",
+    "cases": [
+      {
+        "checks": {
+          "acceptance": true,
+          "clarification": true,
+          "constraints": true,
+          "effect": true,
+          "evidence": true,
+          "lane": true,
+          "relation": true
+        },
+        "id": "p2_dialogue_01",
+        "latency_ms": 5950.929,
+        "model_attestation": "verified",
+        "requested_model": "ollama:qwen3.5:9b",
+        "status": "resolved"
+      },
+      {
+        "checks": {
+          "acceptance": true,
+          "clarification": false,
+          "constraints": true,
+          "effect": true,
+          "evidence": true,
+          "lane": true,
+          "relation": true
+        },
+        "id": "p2_dialogue_02",
+        "latency_ms": 2076.097,
+        "model_attestation": "verified",
+        "requested_model": "ollama:qwen3.5:9b",
+        "status": "resolved"
+      },
+      {
+        "checks": {
+          "acceptance": true,
+          "clarification": true,
+          "constraints": true,
+          "effect": true,
+          "evidence": true,
+          "lane": true,
+          "relation": true
+        },
+        "id": "p2_dialogue_03",
+        "latency_ms": 1815.482,
+        "model_attestation": "verified",
+        "requested_model": "ollama:qwen3.5:9b",
+        "status": "resolved"
+      },
+      {
+        "checks": {
+          "acceptance": true,
+          "clarification": true,
+          "constraints": false,
+          "effect": true,
+          "evidence": true,
+          "lane": true,
+          "relation": true
+        },
+        "id": "p2_dialogue_04",
+        "latency_ms": 1973.527,
+        "model_attestation": "verified",
+        "requested_model": "ollama:qwen3.5:9b",
+        "status": "resolved"
+      },
+      {
+        "checks": {
+          "acceptance": true,
+          "clarification": true,
+          "constraints": true,
+          "effect": true,
+          "evidence": true,
+          "lane": true,
+          "relation": true
+        },
+        "id": "p2_dialogue_05",
+        "latency_ms": 1038.398,
+        "model_attestation": "verified",
+        "requested_model": "ollama:qwen3.5:9b",
+        "status": "resolved"
+      },
+      {
+        "id": "p2_dialogue_06",
+        "latency_ms": 982.869,
+        "model_attestation": "not_observed",
+        "requested_model": "ollama:qwen3.5:9b",
+        "status": "contract_rejected"
+      },
+      {
+        "checks": {
+          "acceptance": true,
+          "clarification": true,
+          "constraints": false,
+          "effect": true,
+          "evidence": true,
+          "lane": true,
+          "relation": true
+        },
+        "id": "p2_dialogue_07",
+        "latency_ms": 2155.784,
+        "model_attestation": "verified",
+        "requested_model": "ollama:qwen3.5:9b",
+        "status": "resolved"
+      },
+      {
+        "checks": {
+          "acceptance": true,
+          "clarification": true,
+          "constraints": false,
+          "effect": true,
+          "evidence": true,
+          "lane": true,
+          "relation": true
+        },
+        "id": "p2_dialogue_08",
+        "latency_ms": 1826.826,
+        "model_attestation": "verified",
+        "requested_model": "ollama:qwen3.5:9b",
+        "status": "resolved"
+      },
+      {
+        "checks": {
+          "acceptance": true,
+          "clarification": true,
+          "constraints": false,
+          "effect": true,
+          "evidence": false,
+          "lane": true,
+          "relation": true
+        },
+        "id": "p2_dialogue_09",
+        "latency_ms": 2177.078,
+        "model_attestation": "verified",
+        "requested_model": "ollama:qwen3.5:9b",
+        "status": "resolved"
+      },
+      {
+        "checks": {
+          "acceptance": true,
+          "clarification": false,
+          "constraints": true,
+          "effect": true,
+          "evidence": true,
+          "lane": true,
+          "relation": true
+        },
+        "id": "p2_dialogue_10",
+        "latency_ms": 1932.098,
+        "model_attestation": "verified",
+        "requested_model": "ollama:qwen3.5:9b",
+        "status": "resolved"
+      },
+      {
+        "checks": {
+          "acceptance": true,
+          "clarification": true,
+          "constraints": true,
+          "effect": true,
+          "evidence": true,
+          "lane": true,
+          "relation": true
+        },
+        "id": "p2_dialogue_11",
+        "latency_ms": 1947.062,
+        "model_attestation": "verified",
+        "requested_model": "ollama:qwen3.5:9b",
+        "status": "resolved"
+      },
+      {
+        "checks": {
+          "acceptance": true,
+          "clarification": true,
+          "constraints": true,
+          "effect": true,
+          "evidence": true,
+          "lane": true,
+          "relation": true
+        },
+        "id": "p2_dialogue_12",
+        "latency_ms": 1152.531,
+        "model_attestation": "verified",
+        "requested_model": "ollama:qwen3.5:9b",
+        "status": "resolved"
+      },
+      {
+        "checks": {
+          "acceptance": true,
+          "clarification": true,
+          "constraints": false,
+          "effect": true,
+          "evidence": true,
+          "lane": true,
+          "relation": true
+        },
+        "id": "p2_research_01",
+        "latency_ms": 1771.213,
+        "model_attestation": "verified",
+        "requested_model": "ollama:qwen3.5:9b",
+        "status": "resolved"
+      },
+      {
+        "checks": {
+          "acceptance": true,
+          "clarification": true,
+          "constraints": false,
+          "effect": true,
+          "evidence": true,
+          "lane": true,
+          "relation": true
+        },
+        "id": "p2_research_02",
+        "latency_ms": 1726.185,
+        "model_attestation": "verified",
+        "requested_model": "ollama:qwen3.5:9b",
+        "status": "resolved"
+      },
+      {
+        "checks": {
+          "acceptance": true,
+          "clarification": true,
+          "constraints": true,
+          "effect": false,
+          "evidence": true,
+          "lane": false,
+          "relation": true
+        },
+        "id": "p2_research_03",
+        "latency_ms": 1957.438,
+        "model_attestation": "verified",
+        "requested_model": "ollama:qwen3.5:9b",
+        "status": "resolved"
+      },
+      {
+        "id": "p2_research_04",
+        "latency_ms": 931.43,
+        "model_attestation": "not_observed",
+        "requested_model": "ollama:qwen3.5:9b",
+        "status": "contract_rejected"
+      },
+      {
+        "checks": {
+          "acceptance": false,
+          "clarification": false,
+          "constraints": false,
+          "effect": true,
+          "evidence": true,
+          "lane": true,
+          "relation": true
+        },
+        "id": "p2_research_05",
+        "latency_ms": 1903.308,
+        "model_attestation": "verified",
+        "requested_model": "ollama:qwen3.5:9b",
+        "status": "resolved"
+      },
+      {
+        "checks": {
+          "acceptance": true,
+          "clarification": true,
+          "constraints": false,
+          "effect": true,
+          "evidence": true,
+          "lane": true,
+          "relation": true
+        },
+        "id": "p2_research_06",
+        "latency_ms": 1864.28,
+        "model_attestation": "verified",
+        "requested_model": "ollama:qwen3.5:9b",
+        "status": "resolved"
+      },
+      {
+        "checks": {
+          "acceptance": true,
+          "clarification": true,
+          "constraints": false,
+          "effect": true,
+          "evidence": true,
+          "lane": true,
+          "relation": true
+        },
+        "id": "p2_research_07",
+        "latency_ms": 1687.546,
+        "model_attestation": "verified",
+        "requested_model": "ollama:qwen3.5:9b",
+        "status": "resolved"
+      },
+      {
+        "checks": {
+          "acceptance": true,
+          "clarification": true,
+          "constraints": false,
+          "effect": true,
+          "evidence": true,
+          "lane": true,
+          "relation": true
+        },
+        "id": "p2_research_08",
+        "latency_ms": 1702.606,
+        "model_attestation": "verified",
+        "requested_model": "ollama:qwen3.5:9b",
+        "status": "resolved"
+      },
+      {
+        "checks": {
+          "acceptance": true,
+          "clarification": true,
+          "constraints": false,
+          "effect": true,
+          "evidence": true,
+          "lane": true,
+          "relation": true
+        },
+        "id": "p2_research_09",
+        "latency_ms": 1704.528,
+        "model_attestation": "verified",
+        "requested_model": "ollama:qwen3.5:9b",
+        "status": "resolved"
+      },
+      {
+        "checks": {
+          "acceptance": true,
+          "clarification": true,
+          "constraints": false,
+          "effect": true,
+          "evidence": true,
+          "lane": true,
+          "relation": true
+        },
+        "id": "p2_research_10",
+        "latency_ms": 1662.403,
+        "model_attestation": "verified",
+        "requested_model": "ollama:qwen3.5:9b",
+        "status": "resolved"
+      },
+      {
+        "checks": {
+          "acceptance": true,
+          "clarification": true,
+          "constraints": false,
+          "effect": true,
+          "evidence": true,
+          "lane": true,
+          "relation": true
+        },
+        "id": "p2_research_11",
+        "latency_ms": 1803.369,
+        "model_attestation": "verified",
+        "requested_model": "ollama:qwen3.5:9b",
+        "status": "resolved"
+      },
+      {
+        "checks": {
+          "acceptance": true,
+          "clarification": true,
+          "constraints": true,
+          "effect": true,
+          "evidence": true,
+          "lane": true,
+          "relation": true
+        },
+        "id": "p2_research_12",
+        "latency_ms": 1097.389,
+        "model_attestation": "verified",
+        "requested_model": "ollama:qwen3.5:9b",
+        "status": "resolved"
+      },
+      {
+        "checks": {
+          "acceptance": true,
+          "clarification": true,
+          "constraints": false,
+          "effect": true,
+          "evidence": true,
+          "lane": true,
+          "relation": true
+        },
+        "id": "p2_creation_01",
+        "latency_ms": 2215.945,
+        "model_attestation": "verified",
+        "requested_model": "ollama:qwen3.5:9b",
+        "status": "resolved"
+      },
+      {
+        "checks": {
+          "acceptance": false,
+          "clarification": true,
+          "constraints": false,
+          "effect": false,
+          "evidence": false,
+          "lane": true,
+          "relation": true
+        },
+        "id": "p2_creation_02",
+        "latency_ms": 1711.797,
+        "model_attestation": "verified",
+        "requested_model": "ollama:qwen3.5:9b",
+        "status": "resolved"
+      },
+      {
+        "checks": {
+          "acceptance": true,
+          "clarification": true,
+          "constraints": false,
+          "effect": true,
+          "evidence": false,
+          "lane": true,
+          "relation": true
+        },
+        "id": "p2_creation_03",
+        "latency_ms": 1915.046,
+        "model_attestation": "verified",
+        "requested_model": "ollama:qwen3.5:9b",
+        "status": "resolved"
+      },
+      {
+        "checks": {
+          "acceptance": true,
+          "clarification": true,
+          "constraints": true,
+          "effect": true,
+          "evidence": false,
+          "lane": true,
+          "relation": true
+        },
+        "id": "p2_creation_04",
+        "latency_ms": 1850.911,
+        "model_attestation": "verified",
+        "requested_model": "ollama:qwen3.5:9b",
+        "status": "resolved"
+      },
+      {
+        "checks": {
+          "acceptance": true,
+          "clarification": true,
+          "constraints": false,
+          "effect": true,
+          "evidence": false,
+          "lane": true,
+          "relation": true
+        },
+        "id": "p2_creation_05",
+        "latency_ms": 1920.454,
+        "model_attestation": "verified",
+        "requested_model": "ollama:qwen3.5:9b",
+        "status": "resolved"
+      },
+      {
+        "checks": {
+          "acceptance": true,
+          "clarification": true,
+          "constraints": true,
+          "effect": true,
+          "evidence": true,
+          "lane": true,
+          "relation": true
+        },
+        "id": "p2_creation_06",
+        "latency_ms": 1399.585,
+        "model_attestation": "verified",
+        "requested_model": "ollama:qwen3.5:9b",
+        "status": "resolved"
+      },
+      {
+        "checks": {
+          "acceptance": true,
+          "clarification": true,
+          "constraints": false,
+          "effect": true,
+          "evidence": true,
+          "lane": true,
+          "relation": true
+        },
+        "id": "p2_creation_07",
+        "latency_ms": 1999.839,
+        "model_attestation": "verified",
+        "requested_model": "ollama:qwen3.5:9b",
+        "status": "resolved"
+      },
+      {
+        "checks": {
+          "acceptance": true,
+          "clarification": true,
+          "constraints": false,
+          "effect": true,
+          "evidence": false,
+          "lane": true,
+          "relation": true
+        },
+        "id": "p2_creation_08",
+        "latency_ms": 1829.783,
+        "model_attestation": "verified",
+        "requested_model": "ollama:qwen3.5:9b",
+        "status": "resolved"
+      },
+      {
+        "checks": {
+          "acceptance": true,
+          "clarification": true,
+          "constraints": true,
+          "effect": false,
+          "evidence": false,
+          "lane": false,
+          "relation": true
+        },
+        "id": "p2_creation_09",
+        "latency_ms": 1703.189,
+        "model_attestation": "verified",
+        "requested_model": "ollama:qwen3.5:9b",
+        "status": "resolved"
+      },
+      {
+        "id": "p2_creation_10",
+        "latency_ms": 1114.263,
+        "model_attestation": "not_observed",
+        "requested_model": "ollama:qwen3.5:9b",
+        "status": "contract_rejected"
+      },
+      {
+        "checks": {
+          "acceptance": false,
+          "clarification": true,
+          "constraints": false,
+          "effect": false,
+          "evidence": false,
+          "lane": true,
+          "relation": true
+        },
+        "id": "p2_creation_11",
+        "latency_ms": 2185.512,
+        "model_attestation": "verified",
+        "requested_model": "ollama:qwen3.5:9b",
+        "status": "resolved"
+      },
+      {
+        "checks": {
+          "acceptance": true,
+          "clarification": false,
+          "constraints": false,
+          "effect": true,
+          "evidence": false,
+          "lane": true,
+          "relation": true
+        },
+        "id": "p2_creation_12",
+        "latency_ms": 2090.982,
+        "model_attestation": "verified",
+        "requested_model": "ollama:qwen3.5:9b",
+        "status": "resolved"
+      },
+      {
+        "checks": {
+          "acceptance": true,
+          "clarification": true,
+          "constraints": false,
+          "effect": true,
+          "evidence": false,
+          "lane": false,
+          "relation": true
+        },
+        "id": "p2_inspection_01",
+        "latency_ms": 1761.762,
+        "model_attestation": "verified",
+        "requested_model": "ollama:qwen3.5:9b",
+        "status": "resolved"
+      },
+      {
+        "checks": {
+          "acceptance": true,
+          "clarification": false,
+          "constraints": false,
+          "effect": true,
+          "evidence": false,
+          "lane": false,
+          "relation": true
+        },
+        "id": "p2_inspection_02",
+        "latency_ms": 1782.882,
+        "model_attestation": "verified",
+        "requested_model": "ollama:qwen3.5:9b",
+        "status": "resolved"
+      },
+      {
+        "checks": {
+          "acceptance": true,
+          "clarification": false,
+          "constraints": false,
+          "effect": false,
+          "evidence": false,
+          "lane": false,
+          "relation": true
+        },
+        "id": "p2_inspection_03",
+        "latency_ms": 1961.952,
+        "model_attestation": "verified",
+        "requested_model": "ollama:qwen3.5:9b",
+        "status": "resolved"
+      },
+      {
+        "checks": {
+          "acceptance": true,
+          "clarification": true,
+          "constraints": true,
+          "effect": false,
+          "evidence": false,
+          "lane": false,
+          "relation": true
+        },
+        "id": "p2_inspection_04",
+        "latency_ms": 1833.729,
+        "model_attestation": "verified",
+        "requested_model": "ollama:qwen3.5:9b",
+        "status": "resolved"
+      },
+      {
+        "id": "p2_inspection_05",
+        "latency_ms": 1143.258,
+        "model_attestation": "not_observed",
+        "requested_model": "ollama:qwen3.5:9b",
+        "status": "contract_rejected"
+      },
+      {
+        "checks": {
+          "acceptance": true,
+          "clarification": true,
+          "constraints": false,
+          "effect": true,
+          "evidence": true,
+          "lane": false,
+          "relation": true
+        },
+        "id": "p2_inspection_06",
+        "latency_ms": 1847.853,
+        "model_attestation": "verified",
+        "requested_model": "ollama:qwen3.5:9b",
+        "status": "resolved"
+      },
+      {
+        "checks": {
+          "acceptance": true,
+          "clarification": false,
+          "constraints": false,
+          "effect": true,
+          "evidence": false,
+          "lane": false,
+          "relation": true
+        },
+        "id": "p2_inspection_07",
+        "latency_ms": 1863.399,
+        "model_attestation": "verified",
+        "requested_model": "ollama:qwen3.5:9b",
+        "status": "resolved"
+      },
+      {
+        "checks": {
+          "acceptance": true,
+          "clarification": false,
+          "constraints": false,
+          "effect": true,
+          "evidence": false,
+          "lane": false,
+          "relation": true
+        },
+        "id": "p2_inspection_08",
+        "latency_ms": 1751.057,
+        "model_attestation": "verified",
+        "requested_model": "ollama:qwen3.5:9b",
+        "status": "resolved"
+      },
+      {
+        "checks": {
+          "acceptance": true,
+          "clarification": true,
+          "constraints": true,
+          "effect": false,
+          "evidence": false,
+          "lane": false,
+          "relation": true
+        },
+        "id": "p2_inspection_09",
+        "latency_ms": 1830.083,
+        "model_attestation": "verified",
+        "requested_model": "ollama:qwen3.5:9b",
+        "status": "resolved"
+      },
+      {
+        "checks": {
+          "acceptance": true,
+          "clarification": false,
+          "constraints": false,
+          "effect": false,
+          "evidence": false,
+          "lane": false,
+          "relation": true
+        },
+        "id": "p2_inspection_10",
+        "latency_ms": 2120.87,
+        "model_attestation": "verified",
+        "requested_model": "ollama:qwen3.5:9b",
+        "status": "resolved"
+      },
+      {
+        "checks": {
+          "acceptance": true,
+          "clarification": true,
+          "constraints": true,
+          "effect": true,
+          "evidence": true,
+          "lane": true,
+          "relation": true
+        },
+        "id": "p2_inspection_11",
+        "latency_ms": 1612.576,
+        "model_attestation": "verified",
+        "requested_model": "ollama:qwen3.5:9b",
+        "status": "resolved"
+      },
+      {
+        "checks": {
+          "acceptance": true,
+          "clarification": true,
+          "constraints": false,
+          "effect": false,
+          "evidence": false,
+          "lane": false,
+          "relation": true
+        },
+        "id": "p2_inspection_12",
+        "latency_ms": 1817.064,
+        "model_attestation": "verified",
+        "requested_model": "ollama:qwen3.5:9b",
+        "status": "resolved"
+      },
+      {
+        "checks": {
+          "acceptance": true,
+          "clarification": true,
+          "constraints": true,
+          "effect": true,
+          "evidence": false,
+          "lane": true,
+          "relation": true
+        },
+        "id": "p2_external_01",
+        "latency_ms": 1902.763,
+        "model_attestation": "verified",
+        "requested_model": "ollama:qwen3.5:9b",
+        "status": "resolved"
+      },
+      {
+        "checks": {
+          "acceptance": false,
+          "clarification": true,
+          "constraints": false,
+          "effect": false,
+          "evidence": false,
+          "lane": false,
+          "relation": true
+        },
+        "id": "p2_external_02",
+        "latency_ms": 2020.611,
+        "model_attestation": "verified",
+        "requested_model": "ollama:qwen3.5:9b",
+        "status": "resolved"
+      },
+      {
+        "checks": {
+          "acceptance": true,
+          "clarification": true,
+          "constraints": true,
+          "effect": false,
+          "evidence": false,
+          "lane": false,
+          "relation": true
+        },
+        "id": "p2_external_03",
+        "latency_ms": 2021.966,
+        "model_attestation": "verified",
+        "requested_model": "ollama:qwen3.5:9b",
+        "status": "resolved"
+      },
+      {
+        "checks": {
+          "acceptance": false,
+          "clarification": false,
+          "constraints": false,
+          "effect": true,
+          "evidence": false,
+          "lane": true,
+          "relation": true
+        },
+        "id": "p2_external_04",
+        "latency_ms": 1943.784,
+        "model_attestation": "verified",
+        "requested_model": "ollama:qwen3.5:9b",
+        "status": "resolved"
+      },
+      {
+        "checks": {
+          "acceptance": true,
+          "clarification": true,
+          "constraints": true,
+          "effect": true,
+          "evidence": true,
+          "lane": true,
+          "relation": true
+        },
+        "id": "p2_external_05",
+        "latency_ms": 1367.897,
+        "model_attestation": "verified",
+        "requested_model": "ollama:qwen3.5:9b",
+        "status": "resolved"
+      },
+      {
+        "checks": {
+          "acceptance": false,
+          "clarification": true,
+          "constraints": false,
+          "effect": false,
+          "evidence": false,
+          "lane": false,
+          "relation": true
+        },
+        "id": "p2_external_06",
+        "latency_ms": 1895.858,
+        "model_attestation": "verified",
+        "requested_model": "ollama:qwen3.5:9b",
+        "status": "resolved"
+      },
+      {
+        "checks": {
+          "acceptance": false,
+          "clarification": false,
+          "constraints": false,
+          "effect": false,
+          "evidence": false,
+          "lane": false,
+          "relation": true
+        },
+        "id": "p2_external_07",
+        "latency_ms": 1984.424,
+        "model_attestation": "verified",
+        "requested_model": "ollama:qwen3.5:9b",
+        "status": "resolved"
+      },
+      {
+        "checks": {
+          "acceptance": true,
+          "clarification": true,
+          "constraints": true,
+          "effect": false,
+          "evidence": false,
+          "lane": false,
+          "relation": true
+        },
+        "id": "p2_external_08",
+        "latency_ms": 1742.102,
+        "model_attestation": "verified",
+        "requested_model": "ollama:qwen3.5:9b",
+        "status": "resolved"
+      },
+      {
+        "id": "p2_external_09",
+        "latency_ms": 1901.4,
+        "model_attestation": "not_observed",
+        "requested_model": "ollama:qwen3.5:9b",
+        "status": "contract_rejected"
+      },
+      {
+        "checks": {
+          "acceptance": false,
+          "clarification": false,
+          "constraints": false,
+          "effect": false,
+          "evidence": false,
+          "lane": false,
+          "relation": true
+        },
+        "id": "p2_external_10",
+        "latency_ms": 2436.574,
+        "model_attestation": "verified",
+        "requested_model": "ollama:qwen3.5:9b",
+        "status": "resolved"
+      },
+      {
+        "id": "p2_external_11",
+        "latency_ms": 2322.479,
+        "model_attestation": "not_observed",
+        "requested_model": "ollama:qwen3.5:9b",
+        "status": "contract_rejected"
+      },
+      {
+        "id": "p2_external_12",
+        "latency_ms": 1167.286,
+        "model_attestation": "not_observed",
+        "requested_model": "ollama:qwen3.5:9b",
+        "status": "contract_rejected"
+      },
+      {
+        "checks": {
+          "acceptance": true,
+          "clarification": false,
+          "constraints": false,
+          "effect": false,
+          "evidence": true,
+          "lane": false,
+          "relation": true
+        },
+        "id": "p2_configuration_01",
+        "latency_ms": 1945.566,
+        "model_attestation": "verified",
+        "requested_model": "ollama:qwen3.5:9b",
+        "status": "resolved"
+      },
+      {
+        "checks": {
+          "acceptance": true,
+          "clarification": true,
+          "constraints": false,
+          "effect": false,
+          "evidence": true,
+          "lane": false,
+          "relation": true
+        },
+        "id": "p2_configuration_02",
+        "latency_ms": 1761.811,
+        "model_attestation": "verified",
+        "requested_model": "ollama:qwen3.5:9b",
+        "status": "resolved"
+      },
+      {
+        "checks": {
+          "acceptance": true,
+          "clarification": true,
+          "constraints": true,
+          "effect": true,
+          "evidence": true,
+          "lane": true,
+          "relation": true
+        },
+        "id": "p2_configuration_03",
+        "latency_ms": 1624.705,
+        "model_attestation": "verified",
+        "requested_model": "ollama:qwen3.5:9b",
+        "status": "resolved"
+      },
+      {
+        "checks": {
+          "acceptance": true,
+          "clarification": true,
+          "constraints": true,
+          "effect": false,
+          "evidence": true,
+          "lane": false,
+          "relation": true
+        },
+        "id": "p2_configuration_04",
+        "latency_ms": 1503.059,
+        "model_attestation": "verified",
+        "requested_model": "ollama:qwen3.5:9b",
+        "status": "resolved"
+      },
+      {
+        "checks": {
+          "acceptance": true,
+          "clarification": true,
+          "constraints": false,
+          "effect": false,
+          "evidence": true,
+          "lane": false,
+          "relation": true
+        },
+        "id": "p2_configuration_05",
+        "latency_ms": 1549.758,
+        "model_attestation": "verified",
+        "requested_model": "ollama:qwen3.5:9b",
+        "status": "resolved"
+      },
+      {
+        "checks": {
+          "acceptance": true,
+          "clarification": true,
+          "constraints": false,
+          "effect": true,
+          "evidence": true,
+          "lane": true,
+          "relation": true
+        },
+        "id": "p2_configuration_06",
+        "latency_ms": 1713.006,
+        "model_attestation": "verified",
+        "requested_model": "ollama:qwen3.5:9b",
+        "status": "resolved"
+      }
+    ],
+    "created_at": "2026-09-05T02:12:19.255357+00:00",
+    "exact_model_only": false,
+    "fallback_count": 0,
+    "fixture_sha256": "b81229d42790ec0be8a8f87d22cf6447feb21351859db6732a8e9d11395d9a8e",
+    "memory_writes": 0,
+    "model_attestation_required": true,
+    "operator_text_retained": false,
+    "provider": "ollama",
+    "provider_model_attestation": "explicit_response_signal_required",
+    "receipt_checksum_sha256": "15bace19bdb8f7f099f6e2c3af33be1c1c5b429f78b7ed28be4b672244649c9f",
+    "requested_model": "ollama:qwen3.5:9b",
+    "schema_version": 1,
+    "summary": {
+      "case_count": 66,
+      "contract_metrics": null,
+      "contract_rejected": 7,
+      "model_mismatch": 0,
+      "model_unattested": 0,
+      "p50_latency_ms": 1829.783,
+      "p95_latency_ms": 2215.945,
+      "provider_error": 0,
+      "resolved": 59,
+      "total_latency_ms": 120909.216
+    },
+    "tools_supplied": 0,
+    "training_eligible": false
+  },
+  "report": "phase2_task_contract_resolver",
+  "roadmap_gate_bullets": [
+    1,
+    3,
+    4
+  ],
+  "roadmap_phase": 2,
+  "schema_version": 1,
+  "scorer_metrics": null,
+  "timing": {
+    "p50_latency_ms": 1829.783,
+    "p95_latency_ms": 2215.945,
+    "total_latency_ms": 120909.216,
+    "wall_seconds": 120.912
+  }
+}

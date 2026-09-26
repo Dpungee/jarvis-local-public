@@ -123,7 +123,7 @@ FIXTURE_PATH = (
     / "fixtures"
     / "learning_ladder_holdout_v7.json"
 )
-FIXTURE_SHA256 = "bbc9d0a8d216dbf2a2547d3713094dd85df08f416afc74285720e84d9c89352c"
+FIXTURE_SHA256 = "e2f3ddae596c68a2cbac4006718c463808033211662f23056650fa9a7d6e9957"
 SCORER_SHA256 = "0ed826db90629a69fd97c448142c4ffa3b45434171aa20823d2ed16e60ce2e4e"
 SCORER_START = "# -- BEGIN SEALED LEARNING LADDER HOLDOUT V7 SCORER --"
 SCORER_END = "# -- END SEALED LEARNING LADDER HOLDOUT V7 SCORER --"
@@ -140,6 +140,26 @@ PINNED_FILES = (
     "jarvis/memory.py",
     "jarvis/skill_evolution.py",
     "jarvis/skill_library.py",
+    "jarvis/memory_retrieval.py",
+    "jarvis/memory_embeddings.py",
+    "jarvis/memory_runtime.py",
+    "jarvis/memory_schema_migrations.py",
+    "jarvis/memory_projects_budget.py",
+    "jarvis/memory_predictions.py",
+    "jarvis/memory_conversations.py",
+    "jarvis/memory_presence_companion.py",
+    "jarvis/memory_ordinary_recall.py",
+    "jarvis/memory_claims.py",
+    "jarvis/memory_embedding_store.py",
+    "jarvis/memory_lessons.py",
+    "jarvis/memory_strategy_transfer.py",
+    "jarvis/memory_strategy_trial.py",
+    "jarvis/memory_tasks_scheduling.py",
+    "jarvis/memory_operator_state.py",
+    "jarvis/memory_approvals.py",
+    "jarvis/memory_learning_ladder.py",
+    "jarvis/memory_governance.py",
+    "jarvis/memory_conversation_compaction.py",
 )
 PLACEHOLDER_DIGEST = "0" * 64
 REPOSITORY_ROOT = Path(__file__).resolve().parent.parent

@@ -72,7 +72,9 @@ class ProviderSetupTests(unittest.TestCase):
         self.assertFalse(
             provider_setup.is_setup_complete(
                 self.root,
-                environ={"JARVIS_FAST_MODEL": "claude-cli:haiku"},
+                environ={
+                    "JARVIS_FAST_MODEL": provider_setup._PINNED_CLAUDE_SONNET_4_5_MODEL
+                },
             )
         )
         self.assertFalse(
@@ -176,6 +178,52 @@ JARVIS_CLAUDE_CLI_ENABLED=false
         self.assertNotIn("API_KEY", saved)
         self.assertIn("will not ask again", output.getvalue())
 
+    def test_ollama_choice_restores_local_profiles_without_credentials(self) -> None:
+        with patch.object(
+            provider_setup,
+            "detect_provider",
+            side_effect=AssertionError("local selection must not probe a subscription CLI"),
+        ):
+            result = provider_setup.configure_provider("ollama", self.root)
+
+        self.assertEqual(result.choice, "ollama")
+        saved = (self.root / ".env").read_text(encoding="utf-8")
+        self.assertIn("JARVIS_OLLAMA_ENABLED=true", saved)
+        self.assertIn("JARVIS_CLOUD_ENABLED=false", saved)
+        self.assertIn("JARVIS_CODEX_CLI_ENABLED=false", saved)
+        self.assertIn("JARVIS_CLAUDE_CLI_ENABLED=false", saved)
+        self.assertIn("JARVIS_FAST_MODEL=qwen3.5:9b", saved)
+        self.assertIn("JARVIS_CODING_MODEL=qwen3-coder:30b", saved)
+        self.assertNotIn("API_KEY", saved)
+
+    def test_first_run_can_choose_ollama_without_subscription_setup(self) -> None:
+        with (
+            patch.object(
+                provider_setup,
+                "detect_provider",
+                side_effect=AssertionError("Ollama setup must not probe a subscription CLI"),
+            ),
+            patch.object(
+                provider_setup,
+                "_prepare_provider",
+                side_effect=AssertionError("Ollama setup must not launch a CLI login"),
+            ),
+        ):
+            result = provider_setup.ensure_ready(
+                True,
+                self.root,
+                environ={},
+                input_fn=Mock(side_effect=["4"]),
+                output=io.StringIO(),
+                stdin_isatty=True,
+            )
+
+        self.assertEqual(result.choice, "ollama")
+        self.assertIn(
+            "JARVIS_OLLAMA_ENABLED=true",
+            (self.root / ".env").read_text(encoding="utf-8"),
+        )
+
     def test_both_routes_fast_work_to_claude_and_coding_to_codex(self) -> None:
         provider_setup.persist_provider_choice("both", self.root)
         saved = (self.root / ".env").read_text(encoding="utf-8")
@@ -206,6 +254,14 @@ JARVIS_CLAUDE_CLI_ENABLED=false
         self.assertFalse(configured.ollama_enabled)
         self.assertEqual(configured.coding_model, "codex-cli:gpt-5.6-sol")
 
+        local = provider_setup.config_with_provider_choice(configured, "ollama")
+        self.assertEqual(provider_setup.provider_choice_from_config(local), "ollama")
+        self.assertTrue(local.ollama_enabled)
+        self.assertFalse(local.cloud_enabled)
+        self.assertFalse(local.codex_cli_enabled)
+        self.assertFalse(local.claude_cli_enabled)
+        self.assertEqual(local.fast_model, "qwen3.5:9b")
+
     def test_atomic_update_preserves_unmanaged_lines_and_removes_managed_duplicates(self) -> None:
         original = (
             "# keep this comment\r\n"
@@ -224,7 +280,10 @@ JARVIS_CLAUDE_CLI_ENABLED=false
         self.assertIn("JARVIS_COMMAND_TIMEOUT=77", saved)
         self.assertIn("JARVIS_AUTONOMY=readonly", saved)
         self.assertEqual(saved.count("JARVIS_FAST_MODEL="), 1)
-        self.assertIn("JARVIS_FAST_MODEL=claude-cli:haiku", saved)
+        self.assertIn(
+            f"JARVIS_FAST_MODEL={provider_setup._PINNED_CLAUDE_SONNET_4_5_MODEL}",
+            saved,
+        )
         self.assertFalse(list(self.root.glob(".jarvis-provider-*.tmp")))
 
     def test_existing_env_is_not_rewritten_by_automatic_first_run(self) -> None:

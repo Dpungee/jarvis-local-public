@@ -1,0 +1,2080 @@
+{
+  "version": 1,
+  "baseline_sha256": "10ba2ca086a066fa1c5324790a6b88932fd51aaefbfdc0efbffbfc0df75ed6e9",
+  "methods": {
+    "__init__": {
+      "module": "memory",
+      "sha256": "f1881eda73e337e999b2e5837fee1b822a1316e15a846f244657a9487be5749b"
+    },
+    "configure_vault": {
+      "module": "memory_ordinary_recall",
+      "sha256": "d595ce77c22caf90fcf34a5c7d95e0ecd94ea05438d44f6850cd3ff2fe215ba4"
+    },
+    "begin_vault_task": {
+      "module": "memory_ordinary_recall",
+      "sha256": "024232168a58d13326459c8c2683279a89c692aae11322e2b2ebde2ca6e00d63"
+    },
+    "_mirror_vault_note": {
+      "module": "memory_ordinary_recall",
+      "sha256": "8c860b1d0294f1037e154854fd059bee9fadedc4bb76a0d3108a80e2f8d9147c"
+    },
+    "sync_vault_notes": {
+      "module": "memory_ordinary_recall",
+      "sha256": "8393dd6906c06faf1a855291803f08d8076a8db305f8924444f3f6d7cd35b915"
+    },
+    "vault_index_status": {
+      "module": "memory_ordinary_recall",
+      "sha256": "717c89b49f876ca36500002f0f699d425528844bfabc5a46d908f0b545147534"
+    },
+    "closed": {
+      "module": "memory",
+      "sha256": "80abf122fccc07d3b46c6261c832796c87cd3fea39d4c2c8aa5e1508c9fb731b"
+    },
+    "__enter__": {
+      "module": "memory",
+      "sha256": "8375c45a0d0482c0cf4b2ab14668f19cd6f0e71f824f3250dfd1a7c87d7e8889"
+    },
+    "__exit__": {
+      "module": "memory",
+      "sha256": "59ef4c6ff94084c6e39c4aeca609f2caa06b5bcb3e44b385396208896b8e0020"
+    },
+    "close": {
+      "module": "memory",
+      "sha256": "0229804c65863e7701506f64510d14caa5b21186b4ae09ba02457a1b50a8c205"
+    },
+    "_ensure_open": {
+      "module": "memory",
+      "sha256": "4b4f34b78f28b9f28d8a0b18feaaa6fb7d51d0bbd2422a0dee60cef288399120"
+    },
+    "_immediate_transaction": {
+      "module": "memory",
+      "sha256": "99c869f982109f89b8cd5b344c5171868b29964b2a19f2ba0ff08746e25e57c9"
+    },
+    "_migrate": {
+      "module": "memory",
+      "sha256": "077c54014fcbfbd5677f61f3431993ff4eef33b120c2618431f132a593bdab0f"
+    },
+    "_migrate_v46": {
+      "module": "memory_schema_migrations",
+      "sha256": "a6158a8545df2c85c1faa649e5c0067ce1e175c0d156f0479afce98b947a7c7d"
+    },
+    "_migrate_v47": {
+      "module": "memory_schema_migrations",
+      "sha256": "2f4ff3b7b24eafb122b04bb798223b35f2ed3542820b9f2ff7e9082f903d7bd7"
+    },
+    "_migrate_v48": {
+      "module": "memory_schema_migrations",
+      "sha256": "177c2e9fae188d08bbb6b0d2e96ab4d55807906aa218ad12436bfcbc73dc0c9a"
+    },
+    "_migrate_v49": {
+      "module": "memory_schema_migrations",
+      "sha256": "4d25f2444c167141f20a5da760edb3f8f262416131a962454b480ddf552dbf3d"
+    },
+    "_migrate_v50": {
+      "module": "memory_schema_migrations",
+      "sha256": "64185524599ded73b0ca2a09700df4e679b6c7422feb822b85e1b30ffb97243c"
+    },
+    "_migrate_v51": {
+      "module": "memory_schema_migrations",
+      "sha256": "63031d79ce30f22a19d24bd99106c82eca8bc6e8b55ab887c531050fe6fa6694"
+    },
+    "_migrate_v52": {
+      "module": "memory_schema_migrations",
+      "sha256": "1623dfc0c80cdd7a2c7b5966828e97d159aa8d7b66d53e27073fde2ce87130e6"
+    },
+    "_migrate_v53": {
+      "module": "memory_schema_migrations",
+      "sha256": "b403e32454a22adf26fd24bf6cb3cfdd49e205f0923485d8106f7e8e304b9d38"
+    },
+    "_migrate_v54": {
+      "module": "memory_schema_migrations",
+      "sha256": "713936a706e7ce7148a2154174521f20a7ab9458253c0a48dcba79cce616ae35"
+    },
+    "_refuse_compaction_downgrade_locked": {
+      "module": "memory_schema_migrations",
+      "sha256": "144a7d23ead3a3e50f7807a57063c8c0aa7e5b6678b9aba09c09377699311d4d"
+    },
+    "_refuse_unbacked_ladder_events_locked": {
+      "module": "memory_schema_migrations",
+      "sha256": "41a68b410936bf3b605a918633ef5e609aef726f6e30a358e39d4b577ee72bde"
+    },
+    "_migrate_v45": {
+      "module": "memory_schema_migrations",
+      "sha256": "e94d6751a82afb054487cadff7c5301d86dba816f397bf9e1c5dc4327ae9ab80"
+    },
+    "_migrate_v1": {
+      "module": "memory_schema_migrations",
+      "sha256": "46c58bf50c3148c1219555d6593f0221d5cc086584ac6bc9d6c9e8c9526bf591"
+    },
+    "_migrate_v2": {
+      "module": "memory_schema_migrations",
+      "sha256": "22f4709c37c1313ea8662b4551f4a1ed1788eab1d4833210e6a122441319a573"
+    },
+    "_migrate_v3": {
+      "module": "memory_schema_migrations",
+      "sha256": "6b9c5e5d8881afddea8ad6bef0fe59ba06d990508a18c452cb32f8ca91f8f3c7"
+    },
+    "_migrate_v4": {
+      "module": "memory_schema_migrations",
+      "sha256": "0b75ce14ac6e38766ce689343bf20f8b1dd73adde0c25f10e4951a2210c14c38"
+    },
+    "_migrate_v5": {
+      "module": "memory_schema_migrations",
+      "sha256": "cd620be8e790e04f2cce0a2aa1b0ba16b77a5ac50ad2d25c031dc4cb54b61eba"
+    },
+    "_migrate_v6": {
+      "module": "memory_schema_migrations",
+      "sha256": "84817700809867eccb28f0dd221b7abb69c15d64a2c2875a12afa203043a8739"
+    },
+    "_migrate_v7": {
+      "module": "memory_schema_migrations",
+      "sha256": "593833d750656e3c7cf1fb537c7ab70a6731bf7c7f3b5431ecfb2ebba86a152b"
+    },
+    "_migrate_v8": {
+      "module": "memory_schema_migrations",
+      "sha256": "f348f81b4bdc1c344e14dce9a9792eb216de5ec2ddeae29fb880a6c3574f2d0b"
+    },
+    "_migrate_v9": {
+      "module": "memory_schema_migrations",
+      "sha256": "df5859b9672ed0074a62fd53be82dd362d8692022b82a9299bb27c7419e9d082"
+    },
+    "_migrate_v10": {
+      "module": "memory_schema_migrations",
+      "sha256": "ed0d7d99427916140d21c4bef94e29ba80a3ce97b49deac4a416a28fe6ebfbcd"
+    },
+    "_migrate_v11": {
+      "module": "memory_schema_migrations",
+      "sha256": "9a826f308e04d77cf38de4f743791a3d404d1534ac0cbf8e8de1e1a7a6b3f053"
+    },
+    "_migrate_v12": {
+      "module": "memory_schema_migrations",
+      "sha256": "2e086298f32b5ccd0fcea83a75836aaceac3a9efad644a09ff68582e985f03a6"
+    },
+    "_migrate_v13": {
+      "module": "memory_schema_migrations",
+      "sha256": "a0bba4ae5b11bbe39017875a40b167ce026ed7fbe3671d6f86f93588a005dd0a"
+    },
+    "_migrate_v14": {
+      "module": "memory_schema_migrations",
+      "sha256": "f73bc05d5fa659a37c0536925b98cacf32af4ed547d6d42c4c67e06f9574f534"
+    },
+    "_migrate_v15": {
+      "module": "memory_schema_migrations",
+      "sha256": "3d97d9d7f23b5d14f910f431939f984e6e8f7e46200daeb015b044456e633a4a"
+    },
+    "_migrate_v16": {
+      "module": "memory_schema_migrations",
+      "sha256": "c7c5b0afe045d89a2690e180b7a33ad0344939d23914f13284a0e4de0ca09d8f"
+    },
+    "_migrate_v17": {
+      "module": "memory_schema_migrations",
+      "sha256": "2e0fe6024b9f6ea542ce25b88663fc576b081ae1e322a7dfd8038d6dc4382841"
+    },
+    "_migrate_v18": {
+      "module": "memory_schema_migrations",
+      "sha256": "73c1cafbc668ed2e67b9ef5b3cf850edf5175431c3a45b75c5414d642b58f8bc"
+    },
+    "_migrate_v19": {
+      "module": "memory_schema_migrations",
+      "sha256": "27d4277e700dbf0d0fea789ff2b7dc2ba8e2bedc73232c775a2c502252589ac6"
+    },
+    "_migrate_v20": {
+      "module": "memory_schema_migrations",
+      "sha256": "3dda75bc3de559cc632d31ff408f46fc76024097bd45ed54c5145e847d7ba284"
+    },
+    "_migrate_v21": {
+      "module": "memory_schema_migrations",
+      "sha256": "54db523af686c8c96d04b8dcd7122b4cfda3bbaf1e24303c920b53c23247434a"
+    },
+    "_migrate_v22": {
+      "module": "memory_schema_migrations",
+      "sha256": "5f90ef6606142781372b2c1536e95bd3567cfca43c1040b0e017218668e7250b"
+    },
+    "_migrate_v23": {
+      "module": "memory_schema_migrations",
+      "sha256": "bb6663d2b38e4461a0ba8463daed530de33489d7878bbede077d9f552d043729"
+    },
+    "_migrate_v24": {
+      "module": "memory_schema_migrations",
+      "sha256": "897221df53c0c59b88173f5ec62b6a8390416fa4824589effdf42a4b3e68ad7c"
+    },
+    "_migrate_v25": {
+      "module": "memory_schema_migrations",
+      "sha256": "2db57c8e2eccff23e72f662c0f8115a895d5b4f58291d7c646b874e0e9875a54"
+    },
+    "_migrate_v26": {
+      "module": "memory_schema_migrations",
+      "sha256": "b229391d2b586543961ce5877cc5c9d208e09886206b3e9adcde01aac909d549"
+    },
+    "_migrate_v27": {
+      "module": "memory_schema_migrations",
+      "sha256": "1abc9a0ee2ce23977aea2001e962051711e7d7d44d6ce3a91127968d5734d021"
+    },
+    "_migrate_v28": {
+      "module": "memory_schema_migrations",
+      "sha256": "d16855df8f58b0569ff9da1c495ba7b1eb67f4ff9c63e4480e531b9d570aa0ad"
+    },
+    "_migrate_v29": {
+      "module": "memory_schema_migrations",
+      "sha256": "ebacc5e8d8168b97a2391c762b7cb48f525bd8056f7bd6935f7b8778c752fbf2"
+    },
+    "_migrate_v30": {
+      "module": "memory_schema_migrations",
+      "sha256": "72865f9eea5fe3e141a72120a1775ad29a6d1fc6914f77157f868d2780d845b7"
+    },
+    "_migrate_v31": {
+      "module": "memory_schema_migrations",
+      "sha256": "16dfb9af7022b5b70c42eac2d81b731444d8e0e07105062964538460b973adec"
+    },
+    "_migrate_v32": {
+      "module": "memory_schema_migrations",
+      "sha256": "51ea3a5d3d6eb17170ba3d72e77c6670eda483be4c1d4bbd3c0d661e006dca94"
+    },
+    "_migrate_v33": {
+      "module": "memory_schema_migrations",
+      "sha256": "496265f893d4018ae47cd2da804354bc5280661774b885022dcf1fbb829a1e04"
+    },
+    "_migrate_v34": {
+      "module": "memory_schema_migrations",
+      "sha256": "ec5c04ac40f19227d3cba5392cab3f9d09a5eb8bb78e95eb783e559b11c23770"
+    },
+    "_migrate_v35": {
+      "module": "memory_schema_migrations",
+      "sha256": "6bdbd85470b47861b65d9318f946aff0b1c540d95ddf0880d7462d725b18b88f"
+    },
+    "_migrate_v36": {
+      "module": "memory_schema_migrations",
+      "sha256": "04b0d70403d15da8bc62dc87fd6c95daa4ac0c86f40baf0b5b76287e88c8fa89"
+    },
+    "_migrate_v37": {
+      "module": "memory_schema_migrations",
+      "sha256": "889942de95fd756c5df1a0391c152df7142d4605d5c86738450c6d49b3543be6"
+    },
+    "_migrate_v38": {
+      "module": "memory_schema_migrations",
+      "sha256": "92afcab79728cd7c551eff0cf938f6b121da09f3c1eb0d078140a88dd5047bdf"
+    },
+    "_migrate_v39": {
+      "module": "memory_schema_migrations",
+      "sha256": "1b210588a0cfe342af0e5c401a72d0fce529df0777bb206fe2e6485286540765"
+    },
+    "_migrate_v40": {
+      "module": "memory_schema_migrations",
+      "sha256": "7a8ef9db73a254fe8f491db202d8c4581cdc6fd761cf47ffa1bcec2fcd0262af"
+    },
+    "_migrate_v41": {
+      "module": "memory_schema_migrations",
+      "sha256": "bd739b9b76cdd56d4cecb3461b22c74c7d3c596f59431fa7904193c772d2baa7"
+    },
+    "_migrate_v42": {
+      "module": "memory_schema_migrations",
+      "sha256": "b8417820ee9707fdfa659402d208a54b4ac7943f2f6a844ac1e6c2e7bb2404b6"
+    },
+    "_migrate_v43": {
+      "module": "memory_schema_migrations",
+      "sha256": "523c179d651afd3e0d87b3fd9af6b3d2e68d896a83da5ed0a456750f5a602c24"
+    },
+    "_migrate_v44": {
+      "module": "memory_schema_migrations",
+      "sha256": "ffbf2508aa134cabd0f75f6f2d158baf835f2f54ae3cfd5ed37e1895983c6e34"
+    },
+    "_create_learning_quality_assessment_schema_locked": {
+      "module": "memory_schema_migrations",
+      "sha256": "133a2c1cb6eeb400ed8871eab582180bb2f5feb72758b3abf39d068bf6e9039b"
+    },
+    "_learning_quality_schema_healthy_locked": {
+      "module": "memory_schema_migrations",
+      "sha256": "a3e2cf0c4d09fdfb6cf6325ebf6352637dc9f96212648275d20b5c88b50ade8b"
+    },
+    "_learning_quality_assessment_trigger_statements": {
+      "module": "memory_schema_migrations",
+      "sha256": "e5abbe882b424f8f3ce15f20e6f32404073e74fc9d4970b5e257fd283df72f1c"
+    },
+    "_install_learning_quality_assessment_triggers_locked": {
+      "module": "memory_schema_migrations",
+      "sha256": "e73930573d8176bde2c975a79f9ef74f39abcf0ed81e2e1e14fa8cff336b07d3"
+    },
+    "_reconcile_learning_quality_assessments_locked": {
+      "module": "memory_schema_migrations",
+      "sha256": "39e5bfaf6cee440ab3a849c6450715e365cfad2beae16cd3123f421a28b33dc0"
+    },
+    "_project_id": {
+      "module": "memory",
+      "sha256": "170e51dfe1d26726efd35a135ec81cce93ebf54bc5fe4a3e5de581f0d20abb63"
+    },
+    "_enabled_project_claim_scope": {
+      "module": "memory_projects_budget",
+      "sha256": "cd320f162b0ab1e0dbb0807a986d0d27991d07ed2289bcbe203d22e1d4e7e7a5"
+    },
+    "_global_claim_shadow_clause": {
+      "module": "memory_claims",
+      "sha256": "f6f1b31e071ce03cd9d6a805174b93037dc97d4f540e2148e45d9e773e73237a"
+    },
+    "_project_relative_path": {
+      "module": "memory_projects_budget",
+      "sha256": "a4a888815c37000a48a95e9adacd4484e53039dd58167f0b3431e034c2bb83f9"
+    },
+    "add_project": {
+      "module": "memory_projects_budget",
+      "sha256": "236c9834bbfc19a979d3b68b49da9defc3497aac4ed0ad2c2bfb4b5324d00ebb"
+    },
+    "get_project": {
+      "module": "memory_projects_budget",
+      "sha256": "e736a08a19cc58741b7ef51975b1c0aef40f175af90de6a4930ec678b980505b"
+    },
+    "list_projects": {
+      "module": "memory_projects_budget",
+      "sha256": "6cd85492b3f64ca17c113abb31e09f6e2a74f9aeb4afff55b198b70b4b3ea3b2"
+    },
+    "list_specialist_agents": {
+      "module": "memory_projects_budget",
+      "sha256": "25287e670da529cd277b34f528f78ce5437604625aa6463be2f889503d5982e6"
+    },
+    "get_specialist_agent": {
+      "module": "memory_projects_budget",
+      "sha256": "9efc9274fccf95135185c44dc2bad75cdd6dc176d4348dc57e80ef72a7e353d1"
+    },
+    "task_project": {
+      "module": "memory_projects_budget",
+      "sha256": "0c3f4894df8fbf0bcf389f1c7ed3705a67bba9554b2d3c92e6b98cf8dea486ed"
+    },
+    "task_model_budget_scope": {
+      "module": "memory_projects_budget",
+      "sha256": "60123a28c8be3842402b6f3ccfb47423eed6479509b4d68ad7072d5041e4ff7b"
+    },
+    "conversation_project": {
+      "module": "memory_projects_budget",
+      "sha256": "a6e40d61f2e3964a1dc5ddc4ec8c3548d8223878e44682f2210dd1f30bd39948"
+    },
+    "_metric_optional_count": {
+      "module": "memory_projects_budget",
+      "sha256": "8b324066f8199fc6ac2a23a9a5c2ca043a0208efb621f5ab2645f11ab4c88792"
+    },
+    "_model_budget_scope": {
+      "module": "memory_projects_budget",
+      "sha256": "be2f562af1bfc574e80c5b5082deae84746955bbfc065a5e7bee5e2f8275744d"
+    },
+    "_positive_budget": {
+      "module": "memory_projects_budget",
+      "sha256": "0c95f576b748c00a5b52f75f90e748ec2c69411a2f0e9170106e4c8a62234d87"
+    },
+    "reserve_model_call": {
+      "module": "memory_projects_budget",
+      "sha256": "5c83458f536e57b44a135e8ef48986d0a894b7b7bd83edd2733be2a6957d36a0"
+    },
+    "complete_model_call": {
+      "module": "memory_projects_budget",
+      "sha256": "db3720edd39e8705d73808cf076b5c41332a296cc500a45d1285f7b98027c060"
+    },
+    "record_model_call": {
+      "module": "memory_projects_budget",
+      "sha256": "78842f306b241ac6efe88752b9958aa931361c91edbc9297c92fd165378b7423"
+    },
+    "model_usage_summary": {
+      "module": "memory_projects_budget",
+      "sha256": "778079194938e99fbb3b390e66c132f466bdd452f866c242312dc444829cb278"
+    },
+    "_prediction_optional_id": {
+      "module": "memory_predictions",
+      "sha256": "301044e8801f7443adf779cf3a482e0e0d85626347075d3edffcc3db89a31d1d"
+    },
+    "_prediction_run_digest": {
+      "module": "memory_predictions",
+      "sha256": "26ce97c8188b45a1c97d9652acb73f4ae82ba1c3a082fb19cad78ef1b3e8352f"
+    },
+    "record_prediction": {
+      "module": "memory_predictions",
+      "sha256": "9114573a668460b01952f21fe2cdee3da6d0bf58fe2c1549dddd1c1a73cdd5e2"
+    },
+    "resolve_prediction": {
+      "module": "memory_predictions",
+      "sha256": "4839b809a39b2d07cbb95aad27e76dc7fedf091714cd73e1ad70481ca2ed0573"
+    },
+    "_resolve_prediction_locked": {
+      "module": "memory_predictions",
+      "sha256": "7c391c9fb8924758ba60159939248536b89f405bbd1b3fb6b7fc9d1cd044c12c"
+    },
+    "_record_degraded_write": {
+      "module": "memory_predictions",
+      "sha256": "07017dc6e4023da2bc6c17465607e7533b1d97b03dadc260fbf4a49ed167e225"
+    },
+    "_flush_degraded_receipts": {
+      "module": "memory_predictions",
+      "sha256": "6e66eda568c83a67791012e7782c3de9353e3b6b3d626fc08da49756beda420d"
+    },
+    "degraded_writes": {
+      "module": "memory_predictions",
+      "sha256": "9e4954b41eceb3346aeace5611a44326c6800458c64ea2413ca70ac906278e7f"
+    },
+    "calibration_gate": {
+      "module": "memory_predictions",
+      "sha256": "22ae985ea893c27b722c680a1790961bc7aa72ce5b2545661f1a5242774e6b6c"
+    },
+    "competence": {
+      "module": "memory_predictions",
+      "sha256": "102baf2613cacb5633a385ee11c8c7cd6ebf35fcd34d1fa6142f63f260349c8d"
+    },
+    "calibration": {
+      "module": "memory_predictions",
+      "sha256": "9e0cf9e66c9ea3d00942bfaa0759e93fadfdb5ca7c4542c997a354c0e18352ed"
+    },
+    "failure_histogram": {
+      "module": "memory_predictions",
+      "sha256": "6ea2d5ff4919a71d5c235d75e25f31ce8a2488bcf2471db0709eb5c3f66dba89"
+    },
+    "drift_report": {
+      "module": "memory_predictions",
+      "sha256": "a3ce7819202364e273acb89c8053a49ec86bd8c8e80fa5ce3d8408a080821e41"
+    },
+    "_ladder_available": {
+      "module": "memory_learning_ladder",
+      "sha256": "9bfd3dff4ed70b8e71d2cc22e01da24b33a01f5cb3a2a6777206f43d9a9da0d8"
+    },
+    "_require_ladder": {
+      "module": "memory_learning_ladder",
+      "sha256": "d00ac052e6354f760235252cd204d6653e2ea62d90140f1275437985f0b62237"
+    },
+    "_ladder_eligible_outcomes": {
+      "module": "memory_learning_ladder",
+      "sha256": "b97abf447376a57970d16680e4078d0b2d8d944407d1190173552a09e526d543"
+    },
+    "_ladder_covered_ids": {
+      "module": "memory_learning_ladder",
+      "sha256": "a5fd0ff3473956e782db356c10262a5d09546f10fafcbe29e257a6112db42a4c"
+    },
+    "_ladder_unsealed_tail": {
+      "module": "memory_learning_ladder",
+      "sha256": "ccf553374fea82d0108a523d5c22cb8aaf19eb486fdb1c1f0c84c9cc4872ae54"
+    },
+    "_ladder_next_epoch": {
+      "module": "memory_learning_ladder",
+      "sha256": "27dbc03d3f02e1cd046ff95a4f38a1dfecc8e2d0f1f9c7595ff438b821f72067"
+    },
+    "_ladder_live_promotion_windows": {
+      "module": "memory_learning_ladder",
+      "sha256": "4afac3ec34ce90b3a08bb70fccc4b48471c608b499678665e5160cc8bb40e8d7"
+    },
+    "_ladder_applied_ids": {
+      "module": "memory_learning_ladder",
+      "sha256": "727f720f5c9b402e2d33ad6f86e8d96ff6e41a1f22c99a488b3879f418c4da24"
+    },
+    "_ladder_epoch_receipts": {
+      "module": "memory_learning_ladder",
+      "sha256": "17f72fd3f805040c384c85f0f44def96953e011a6d2f0a7448a40729c12b5b62"
+    },
+    "_log_ladder_refusal": {
+      "module": "memory_learning_ladder",
+      "sha256": "24de9c2421a89a1e29b39b9870f866e5d81e066b89702dbb7fdead088ef3affc"
+    },
+    "_ladder_epoch_metrics": {
+      "module": "memory_learning_ladder",
+      "sha256": "122955908f1a05f0a8140782bd740a63546bc5931b6af55f59f4723c904b624d"
+    },
+    "seal_calibration_epoch": {
+      "module": "memory_learning_ladder",
+      "sha256": "51fc4f7af2b040d1926216c034a602e3a77c1cf6caf287d834cd27f57a00b36a"
+    },
+    "_ladder_commit_epoch": {
+      "module": "memory_learning_ladder",
+      "sha256": "c61676dfdd663cdeaddea846c3c53f1677e6bb868c9f7c1d9342552d7e2aa4d7"
+    },
+    "_ladder_unverified_for_seal": {
+      "module": "memory_learning_ladder",
+      "sha256": "6c18719a87f4b3d738975a1a3436b2330985ae6f533570ca751a11b9c04fb298"
+    },
+    "calibration_epoch": {
+      "module": "memory_learning_ladder",
+      "sha256": "c3c0b9cd6c3327cf7741e0ff1fc926ec9fd1ed7ca60ab65807e6f073260aab02"
+    },
+    "calibration_ledger": {
+      "module": "memory_learning_ladder",
+      "sha256": "231ccb7996d7e982f5b64e4cabe0251e2a09d38a65ac5cbead111b6f8351660b"
+    },
+    "calibration_ledger_monotonicity": {
+      "module": "memory_learning_ladder",
+      "sha256": "9b4e1b76d9358225c6af12b99c0ca6a4dc682e69631d31dd8645143a603bd288"
+    },
+    "verify_calibration_ledger": {
+      "module": "memory_learning_ladder",
+      "sha256": "4bb66a8f52583922bf51cbc43f96dd7a0d222a2504cf02322d59182e75798508"
+    },
+    "_ladder_verified_reuses": {
+      "module": "memory_learning_ladder",
+      "sha256": "e71a6d513f8be69bda48e4cbadcc45ce4d08a67a41f51ab3d97820ce0653de95"
+    },
+    "_ladder_effectiveness": {
+      "module": "memory_learning_ladder",
+      "sha256": "70621677d8fa7c4de0b9035ecdd6ca9a5cac419e4695cc23170045b8c10dc8d3"
+    },
+    "ladder_proof": {
+      "module": "memory_learning_ladder",
+      "sha256": "094e2e4962ca7fefeaccc5ae233ecf89046d9217483db57e062e2a390149a975"
+    },
+    "_ladder_recorded_application_ids": {
+      "module": "memory_learning_ladder",
+      "sha256": "348040e47b02bcab42d1b89a8e8569ebadaa506ed6287a7fbd9f7a615abcc064"
+    },
+    "_ladder_application_identity_digest": {
+      "module": "memory_learning_ladder",
+      "sha256": "58b0feabc1a3f5b0e5673e47f4982aa2dbafa08f9c686bc20800863691b83f5d"
+    },
+    "_ladder_applications_are_receipted": {
+      "module": "memory_learning_ladder",
+      "sha256": "69747dbcbea6b98929d5796f8586efe51e398b3762f5f54679217b1cd1455779"
+    },
+    "_ladder_proof_digest": {
+      "module": "memory_learning_ladder",
+      "sha256": "90b22c2173f2e1a408df4f08ffd4ddbc3545464a63a524408fe4eabc59be9e4a"
+    },
+    "ladder_promotions": {
+      "module": "memory_learning_ladder",
+      "sha256": "1994866adbd3bf471d13639c5e7891a32fa730218850fc134b8b8fd73e04a45e"
+    },
+    "ladder_promotion": {
+      "module": "memory_learning_ladder",
+      "sha256": "bb1e8b5983cd88ff2beb2e7b68a34442873853afd61553ec0455fef4da06cb4a"
+    },
+    "_ladder_live_documents": {
+      "module": "memory_learning_ladder",
+      "sha256": "9a39ce51e69d95d5d858aac32c07a1740eeb70fe596580ccb0d5759d100a5f12"
+    },
+    "ladder_legacy_documents": {
+      "module": "memory_learning_ladder",
+      "sha256": "27ebe4cd5082bc98f88e79ce907b15f8ffa99c1cf1150cf15b2e0d9e1962784b"
+    },
+    "_ladder_untouched_documents": {
+      "module": "memory_learning_ladder",
+      "sha256": "f9519edee35dd0da23a8c88afdbd760d8efdbc766200545311e8c99d9ce59b1e"
+    },
+    "_ladder_named_in_spine": {
+      "module": "memory_learning_ladder",
+      "sha256": "ab333e288092a014ba12f46edc6fc829c8c83d5f8b5e24e8935a2b52559ed7ff"
+    },
+    "_ladder_unverified_cache_key": {
+      "module": "memory_learning_ladder",
+      "sha256": "691aeaad3d3f4aa3c289561c05c00d5133e215c44e80a91bf18c860344e3ed4e"
+    },
+    "ladder_unverified_promotions": {
+      "module": "memory_learning_ladder",
+      "sha256": "22e58b327ea39c009e0450377b05ee1082d0d85afb79082db8cec9fb531d251f"
+    },
+    "_ladder_spine_head_ok": {
+      "module": "memory_learning_ladder",
+      "sha256": "065f8ef4ac13833eac869a79edd22d8832716b0a1d1d4111b86c277e30dbe9f4"
+    },
+    "_ladder_promotion_defect": {
+      "module": "memory_learning_ladder",
+      "sha256": "3a5e9c042a3219655aba33a17d3fa241e04052f62c4d5465580660f6ae9a3013"
+    },
+    "withdraw_ladder_promotion": {
+      "module": "memory_learning_ladder",
+      "sha256": "906b430e2c74267d20ff6465b7a6fbe9497a8efdca731ad29e542e795c947a7c"
+    },
+    "_ladder_park_document": {
+      "module": "memory_learning_ladder",
+      "sha256": "0929715237b326d95a8cfef999c012cb48a3ee3dfd10280ac5461dfdd8ea3e6f"
+    },
+    "_withdraw_ladder_promotion_deferred": {
+      "module": "memory_learning_ladder",
+      "sha256": "9ae1a4954c92cef53cb94ca72c43401d0ee35c10bd9158c797c577d1eb6fb8fd"
+    },
+    "_withdraw_ladder_promotion_receipted": {
+      "module": "memory_learning_ladder",
+      "sha256": "1f75011e2675f85a0c9727ff7919467bb252cb7cb4f265a27c35084441f3a6b4"
+    },
+    "ladder_pending_withdrawals": {
+      "module": "memory_learning_ladder",
+      "sha256": "f6d641f035155055250600e1c6bec45eafc9b15a404204aade2f288b65fed164"
+    },
+    "_flush_pending_withdrawal": {
+      "module": "memory_learning_ladder",
+      "sha256": "780b9dc1f83e74f59e0fc30b0c37919e543b26b8847dd6f77113c4be31efd0dd"
+    },
+    "_ladder_orphan_approval": {
+      "module": "memory_learning_ladder",
+      "sha256": "b1e5dd830d05d81904338cecdcbd6960433701d231d83f1ec5b751ba38509839"
+    },
+    "_ladder_orphan_pending": {
+      "module": "memory_learning_ladder",
+      "sha256": "f031431e85d830bb43a89e165d05d1576da0b9fc4c348e91d585ba1c3bbb362b"
+    },
+    "_append_orphan_withdrawal": {
+      "module": "memory_learning_ladder",
+      "sha256": "02dcd299c9f5608a4720a9db3f1c45c9c2ea4ef2dbe8af47d7d58406b675d13c"
+    },
+    "park_orphan_document": {
+      "module": "memory_learning_ladder",
+      "sha256": "fd8824612f8a97dcc0bd9f317ef5784c3bd2fdcd00bd6e06340171dbccc6ad36"
+    },
+    "_ladder_workspace_matches": {
+      "module": "memory_learning_ladder",
+      "sha256": "1e34c318581dd63d2d54161f686e2e650444908ec3c2d4251229fd006d8d5077"
+    },
+    "_ladder_refuse": {
+      "module": "memory_learning_ladder",
+      "sha256": "cb97ef97fff5bde436e6994e663e25a25919e10088acddc1e2bc568467dc0c77"
+    },
+    "ladder_candidates": {
+      "module": "memory_learning_ladder",
+      "sha256": "867f0bc09354bf875fd1bfffbcce32d81471c364f7c366a983087e38490c8897"
+    },
+    "stage_ladder_promotion": {
+      "module": "memory_learning_ladder",
+      "sha256": "bf04b55402f22e24c1d9c02bf3069fa566871487a3a89dc19096d5cbeabd8057"
+    },
+    "apply_ladder_promotion": {
+      "module": "memory_learning_ladder",
+      "sha256": "dbce4472723a14f5590229fbc4b42bb9e037d8e9978661bc985e624442f95f6f"
+    },
+    "_apply_ladder_promotion_committed": {
+      "module": "memory_learning_ladder",
+      "sha256": "8c205e4f9b478600127c613a30b16f22e81eafb83c0ce656d3ccdefcee84ebfe"
+    },
+    "rollback_ladder_promotion": {
+      "module": "memory_learning_ladder",
+      "sha256": "600b989ac795ecfcc60537a551715fb5fa896e4ba8fc2e4f30256f79f8456855"
+    },
+    "_ladder_reinstatement_candidate": {
+      "module": "memory_learning_ladder",
+      "sha256": "7be16a8b61e2c8aed0f1fe7041fbdae187e2829f09f027eb8a5c9854c214498e"
+    },
+    "discard_ladder_promotion": {
+      "module": "memory_learning_ladder",
+      "sha256": "5cf3065175e6a0bee65aa2c61d773f9a10b1e437849b7592035f4a00ad0c78c9"
+    },
+    "grandfather_ladder": {
+      "module": "memory_learning_ladder",
+      "sha256": "d107e8423f06d613664a2bbfcde16e78c1fd76d834b4e9fd5f685285c565ff4a"
+    },
+    "_ladder_legacy_proof_digest": {
+      "module": "memory_learning_ladder",
+      "sha256": "fd73e7ad3b8d0f23f554e02c3f6c144394e3144c6d3bf96d39434e8ef5165f02"
+    },
+    "lesson_candidate_count": {
+      "module": "memory_learning_ladder",
+      "sha256": "7aba536a9201609bd79379df09d5f99a8685dc402b26886ff514511ce54add75"
+    },
+    "record_lesson_gate_closed": {
+      "module": "memory_learning_ladder",
+      "sha256": "8f80fa94634810a82379d141d499ace7050614083af53780fce76b5956008470"
+    },
+    "ladder_reconciliation_plan": {
+      "module": "memory_learning_ladder",
+      "sha256": "f50c811646c368b2e5325b2994f01e1efeac8cf28587151a3665ba411cbdd5ca"
+    },
+    "_ladder_plan_token": {
+      "module": "memory_learning_ladder",
+      "sha256": "cc2f78dc6c38095ce72709175bfea794824ead0e2e98c54f33c170f5159e7b2d"
+    },
+    "reconcile_ladder": {
+      "module": "memory_learning_ladder",
+      "sha256": "cccfde1e7ac5619e9764edccecc896674574f21dc17689a07f48a95dd5748545"
+    },
+    "open_prediction_count": {
+      "module": "memory_predictions",
+      "sha256": "1c6d769cfa06fcca2abde30c3b2eaea7eb023becd3d1a477b654e99ecf4cce52"
+    },
+    "health_indicators": {
+      "module": "memory_predictions",
+      "sha256": "b3e314733e484b0a8b2ca2aecc31c225ec5d663dfc459f0f5301168149793985"
+    },
+    "prediction_origin_for_task": {
+      "module": "memory_predictions",
+      "sha256": "1da7ff52eb5dbddc6468f6c27d7284a2f0fc16230b6ccab19ceaec2a5856dc4e"
+    },
+    "new_conversation": {
+      "module": "memory_conversations",
+      "sha256": "6bb2cad7d52ff859a87ebe73d8d2a15512a933f9f4f0bb620546d59f66b33a23"
+    },
+    "conversation_exists": {
+      "module": "memory_conversations",
+      "sha256": "a19051a9bd8e90e2feffd5bd0b2b81a54ae8a398e11b86f595198b173f1b4355"
+    },
+    "mark_screen_companion_conversation": {
+      "module": "memory_conversations",
+      "sha256": "c08cf42138961f582e9743592ba8bd01414171ae85ec380afad23585bacd981b"
+    },
+    "is_screen_companion_conversation": {
+      "module": "memory_conversations",
+      "sha256": "020d990072328827f7290516091a83b1ced815eee564266cf47d87ba2c2f0cdb"
+    },
+    "screen_companion_conversation_id": {
+      "module": "memory_conversations",
+      "sha256": "69d57887c80096b129425474bf5d30f99e598d305142b3cbd2e5bf313ed41da1"
+    },
+    "list_conversations": {
+      "module": "memory_conversations",
+      "sha256": "11e5a2627f727db222af293cdb30d71ef5708c84c66c2cf642c0ce5a165cfbbf"
+    },
+    "delete_conversation": {
+      "module": "memory_conversations",
+      "sha256": "2db2a8cb995161596b2a06f31b692d76fe0863322508062f4a9b8e1123a627a2"
+    },
+    "add_training_example": {
+      "module": "memory_tasks_scheduling",
+      "sha256": "8a94fb7fc91c38d98e5df3e94498b28e4b46c022c1e63aca84cf6be868f53e81"
+    },
+    "list_training_examples": {
+      "module": "memory_tasks_scheduling",
+      "sha256": "606d8862de8ec4c6a87634f836e0051d5543d5957d43f709f6112b2c58807b51"
+    },
+    "add_evaluation_case": {
+      "module": "memory_tasks_scheduling",
+      "sha256": "8c80e93fd7c23efdec22d16d5defe194a199ecfdc0cfffed95501ac3086b30dd"
+    },
+    "list_evaluation_cases": {
+      "module": "memory_tasks_scheduling",
+      "sha256": "7ad0274b284e794e110052add3f22b00d5eaca60aff75f2fc5dd7f9253d1f59f"
+    },
+    "add_message": {
+      "module": "memory_conversations",
+      "sha256": "1e1ff73675f63000716fa9e879e585f15ede78e8552b86b4d1a2b41f3d637c23"
+    },
+    "record_fact_proposal": {
+      "module": "memory_claims",
+      "sha256": "b948850dae11835aa851f1e37271acda282e3272bc7ae7f0d560f0509aee52b2"
+    },
+    "fact_proposal_digest": {
+      "module": "memory_claims",
+      "sha256": "be1026120b634ce7b0c045e48ca9b6e68c5216edb108bf9fa4533167c8a3fa47"
+    },
+    "link_fact_proposal_event": {
+      "module": "memory_claims",
+      "sha256": "c035c22cab27ea70ed0dfeab7048d98a687962811fb469c525f9586b8e8f1fe9"
+    },
+    "claim_key_for": {
+      "module": "memory_claims",
+      "sha256": "0e645d23f839787ed4fc68d6605e052831e10be0314ad35c6b8588f2424099f9"
+    },
+    "pending_fact_proposal": {
+      "module": "memory_claims",
+      "sha256": "d953896b18e9aec53fbfea6bf9265e15521ce9cbde7af886ea24db2979d4342d"
+    },
+    "resolve_fact_proposal": {
+      "module": "memory_claims",
+      "sha256": "b6960bbf041723bcf6d4f0b859a0a20b597cc62df885e65b3e18da352dd5ceb7"
+    },
+    "recent_messages": {
+      "module": "memory_conversations",
+      "sha256": "d0d25544ed7a7dd52a5aef08d27317a73f64686104274b5bb5e316539d101329"
+    },
+    "_conversation_contract_json": {
+      "module": "memory_conversations",
+      "sha256": "3ce43950008d31ec8f20f796f86ae354f0b7c89f569346d5136a01f988221840"
+    },
+    "_decode_conversation_contract": {
+      "module": "memory_conversations",
+      "sha256": "d7981abf6925bb9c8f3c460a3a451d97d24c9c0de4b196429741f1754d258edf"
+    },
+    "begin_conversation_goal": {
+      "module": "memory_conversations",
+      "sha256": "bfcfc7794adf588470d156cff98cbaaa358f0b5b8f2fc8aa171878377de90609"
+    },
+    "pending_conversation_goal": {
+      "module": "memory_conversations",
+      "sha256": "dc6edc24cf34f5232633d35a1f098deff53ab9783fa19486afe95b282a0b6f92"
+    },
+    "resume_conversation_goal": {
+      "module": "memory_conversations",
+      "sha256": "731178f838dd95af97afc80ecd62e2ffea052ed7537fc68a0c21ea158d9b140e"
+    },
+    "update_conversation_goal_contract": {
+      "module": "memory_conversations",
+      "sha256": "ca9acb1d5a3ccd452854cf3382caebdd45bef3c8c221bb4ce8fd48e553154116"
+    },
+    "finish_conversation_goal": {
+      "module": "memory_conversations",
+      "sha256": "0ac74a7963099bdb8edf88a0532406ac6ca04382f1c82295290733758771ce83"
+    },
+    "finish_conversation_goal_if_current": {
+      "module": "memory_conversations",
+      "sha256": "86029e20fdf245e4aafba062cdb0ff609aa8d7089356b826a9e9c96617bebae8"
+    },
+    "cancel_conversation_goal_if_current": {
+      "module": "memory_conversations",
+      "sha256": "ad3bdc0042239978d8c2dc5e1aeb62f08d4629637c0d96ecb0cf10239a059c94"
+    },
+    "list_conversation_goals": {
+      "module": "memory_conversations",
+      "sha256": "55d8bfc9d66f50739a744736065170c04d151c0e2ede940afbf24f1e86b52f5a"
+    },
+    "conversation_scoped_memory_messages": {
+      "module": "memory_conversations",
+      "sha256": "3ea68bc2089bb125e49cbe3d4ee6577c8dd47836fa2df58e092c3a6997001b8e"
+    },
+    "_presence_job_id": {
+      "module": "memory_presence_companion",
+      "sha256": "1d8bb164d861564484f97b1da03a97eca661c4709dced8afee453a9d8b0dfe73"
+    },
+    "create_presence_job": {
+      "module": "memory_presence_companion",
+      "sha256": "26fe2c9bb382e919b48187dd525a34a8c11405847edf4184dcb1678b846532de"
+    },
+    "get_presence_job": {
+      "module": "memory_presence_companion",
+      "sha256": "a0f1ab1ce90e390054b6ad915eceaad9df1222bf71f54fea3f42ee66ea4524ef"
+    },
+    "list_presence_jobs": {
+      "module": "memory_presence_companion",
+      "sha256": "611d6f33ce436c4d17533acfdedff1ea505b6caacd5cd1e2a301d592e6faa608"
+    },
+    "recover_presence_jobs": {
+      "module": "memory_presence_companion",
+      "sha256": "17c97710e0668821f4888707664e155fda422131c055c5917d2acc681954981c"
+    },
+    "claim_presence_job": {
+      "module": "memory_presence_companion",
+      "sha256": "d440da81916cc151919b7edf334ccb8f913abc50bf52613dfe955c80b21a2db2"
+    },
+    "request_presence_job_cancel": {
+      "module": "memory_presence_companion",
+      "sha256": "fc00a1e15871712d792861f23fd357cddd5848d9759b89fea1fb2dd891bc38a0"
+    },
+    "abandon_unqueued_companion_action": {
+      "module": "memory_presence_companion",
+      "sha256": "0c60181b57d84b885d74980bfa0e74cab0224a544fa48453380266d408e5190f"
+    },
+    "finish_presence_job": {
+      "module": "memory_presence_companion",
+      "sha256": "0642305a664aae0b3c1905e9d7e390d38d72b4bddea433b89153e2531ed86845"
+    },
+    "presence_performance_summary": {
+      "module": "memory_presence_companion",
+      "sha256": "43ffec8d28dae46cc890ce30627d7311d6f7ae1d422398b65c2e6ecdd8895049"
+    },
+    "_presence_pairing_code": {
+      "module": "memory_presence_companion",
+      "sha256": "6bd44d0fea031386010c6ffed4fa232b3626ca6178d2bca2b295d3395c41f25f"
+    },
+    "_presence_session_id": {
+      "module": "memory_presence_companion",
+      "sha256": "0a16cd987c392dfc926bcfc4c2b70fbdde352dd74cbdd6477642443641397fc4"
+    },
+    "_pairing_digest": {
+      "module": "memory_presence_companion",
+      "sha256": "65c39ef9b197f61aa2e6856ef71efa8a7a65429e3871ef37246a58c3dbd47633"
+    },
+    "create_presence_pairing_code": {
+      "module": "memory_presence_companion",
+      "sha256": "49d5da9c09a1a736f09887f3ab539a7f860d4e5093c8898b6d4b88cf5b3e5345"
+    },
+    "consume_presence_pairing_code": {
+      "module": "memory_presence_companion",
+      "sha256": "3c0ef0a81c65302ec2c8bcaa5cec32b85dbca7724b5f0f9fa307f30b0c5d601b"
+    },
+    "authenticate_presence_session": {
+      "module": "memory_presence_companion",
+      "sha256": "b1db37a4dc88bf3f19a9aa1ca0abb66f835fc2cb4cc83f76cc0bb4a9c7439869"
+    },
+    "list_presence_sessions": {
+      "module": "memory_presence_companion",
+      "sha256": "aad9a89b9125f55604e19abaa3bb2ddd95522159dddf98dec8cecc77caf819e9"
+    },
+    "revoke_presence_session": {
+      "module": "memory_presence_companion",
+      "sha256": "25ddfcf13515f3ed7bbf390ffc92e18681e9b1f773535d365d4cc1190357e554"
+    },
+    "revoke_all_presence_sessions": {
+      "module": "memory_presence_companion",
+      "sha256": "2748da89852590f7bc3cdcf49758349204f46241bfa0a6e2768e19b4c95f3064"
+    },
+    "search_messages": {
+      "module": "memory_conversations",
+      "sha256": "aab672cbad63cdbfc65d21c51bc15521db7db028ebaed790f4b9eec147fa8890"
+    },
+    "prior_conversation_excerpts": {
+      "module": "memory_conversations",
+      "sha256": "67f1a1386b5f9198c52e8a780187e79e328f84cb7e73e7a7a25ad304e79d48e0"
+    },
+    "_ordinary_memory_provenance_digest": {
+      "module": "memory_ordinary_recall",
+      "sha256": "1076de35355c83fbf75be99e6a0d5bb1cd7652b8effb983800104dd61d9aa7e4"
+    },
+    "_ordinary_memory_provenance_material": {
+      "module": "memory_ordinary_recall",
+      "sha256": "c974e5f810ee167bbbc33a6421a821ec1f9bf17cd1594ca39179b0239bd2de15"
+    },
+    "_set_ordinary_memory_provenance_locked": {
+      "module": "memory_ordinary_recall",
+      "sha256": "5f875bbec1ba4eca646be63143c2613393072b20ea58609c53494072d3356750"
+    },
+    "_sync_learning_quality_quarantine_locked": {
+      "module": "memory_schema_migrations",
+      "sha256": "036235fe9b91943ab0a3ea8d5b128ad7ad1cf5819bbc1093de92f8ddca78e114"
+    },
+    "_ordinary_memory_provenance_validation": {
+      "module": "memory_ordinary_recall",
+      "sha256": "09259c4b1d7bda06acf47c014411a402efe823afcb48da90f5688c221002e218"
+    },
+    "_ordinary_memory_row_recall_eligible": {
+      "module": "memory_ordinary_recall",
+      "sha256": "0d15c687b82751bc6b9a30e5b9cc94f86930374216aacee12489b39855f86299"
+    },
+    "_ordinary_recall_cache_safe_ids": {
+      "module": "memory_ordinary_recall",
+      "sha256": "2323d1c80f8030fb8e18437f01b6b868aa084395f14d06e99d058723e009434d"
+    },
+    "_ordinary_memory_recall_eligible": {
+      "module": "memory_ordinary_recall",
+      "sha256": "7e391a214b9beab88a530a5d4ea2d86c79762019da088ef9e9a925e08a524b99"
+    },
+    "_claim_memory_recall_eligible": {
+      "module": "memory_claims",
+      "sha256": "110ef965e7f9fec6fb078c6d666a89498d971cd98877ffa52cc567694afaad5b"
+    },
+    "_claim_recall_material_eligible": {
+      "module": "memory_claims",
+      "sha256": "6b4300dd57dded430bb4c24874885e13e9d26e1340eb1502091a6abd2fbd5ddb"
+    },
+    "_claim_rows_recall_eligible": {
+      "module": "memory_claims",
+      "sha256": "5bf84d6124f6d590f71510ab79ddffff5922245398c2d7001908808eaadd9928"
+    },
+    "_filter_generic_recall_rows": {
+      "module": "memory_ordinary_recall",
+      "sha256": "a322f5b92625d7791bf5050c7d2da88a978fb654095593a9bf7b0dad956ce9f8"
+    },
+    "_rank_generic_recall_rows": {
+      "module": "memory_ordinary_recall",
+      "sha256": "1c7698e79c6c3c73f3a676021bba3fb865b645a6bd3e0392bda027d8645baaf1"
+    },
+    "_claim_output_snapshot_safe": {
+      "module": "memory_claims",
+      "sha256": "513a1088a264c630eec9cc2fb693c8b2369fd80b636ece84f8dae5e0594ab7b4"
+    },
+    "_generic_recall_query_rows": {
+      "module": "memory_ordinary_recall",
+      "sha256": "cda5c8671e7d5b1eaa581814b9b2fe729bb5ace6421715bc0a34163a2f415d8c"
+    },
+    "_lexical_recall_candidates": {
+      "module": "memory_ordinary_recall",
+      "sha256": "01350e805031ff9998a4a3f1e7ece65111b804de2cc047ab27527aa714001171"
+    },
+    "claim_recall_report": {
+      "module": "memory_ordinary_recall",
+      "sha256": "dc363c5f4afa9e3baf58de983c74d786ec0ec176197ac0585ba8c92355a32897"
+    },
+    "_abstain_claims": {
+      "module": "memory_ordinary_recall",
+      "sha256": "8db15548708e0956fd657b6e8c727e0dd68ccc59a727143d9500970e82255c97"
+    },
+    "_record_claim_clock_reads": {
+      "module": "memory_ordinary_recall",
+      "sha256": "43900b65648a830748703e25f0ad3e8b11d747376bff3322d22b5e81c75039c8"
+    },
+    "recall_report": {
+      "module": "memory_ordinary_recall",
+      "sha256": "096824d38406f491678dba97a637b41a66d9626fd86b7a564a68615d500afa31"
+    },
+    "transcript_recall_report": {
+      "module": "memory_ordinary_recall",
+      "sha256": "f7a474232e89c8cd31f2bbacb4d5e2010b2afd44b4aab4174cbb19dbf286c17c"
+    },
+    "_remember_ordinary": {
+      "module": "memory_ordinary_recall",
+      "sha256": "c19184b58fbf5a2e818be59f616ba615b74f7052351d0c5641f78c9ff2fd4eca"
+    },
+    "remember": {
+      "module": "memory_ordinary_recall",
+      "sha256": "8b78367cc198d55e3cc87d79f6224ab65c8649dc38702b334f16aa07359200b1"
+    },
+    "remember_verified": {
+      "module": "memory_ordinary_recall",
+      "sha256": "0182200ba3d74b1d803aa27602e22566c3e0c8ca2f3a6f2fe916d76b2956ddb4"
+    },
+    "_screen_companion_app": {
+      "module": "memory_presence_companion",
+      "sha256": "c3fcba7e4521cafc110b8ffa79fc35db127234059ab1271fd6ab3bc2d8943697"
+    },
+    "screen_companion_state": {
+      "module": "memory_presence_companion",
+      "sha256": "c35b8bf24fc9fbc6524f98a55211a22457f03ef2e8a3e7deb47984c9d1245bb8"
+    },
+    "set_screen_companion_state": {
+      "module": "memory_presence_companion",
+      "sha256": "371a591a5e76adb37061e1e637f5ad6397211a7c595559aeaffa56f37ac79905"
+    },
+    "control_screen_companion_state": {
+      "module": "memory_presence_companion",
+      "sha256": "c744916236549a26ff6ae6d15b6b4375e1213292d152bfb50e669b81e4c0e143"
+    },
+    "add_screen_companion_rule": {
+      "module": "memory_presence_companion",
+      "sha256": "b8fe80d8eea4a146b8d08d927c21fc2a1f9510ad4bcbb61bb29f6f5515a38811"
+    },
+    "list_screen_companion_rules": {
+      "module": "memory_presence_companion",
+      "sha256": "027fc1658e07f0ae8153077a8b6954c50f194a426978479bcb26a0913e4fead7"
+    },
+    "set_screen_companion_rule_enabled": {
+      "module": "memory_presence_companion",
+      "sha256": "33c84c55a7f3e8d3374f03aedfe7cf71b356f9ce6f8ee1bbec7aa1ed8ce43e34"
+    },
+    "delete_screen_companion_rule": {
+      "module": "memory_presence_companion",
+      "sha256": "ce0b1eb81b862aff73fc4b48b215a92f8bf1a1372953036a19ca14850b59133f"
+    },
+    "claim_screen_companion_rule": {
+      "module": "memory_presence_companion",
+      "sha256": "7c5d9a2dfd850383991621d54da906225321f89b8a1f3b4805a74751de4d4241"
+    },
+    "finish_screen_companion_receipt": {
+      "module": "memory_presence_companion",
+      "sha256": "d3cb61a80a338cdeaa427542a455ddd4d13d02ca79b47404c668ad68bb948a89"
+    },
+    "claim_screen_companion_auto": {
+      "module": "memory_presence_companion",
+      "sha256": "d6d5a55827d888c22d5b5152b0fb7d3dc5d60a58c6950f197d5d188e6ab5da0f"
+    },
+    "_screen_companion_learning_digest": {
+      "module": "memory_presence_companion",
+      "sha256": "54c13f566556db928423deb363fee767327397865f78336a1e1c1e35802d9b87"
+    },
+    "_screen_companion_action_job_digest": {
+      "module": "memory_presence_companion",
+      "sha256": "da1a92a7ee1c8e6611ddc32b970fa9f120821726f07851ad3e2424f0d6791895"
+    },
+    "record_screen_companion_feedback": {
+      "module": "memory_presence_companion",
+      "sha256": "a9f484c6378a1978d1f149ab7c8b5fd42b18fc14985a4c07bbc5099ca0fe1536"
+    },
+    "screen_companion_feedback_for_action_job": {
+      "module": "memory_presence_companion",
+      "sha256": "8ec364d29438e70dfc2e42c76b3b5e227cafeda2a8c0eb71acd308792358ddfd"
+    },
+    "discard_screen_companion_feedback_for_action_job": {
+      "module": "memory_presence_companion",
+      "sha256": "cd90397b23555082049f3062cdaf220be90a6e417a092da34fe70103aebad46f"
+    },
+    "bind_screen_companion_outcome": {
+      "module": "memory_presence_companion",
+      "sha256": "c5450f8f764e1ac18ce258438b5d287db88cfcdf4f941a9ef86fb00958e0f213"
+    },
+    "screen_companion_learning_policy": {
+      "module": "memory_presence_companion",
+      "sha256": "3923b30eb35596ee16d8d1e5350867d27ea8dc2e8b2d4af4a97a30bde967561a"
+    },
+    "screen_companion_learning_ranking": {
+      "module": "memory_presence_companion",
+      "sha256": "945747d21736c8d85b90e09328f04b53331436de2d5860dcd79630b75e528fd6"
+    },
+    "screen_companion_learning_stats": {
+      "module": "memory_presence_companion",
+      "sha256": "097ec4d481ca9c7680044754eb9c060690cbdde9bdee90505d380dda98fa75e6"
+    },
+    "forget_screen_companion_receipts": {
+      "module": "memory_presence_companion",
+      "sha256": "32c3851730c4b9c56db24c960b52d7b153c9487b99d04dc9bb0addea45666796"
+    },
+    "_graph_claim_row_locked": {
+      "module": "memory_governance",
+      "sha256": "c0bddec11ba4a9ed841356eee02a1b54a156ee51adc16da33b0084892449fe37"
+    },
+    "_claim_scope_filter": {
+      "module": "memory_governance",
+      "sha256": "ebffb1adabf8f1d7a86f75d02cbffc227665a357083d7cda06df336c82a59315"
+    },
+    "_claim_identity": {
+      "module": "memory_claims",
+      "sha256": "788c211421aab8d588bde028523d59d98ca79a78002d55b303d79b775c956f1f"
+    },
+    "_claim_clock_predicate": {
+      "module": "memory_claims",
+      "sha256": "63478a6e037ffbcb7ae39bc4b2ca8da0f88cf3970ef09adff5a99d5e80e36f63"
+    },
+    "_refit_claim_volatility_locked": {
+      "module": "memory_claims",
+      "sha256": "076e390c18c186e35598377828059adf39d0b54626885f3a4554e880d744ddbd"
+    },
+    "_record_claim_observation_locked": {
+      "module": "memory_claims",
+      "sha256": "1c4d21e7d2cd32ddbd787f19cc0ec6f3d787688f68df81157ad6b3c748f24c8a"
+    },
+    "_spine_context": {
+      "module": "memory_governance",
+      "sha256": "a5810ea9a66397ac7364d1cff1f101395782a9ab0f30186f76c94e6fa4229a83"
+    },
+    "_append_memory_event": {
+      "module": "memory_governance",
+      "sha256": "6421ba95bfbeb12bc9a0fc0e8145c343dfe73dacdd08b107ff3075f311da55f0"
+    },
+    "_append_claim_after_image_event": {
+      "module": "memory_governance",
+      "sha256": "dd9a4431e06e7a78197b0296403bc4b5de83ee26410c6ec83df32677df929fa5"
+    },
+    "_set_claim_status_locked": {
+      "module": "memory_claims",
+      "sha256": "c8316283799c9012495b560956f82693d9e0557fad93c005d9036d061f92e1e0"
+    },
+    "_remember_claim_locked": {
+      "module": "memory_claims",
+      "sha256": "9447f8ad4d783db94af9ed1e771f0fe5302fda135583e9c9527c4b5063185ef7"
+    },
+    "remember_claim": {
+      "module": "memory_claims",
+      "sha256": "5980fc71a6e81df81681a92d67800c8e1e4b6648ec94bbc455e8efc676c23e97"
+    },
+    "remember_explicit_project_claim": {
+      "module": "memory_claims",
+      "sha256": "d31e275b858680777ab96c62c18ec5a672a6b39330e6ef27edd3faaeff36234f"
+    },
+    "retract_explicit_project_claim": {
+      "module": "memory_governance",
+      "sha256": "2181971f62cdfa6f2f6d3f107b80dc9ce0bc53eb5ef9f8ca4682485c7f1e3a0c"
+    },
+    "erase_explicit_project_claim": {
+      "module": "memory_governance",
+      "sha256": "d7f2669c7a673fcedc19eadada720721092812b83d76ea00d06b3e7ea1cebaae"
+    },
+    "_compacted_span_copies_locked": {
+      "module": "memory_governance",
+      "sha256": "2782e35c7c1cb5d6a1eb7df30cca2bdbaaef82c16379d85211c8a5364c8e89e6"
+    },
+    "_erase_milestones_naming_claim_key_locked": {
+      "module": "memory_governance",
+      "sha256": "d0ca3de19a2df0e382e7cfa6323546a1bb508d95fa153711e5fc782dfd803e5b"
+    },
+    "_memory_dependent_tables": {
+      "module": "memory_governance",
+      "sha256": "0b85cb422b711870a9b8c7f8815f195f1b5294834c40ccd2defdd6d2ef415a63"
+    },
+    "describe_memory": {
+      "module": "memory_governance",
+      "sha256": "f60e6bed5db521164259eebaeb88b8da7dcb613776bb77bb69095d6029f52135"
+    },
+    "erase_memory": {
+      "module": "memory_governance",
+      "sha256": "f30d2184bc877df9f6950a9cba4e947258d4d909628f36d270ebc98d13bf56da"
+    },
+    "append_spine_event": {
+      "module": "memory_governance",
+      "sha256": "8f3c43a89fe72098de5b0b6510e378959f79e45f56886ef97b2cccfdcab6fca3"
+    },
+    "verify_spine": {
+      "module": "memory_governance",
+      "sha256": "ecf7ecbde941b000cc14801281e1b6858945c29afe70061b429d3fffd083ab5d"
+    },
+    "latest_spine_event_id": {
+      "module": "memory_governance",
+      "sha256": "6f80d8de4c25c55660f22d03c4f3a15b904b36ef71ddfacb26586c7c75f8515c"
+    },
+    "rebuild_claim_projection": {
+      "module": "memory_governance",
+      "sha256": "f771ec60de723986f2cfda96cb5fd9527b6e88a7dc9d91700cf2023242596a59"
+    },
+    "_claim_backing_content_builder": {
+      "module": "memory_governance",
+      "sha256": "ae61b21c4301d4b11c4f4d74b2e51d3e90fc65395dc53b4ebd520391c3163a8e"
+    },
+    "_claim_divergence_signature": {
+      "module": "memory_governance",
+      "sha256": "134f2048d085ae50fa4a634928ff48b391a813d16d4b83ef94e5fa1611e23dad"
+    },
+    "_claim_plan_token": {
+      "module": "memory_governance",
+      "sha256": "77090e01ca70c6b3f79482809f52b8591d62adbeccd5a527b7f7ba41ebeedf2a"
+    },
+    "_plan_token_of": {
+      "module": "memory_governance",
+      "sha256": "cefa77e6be0446249af41a79c669ebeef42a06aa8f58a4a3abd5c88e055dafcf"
+    },
+    "_head_event_id_locked": {
+      "module": "memory_governance",
+      "sha256": "48bd291817b1317de3b0120ea9d1f480dba65eba022b789f41d63c6648714e7c"
+    },
+    "_rebuild_claim_projection_dry_run": {
+      "module": "memory_governance",
+      "sha256": "ee6ecdeaad97c18a85a50c5d0c158cc7095e91f6c1c81de4e4467b7089b3ec9e"
+    },
+    "_apply_claim_projection": {
+      "module": "memory_governance",
+      "sha256": "c424b60b6f49f68e7d44b61c085e56e289cf06a541b843b2422768e0dd8c5a5e"
+    },
+    "rebuild_memory_projection": {
+      "module": "memory_governance",
+      "sha256": "b5fb00aa30f5f7b0ef24e21de9739fe13bf3ae43564a9aa6f3fdbbd378d460db"
+    },
+    "verify_graph": {
+      "module": "memory_governance",
+      "sha256": "f74fe183f451d255ccc19acbcec87f7918e87ce9a403c6afb970b055a517201c"
+    },
+    "rebuild_graph_projection": {
+      "module": "memory_governance",
+      "sha256": "33481346e0a69ec23cc13442818420bb26187df0d019ceff1a53877bfef894ed"
+    },
+    "_graph_divergence_signature": {
+      "module": "memory_governance",
+      "sha256": "e29d94829a8981c3aee16923c57d40b32d14f0c667e2899d6f01c1260ab8a9c3"
+    },
+    "_graph_plan_token": {
+      "module": "memory_governance",
+      "sha256": "a468453897ac118fc47ce5cb6e12ac88849530cbd6b4fc8354427712d62da49d"
+    },
+    "_rebuild_graph_projection_dry_run": {
+      "module": "memory_governance",
+      "sha256": "bcc2f92532b2ec0f593bdba5b0e0ba5ce06ab62bbb5dddc5081a6fdfeee4a4d3"
+    },
+    "_apply_graph_projection": {
+      "module": "memory_governance",
+      "sha256": "9883f0d1e9bed0decf0a4e6eaf40ed9c847d6c170a97b593ee20f89dfaae88ea"
+    },
+    "subject_claim_history": {
+      "module": "memory_governance",
+      "sha256": "ec2ae37903b08bc3e00411e959394f986a4b245a409789b9a3b54ba4923269dc"
+    },
+    "lesson_recall_report": {
+      "module": "memory_governance",
+      "sha256": "08afb13adf27c7982e484fde65d1ebbf21f55bbc01c9f6622fa6ec5cc1d5e655"
+    },
+    "_lesson_exit": {
+      "module": "memory_governance",
+      "sha256": "8640d151f47ad6e6ebed5ab6142af4a65680769f7f883b0a321d67866cedfb57"
+    },
+    "_lesson_abstain": {
+      "module": "memory_governance",
+      "sha256": "c0b36afa4bf4414fd108a1d6a843dc1cabcc93d6313686e4d918c19431736bad"
+    },
+    "graph_recall_report": {
+      "module": "memory_governance",
+      "sha256": "cea7aba2b60ec7a0733acb57575ff7734bdb99b0bf965d5a9044dad2cc1350b1"
+    },
+    "_graph_abstain": {
+      "module": "memory_governance",
+      "sha256": "3b02d3e5a93ae057351533a6d2813ed9ff2d624a2999099253761a5a47775724"
+    },
+    "_compaction_message_rows": {
+      "module": "memory_conversation_compaction",
+      "sha256": "05a83b24303a4410fac38eb1a7ee49255d80c2a29445cc7aeb1bf23cd9642d55"
+    },
+    "_held_back_message_ids": {
+      "module": "memory_conversation_compaction",
+      "sha256": "2b46d4be81437ef8ec3872f6203369a1b7b125344b92e48c3d022ca7132a6750"
+    },
+    "_span_busy_reason": {
+      "module": "memory_conversation_compaction",
+      "sha256": "ce48480745e3cb4591f7525fd446f8651f2c7177d07ad8222046e579397138fe"
+    },
+    "_conversation_scope": {
+      "module": "memory_conversation_compaction",
+      "sha256": "9a9f5383cce748c8422e77908b56f291abec159dec3753a39f8791c35031f530"
+    },
+    "_compaction_events": {
+      "module": "memory_conversation_compaction",
+      "sha256": "4bc60786c2de925c0e34cd3db3d35134ff39e2700e7ddae6256477e86770c6e7"
+    },
+    "_previous_watermark": {
+      "module": "memory_conversation_compaction",
+      "sha256": "23d48d641ad89d3305a4efd5f4508c6109687fc83cae5e5acfae975b0eee72eb"
+    },
+    "_compaction_plan_token": {
+      "module": "memory_conversation_compaction",
+      "sha256": "e459b59cc332e42d8da960aafc8d7bdde10345c96693d02c94b7e98722cb7789"
+    },
+    "compact_conversation": {
+      "module": "memory_conversation_compaction",
+      "sha256": "43865b4fecda525d2aabb3719c1b0671fa39d0ab65d6c751211646d4ea4d91df"
+    },
+    "_compaction_settings": {
+      "module": "memory_conversation_compaction",
+      "sha256": "6b12067878d657f2e5b1d7cf76de9d17b93213ed0b86f19e66d1fc6b7442741a"
+    },
+    "_compact_conversation_dry_run": {
+      "module": "memory_conversation_compaction",
+      "sha256": "68f4ba9c36cfdbff00c992e0025a0e1bd240bc315c41deef1a54eb050b04a4d9"
+    },
+    "_build_span": {
+      "module": "memory_conversation_compaction",
+      "sha256": "46cb2f3f236fe936a6eb78fad2abf354ccd95e368d70a9370d4c0115b381f81b"
+    },
+    "_compaction_refusal": {
+      "module": "memory_conversation_compaction",
+      "sha256": "a9a4cc07a62319cfb6299787a5d4e045378bc524de90d09689bce2061d393c22"
+    },
+    "_apply_compaction": {
+      "module": "memory_conversation_compaction",
+      "sha256": "94c2fa2761d965d246ef886c944ee1e469cdac8f93f7b174a96cd46d5700fd8b"
+    },
+    "_apply_compaction_locked": {
+      "module": "memory_conversation_compaction",
+      "sha256": "5ad52c27815685157a588daf4b8c515fb318b4b1576b94561e1d5941f715a82d"
+    },
+    "conversation_milestones": {
+      "module": "memory_conversation_compaction",
+      "sha256": "1a18befaac89cd44b649c836a5e8283050ac64487d041160158dc4b6dd13794d"
+    },
+    "rehydrate": {
+      "module": "memory_conversation_compaction",
+      "sha256": "155bb0e795f1344b22f7938ca0739a93adb74ba578ba41f4385cc245e7666a9e"
+    },
+    "verify_compaction": {
+      "module": "memory_conversation_compaction",
+      "sha256": "cc7e69ee8bff5259b4c644ee8ae2268f58ccbccec9141437d3a82985e4555e72"
+    },
+    "_spine_chain_ok": {
+      "module": "memory_conversation_compaction",
+      "sha256": "9c99bb651bef00600a5ab1bada8edad4cb1cdb2b413ec25dfabdc533f0a1d1d8"
+    },
+    "rebuild_milestones": {
+      "module": "memory_conversation_compaction",
+      "sha256": "86f7dd53f21ad87d0411d7e814659d268df716d3faa14e7b2bbc8940dc13921f"
+    },
+    "_stored_derived_block": {
+      "module": "memory_conversation_compaction",
+      "sha256": "0e028c242d893a2a894e427ee92b9d2c3fef133c567285c40eaa2ecb7fc54db1"
+    },
+    "graph_chains": {
+      "module": "memory_governance",
+      "sha256": "93fa808e9db9a2b595d524d613d1936b244b713ae34190e6615d2a43ce276e2c"
+    },
+    "_mark_retracted_chain_rows": {
+      "module": "memory_governance",
+      "sha256": "641692ac2cf3e66cf34aeacf075807c7ac1d7299eb06088debbb819500cec93e"
+    },
+    "spine_tail": {
+      "module": "memory_governance",
+      "sha256": "b4370038d78735608703f762a1645e90dc010eac48c1e6d3778b8eca729efd37"
+    },
+    "current_claims": {
+      "module": "memory_claims",
+      "sha256": "62f56d1cc20880031c1bee00e0dd5d8a05a71e90f45b47372ab35fcea065a9f2"
+    },
+    "_current_claims_read": {
+      "module": "memory_governance",
+      "sha256": "4050922568d4e3f70bbbd68e2816c9864a767a4925f69ab1fab8fa7eafc93a01"
+    },
+    "claim_history": {
+      "module": "memory_claims",
+      "sha256": "db77950cf59e5dab2f0c9a84a2612d531cd3e0b0789ced05b11c35a92cd41740"
+    },
+    "_embedding_vector": {
+      "module": "memory_embedding_store",
+      "sha256": "fb5ecec2ee53c49c5285b647585691536258c4f25bc22be82c93cefba7d7fdb1"
+    },
+    "_embedding_blob": {
+      "module": "memory_embedding_store",
+      "sha256": "802214ba7902217256268c6316353dfdf00e8c4ac8adcb6004e0f2bbc4ed0ab9"
+    },
+    "_embedding_from_storage": {
+      "module": "memory_embedding_store",
+      "sha256": "96f5dc519274f67a557af4c761c24d6620f90978f78300673fcf363fd68db24c"
+    },
+    "_query_embedding_sha256": {
+      "module": "memory_embedding_store",
+      "sha256": "09d5d914910b415271dd2d0423a437b4701e927f831202ef36d474b71f804bd5"
+    },
+    "cached_query_embedding": {
+      "module": "memory_embedding_store",
+      "sha256": "84feeae6af80cabfc33259134355d08795f22658078d3249600027c9da081856"
+    },
+    "cache_query_embedding": {
+      "module": "memory_embedding_store",
+      "sha256": "7c998dabb40609220412f3694b7c65ce15b7b5ce6805e0ee7afc06b997747517"
+    },
+    "pending_memory_embeddings": {
+      "module": "memory_embedding_store",
+      "sha256": "0199a88b43af0615d11acd17def77bd3db4bcd332fac9928744be386471c923f"
+    },
+    "claim_pending_memory_embeddings": {
+      "module": "memory_embedding_store",
+      "sha256": "9f9e3ce1a7c8ba6b7b20727b4e304eb08406cacbe443d3914c614dee283761fd"
+    },
+    "store_memory_embeddings": {
+      "module": "memory_embedding_store",
+      "sha256": "12e39a912be1081ea15a155b6340285b2c1772ee96aca562bfa6a21b6349f436"
+    },
+    "fail_memory_embedding_batch": {
+      "module": "memory_embedding_store",
+      "sha256": "71c090469e8e3cc8ea60d16f470560a6081c35f2307ec1f6973fd584ba7c0125"
+    },
+    "_learned_memory_utility": {
+      "module": "memory_embedding_store",
+      "sha256": "c6d365a2a5f8d5326a05a3f56de5a180a07f0b3a92f74e4132708f93d6d5e602"
+    },
+    "semantic_memory_search": {
+      "module": "memory_embedding_store",
+      "sha256": "bbb49cf30f827cb44328e23e859d992501c12345d834bf292978ffe99cbdf4a1"
+    },
+    "hybrid_memory_search": {
+      "module": "memory_embedding_store",
+      "sha256": "e050a4c65c44cd92cb7c16112432221d1d8e51ca3a76090a67b9a3631168897f"
+    },
+    "record_memory_retrievals": {
+      "module": "memory_embedding_store",
+      "sha256": "ea85c2a214866016a7db3641ca5a70d203bf750bc666bd4b64d5cb483c40c752"
+    },
+    "memory_quality": {
+      "module": "memory_embedding_store",
+      "sha256": "857e81ca8890f0d8e6a4bb8c6f674970151583592b62a75c0f1ec18adca4e1c1"
+    },
+    "_canonical_utc_timestamp": {
+      "module": "memory_lessons",
+      "sha256": "c453b18e8486073bb07e0ba5f03c97c37f4cf08a2eaa584645284184aa9c33cc"
+    },
+    "_lesson_project_for_context": {
+      "module": "memory_lessons",
+      "sha256": "b0c77e74074598c2d99d6b1a6b35b03af2e2483a427ea8145104e37d8a8b6da5"
+    },
+    "_lesson_control_material": {
+      "module": "memory_lessons",
+      "sha256": "73fd03c6b1458f59b917b680a50d74f4a545a0b9068e0de925b321c0c72e625a"
+    },
+    "_lesson_control_digest": {
+      "module": "memory_lessons",
+      "sha256": "b28ecbd2010fc5d8ccbe3c762ebb8c870faaa98e1681857429864c065d7e0eda"
+    },
+    "_lesson_control_validation": {
+      "module": "memory_lessons",
+      "sha256": "e7b3964c442c2050d2aebc4b11b239b44d0f754c611da0c7bce72aa9e12fa7da"
+    },
+    "_lesson_application_values": {
+      "module": "memory_lessons",
+      "sha256": "bd30627b4f0edd1282cfe8826e6af838fe282892d7c0c33a380410fbd50e2bba"
+    },
+    "_prediction_family_for_context": {
+      "module": "memory_predictions",
+      "sha256": "e35c56131e937715066cbf65a7c6c2ea1a40a204cce3c7883848181994d11ec7"
+    },
+    "_canonical_reflection_lesson_content": {
+      "module": "memory_lessons",
+      "sha256": "9e156f260864264a18368fa6ee084c2d247b5efda8136eaf35626a1856617bfc"
+    },
+    "_lesson_provenance_material": {
+      "module": "memory_lessons",
+      "sha256": "564b948404afe844d8d84dc00324847b4ee710159a5dce4c31f19111e2df428a"
+    },
+    "_lesson_provenance_material_from_fields": {
+      "module": "memory_lessons",
+      "sha256": "59a3647267a703ba8d808af7d99e467f2f5a6d35e08a04ea86b8737c0316bffc"
+    },
+    "_lesson_provenance_digest": {
+      "module": "memory_lessons",
+      "sha256": "2c9619bc084e00c4a68dc4bc86ae573e15760165a9404b17fd16050bb1e33fd8"
+    },
+    "_lesson_provenance_validation": {
+      "module": "memory_lessons",
+      "sha256": "1b82a5ece6b6c2680c4fa8d3c35891c6eea1731685dd654b4172f9d427aaec45"
+    },
+    "_lesson_prediction_for_reflection": {
+      "module": "memory_lessons",
+      "sha256": "b48e17884c05e10c38d4f734130b49d3f0172e4d312dfadfe71212cc7c241854"
+    },
+    "remember_verified_lesson": {
+      "module": "memory_lessons",
+      "sha256": "55f9e64ae9c4f18a6d9a39b996fafbe2d2a7b1a82110b5188be92f034b108094"
+    },
+    "match_lessons": {
+      "module": "memory_lessons",
+      "sha256": "d7fb5bdb3c28d7b516ecca66d7294f8889263e56504b9b0e5f951118074c8dc2"
+    },
+    "record_lesson_applications": {
+      "module": "memory_lessons",
+      "sha256": "14d5f1a46700ff55853684a712b7053cfde88d70a9f931e8e91ab16d2844eba4"
+    },
+    "_append_lesson_applied_receipt": {
+      "module": "memory_lessons",
+      "sha256": "3b85cd36170a54b1684b4ab624a6e6fe17e4e15219571fb2a131c1c8dcbb92e3"
+    },
+    "_record_lesson_applications_locked": {
+      "module": "memory_lessons",
+      "sha256": "da6dff263aa66acbbb4949fd5987179322fa3a23f3ff0e9f12f80d164fc93efb"
+    },
+    "_strategy_observation_material": {
+      "module": "memory_strategy_transfer",
+      "sha256": "4b9a991186b529ec458fab74e214452042ab1df68ea304d840d74a4378843a82"
+    },
+    "_strategy_observation_digest": {
+      "module": "memory_strategy_transfer",
+      "sha256": "cf673716a078fc594c63d6a954eed707d8286b1f051ad1e82ad0e6ecbe570429"
+    },
+    "_strategy_prediction_row": {
+      "module": "memory_strategy_transfer",
+      "sha256": "23816a3b2e0bda292ce1d94f1c1927ce5e8b497de87d4ae45ad17da5b3c105c3"
+    },
+    "_strategy_prediction_project": {
+      "module": "memory_strategy_transfer",
+      "sha256": "03b7bca68c2ccc994db77ecf878bbbfdb8f96f7f341330869a3947bfb7339a9f"
+    },
+    "record_strategy_observations": {
+      "module": "memory_strategy_transfer",
+      "sha256": "5bcbd3c0781f21ec290718d8e8a90a1531cc8cef86131d1b99ec28a9d48de32e"
+    },
+    "record_task_strategy_observation": {
+      "module": "memory_strategy_transfer",
+      "sha256": "64152218e3386c626b1dbeed6892e63ad5672cefb3bc679afc88028544da186e"
+    },
+    "_task_strategy_observation_validation": {
+      "module": "memory_strategy_transfer",
+      "sha256": "7c90b39c6e7d49e21ec40113b88bc9ee28474ed46c099779dbf607b865668ca8"
+    },
+    "_strategy_transfer_z_timestamp": {
+      "module": "memory_strategy_transfer",
+      "sha256": "d7c7a9c6d4b5e9b44424ab0dd980276852fe02c3b4b60c177c288c6194daf8e7"
+    },
+    "strategy_transfer_candidates": {
+      "module": "memory_strategy_transfer",
+      "sha256": "dedd52d20df6cc7ee51e0a09ac7c2772c98b3a12b3fbcbcc44d2b6d1fbc17035"
+    },
+    "strategy_transfer_candidate_health": {
+      "module": "memory_strategy_transfer",
+      "sha256": "c497dcb455ce432425064dd8d7dfe73fadfeaeb83e0ee93bb098a179cfd5a508"
+    },
+    "_strategy_transfer_application_material": {
+      "module": "memory_strategy_transfer",
+      "sha256": "0cf55d089258a2baddd463a6b118737babb9c5ec66af877d34f728ad698a02c5"
+    },
+    "_strategy_transfer_application_digest": {
+      "module": "memory_strategy_transfer",
+      "sha256": "ce814dfdf850e692782ef982ab32ef4b0b2fca0bc89c2df9c8e0f1a740f293fd"
+    },
+    "_strategy_transfer_identifier": {
+      "module": "memory_strategy_transfer",
+      "sha256": "4b1e348f7967acd950bd11643f956b66d678f738dd967145b7b09fd94896283b"
+    },
+    "_strategy_transfer_selection_rows": {
+      "module": "memory_strategy_transfer",
+      "sha256": "27d092609e2761e2ed7fa497b9afd08dc5be84d8e5e33bd84b57433218c908e0"
+    },
+    "_strategy_transfer_source_metadata": {
+      "module": "memory_strategy_transfer",
+      "sha256": "46d5432c780d737c281b05073b4354e1f83375571f6f3ac7c484d0df5489b28c"
+    },
+    "record_strategy_transfer_applications": {
+      "module": "memory_strategy_transfer",
+      "sha256": "d41d5616110c932828f37f7030a96ac517603ba8edb26d0059f28bd6ee6af851"
+    },
+    "_strategy_transfer_application_validation": {
+      "module": "memory_strategy_transfer",
+      "sha256": "35dcf62f05cdb7da70b24d49d8a5cea148eedc392b21bcbaa0fcc68d02cc9e81"
+    },
+    "_strategy_transfer_harm_failure_count": {
+      "module": "memory_strategy_transfer",
+      "sha256": "a20f36b571de250c5ca9aac31fe895b2c2ac4c937eac66eb7973866274ffb59c"
+    },
+    "_strategy_transfer_trial_manifest_material": {
+      "module": "memory_strategy_trial",
+      "sha256": "00372036c916bc5f9da2bbe6fdcaa156afe275a24c5628325a31980333148ae1"
+    },
+    "_strategy_transfer_trial_state_material": {
+      "module": "memory_strategy_trial",
+      "sha256": "664c57fcd7d0d5d8cfd94bb9ae294b455198effa71983d73d8f0b3bcb92da217"
+    },
+    "_strategy_transfer_trial_manifest_validation": {
+      "module": "memory_strategy_trial",
+      "sha256": "527526fc762defc81caae880762b956807459c32016bdc947c3925426a117476"
+    },
+    "_strategy_transfer_trial_benchmark_matches": {
+      "module": "memory_strategy_trial",
+      "sha256": "73b7768fc2dc661280d256f9817c5daf3d96b49fb9e8e3ecb8ca73627af19976"
+    },
+    "_strategy_transfer_trial_contract": {
+      "module": "memory_strategy_trial",
+      "sha256": "f23ee956ff343c44cf0797a588bf3eb507c4cda427836f1000ff6908f7b45e16"
+    },
+    "_strategy_transfer_trial_manifest_eligibility": {
+      "module": "memory_strategy_trial",
+      "sha256": "25b445021eee30e2cbe859600abeb05d3405579678512db7482e411928a06102"
+    },
+    "_strategy_transfer_trial_dispatch_eligibility": {
+      "module": "memory_strategy_trial",
+      "sha256": "d62933a39764decb5bada38671cbefd4a48da7cfbcd4e7d79f0bbe742904cea0"
+    },
+    "create_strategy_transfer_trial_manifest": {
+      "module": "memory_strategy_trial",
+      "sha256": "a5662b3805975bd23b17b057020679ff664a429b56b0c9c5760978053f45e0ba"
+    },
+    "_strategy_transfer_trial_selection_material": {
+      "module": "memory_strategy_trial",
+      "sha256": "fd6f7640cf148b1ee57f23b68251f7519a189fadf0ebffe61d4c37b174b29f4f"
+    },
+    "_strategy_transfer_trial_assignment_material": {
+      "module": "memory_strategy_trial",
+      "sha256": "0f44247582a2f8d33ddb7d78a7a13c4a399ded998cbdf425cb0a8923f85feb24"
+    },
+    "_strategy_transfer_trial_prompt_material": {
+      "module": "memory_strategy_trial",
+      "sha256": "b9bd768fe65e746bb0d6c8ffac05764b05b80b78dca23e2d354ef2422303c927"
+    },
+    "_strategy_transfer_trial_dispatch_material": {
+      "module": "memory_strategy_trial",
+      "sha256": "2969c9bf5a229de0ad38feb97a5fd2ea77c1dcde99b735651dd44e6a15be330a"
+    },
+    "_strategy_transfer_trial_outcome_material": {
+      "module": "memory_strategy_trial",
+      "sha256": "abbb828b65c29a5a7b3e3ff0e1848a4b7b61e1f2b3492b726b1a67983629ffdb"
+    },
+    "_strategy_transfer_trial_assignment_payload": {
+      "module": "memory_strategy_trial",
+      "sha256": "6770a784b7542857cd2e4aad0f667b2205b31b8c5c52a47df43bc7c84a76b5f0"
+    },
+    "_strategy_transfer_trial_assignment_validation": {
+      "module": "memory_strategy_trial",
+      "sha256": "1dbf770ee7282674c218c7be5a130e32f63b7edf68bac882d46e386f56aa6b31"
+    },
+    "active_strategy_transfer_trial": {
+      "module": "memory_strategy_trial",
+      "sha256": "a302f5097ed46d0ec3f60eff49095d253487da4fa1e1808b0ae0031c6d09acae"
+    },
+    "assign_strategy_transfer_trial": {
+      "module": "memory_strategy_trial",
+      "sha256": "52a289a653f1060ba21a1becfb2479079dd98e4430b9f5925567f52f3959a27f"
+    },
+    "record_strategy_transfer_trial_prompt_receipt": {
+      "module": "memory_strategy_trial",
+      "sha256": "da691631b91a309d4e78386bd802333451ef12e102b2059db28e73aa57aa4cc6"
+    },
+    "record_strategy_transfer_trial_provider_dispatch": {
+      "module": "memory_strategy_trial",
+      "sha256": "89821899bdb887773d1cb9c89822d5610d5c9d57287efb91f6a460b29d58347f"
+    },
+    "strategy_transfer_trial_pins": {
+      "module": "memory_strategy_trial",
+      "sha256": "0c23b2dde4e46e93498bfed22a4cd6b4c631846fdb52491661e13d0da61a3605"
+    },
+    "_strategy_transfer_trial_update_manifest_state": {
+      "module": "memory_strategy_trial",
+      "sha256": "f62f39108d5eb0c603c2b0120c1f26284cae32314fbf8ad2ee9e3f36f423a3f0"
+    },
+    "_resolve_strategy_transfer_trial_assignment": {
+      "module": "memory_strategy_trial",
+      "sha256": "0d3fd2868bfc462ef074f1aaff61ca2ac0d912807c058fb40ae4d65e98a758fe"
+    },
+    "abort_strategy_transfer_trial": {
+      "module": "memory_strategy_trial",
+      "sha256": "ad30866d2072d14acd72fd89e1a5852cbc2406d3a824670d6b6e8aa9131b24c3"
+    },
+    "strategy_transfer_trial_status": {
+      "module": "memory_strategy_trial",
+      "sha256": "b148760185a289e867b99e1dd3ebee4ee6d2ab0356ddcf3ddbc5b8cf5ca0b31d"
+    },
+    "promote_strategy_transfer_trial": {
+      "module": "memory_strategy_trial",
+      "sha256": "0925f4afe65ecb5555fdfb5be9f2adc2b7f968b776a0d15c8770facb7c0fc382"
+    },
+    "_strategy_transfer_trial_promotion_payload": {
+      "module": "memory_strategy_trial",
+      "sha256": "0da4f25bb720d586466c806f0119fa08c8f65f741f3618cdc5cadfb6129e9373"
+    },
+    "_strategy_transfer_canonical_json": {
+      "module": "memory_strategy_trial",
+      "sha256": "e76a3eac55337f89af75addce2b4a6bc49acf0a65461465a27564efd67b6cdb0"
+    },
+    "_strategy_transfer_config_digest": {
+      "module": "memory_strategy_trial",
+      "sha256": "4ddc02deec027873c7629c72ed9cc07963346de30a3931dc2f4e70af590b439a"
+    },
+    "_strategy_transfer_ab_attestation_digest": {
+      "module": "memory_strategy_trial",
+      "sha256": "53703f70e93df151c669028c00a5f7cd9bdb377dfe85a0540384a256566167d3"
+    },
+    "_strategy_transfer_sha256": {
+      "module": "memory_strategy_trial",
+      "sha256": "14c8f2c1f7434aec848ce9e5ccfc21115d24bccc4a5c82f74e6acf6786141a04"
+    },
+    "build_strategy_transfer_benchmark_attestation": {
+      "module": "memory_strategy_trial",
+      "sha256": "4bc7e5e08ac6205cb419f7b0c203d37df9c8f658857a2642d28e37f174174bef"
+    },
+    "_strategy_transfer_benchmark_attestation_validation": {
+      "module": "memory_strategy_trial",
+      "sha256": "7d2492f43c680a96528677967910c2b02bba45f27d432826f5e4e11c29295ebc"
+    },
+    "_strategy_transfer_prediction_receipt_summary": {
+      "module": "memory_strategy_trial",
+      "sha256": "6ee53ad096e3f8bbacdf7f2ecb558a11df4ab992d3f21855ade13cb3d5f24e5f"
+    },
+    "_strategy_transfer_benchmark_row": {
+      "module": "memory_strategy_trial",
+      "sha256": "6b1fa35e486a9dd9bf6e56e50db1f1611c20eea26f8de9cf0a2f304a625aba71"
+    },
+    "build_strategy_transfer_applied_ab_attestation": {
+      "module": "memory_strategy_trial",
+      "sha256": "40fe3a681c275e66c20d1c23cad09eb95ebbdccc0e390014194497fb6fa4a0bb"
+    },
+    "_strategy_transfer_ab_attestation_validation": {
+      "module": "memory_strategy_trial",
+      "sha256": "4f2ab2495b6007a2732972a8f95d49f3e373f8001517200b200e435b8e50c304"
+    },
+    "build_strategy_transfer_trial_ab_attestation": {
+      "module": "memory_strategy_trial",
+      "sha256": "afdb48320b01643abe5abfa5c3306159438cbe7525d71a290cbabf3131236847"
+    },
+    "build_strategy_transfer_trial_evidence_artifact": {
+      "module": "memory_strategy_trial",
+      "sha256": "eed5756a4ed97e792784b34e2a7deb1b24ae49ef979ad6ea081511911f8f1743"
+    },
+    "record_strategy_transfer_attestation": {
+      "module": "memory_strategy_trial",
+      "sha256": "da01024de64d642aa29ebdf5bb1a246521f51794506c056cb1e2a94d49ae001e"
+    },
+    "_strategy_transfer_stored_attestation_validation": {
+      "module": "memory_strategy_trial",
+      "sha256": "dfbb7ec79867dc43ed3be6d1185a2ea55b8c6526a8d3c9de881caba3b44a9494"
+    },
+    "_strategy_transfer_ledger_health": {
+      "module": "memory_strategy_transfer",
+      "sha256": "5ab4819d803b498be03455c657add69c043202b19602e9f15b3630ac67b00166"
+    },
+    "strategy_transfer_effectiveness": {
+      "module": "memory_strategy_transfer",
+      "sha256": "f98c591570208412eca3e383833da989dd9036aa8f3af92d296e5e31fb5a1b49"
+    },
+    "strategy_transfer_readiness": {
+      "module": "memory_strategy_transfer",
+      "sha256": "5ce0d61df3b6613b72cadd51b3488c48a566781c53b07133238e7dcde55d5539"
+    },
+    "lesson_effectiveness": {
+      "module": "memory_lessons",
+      "sha256": "389f6712994bdcbe421a5891baa317384439bcd67da6ca2b22f5601fa950900c"
+    },
+    "supersede_verified_lesson": {
+      "module": "memory_lessons",
+      "sha256": "20d06abb32d0cad76fb0ad78039e4ebe40c28e74f5f284a73ecc6dd2bbd9216d"
+    },
+    "search": {
+      "module": "memory_ordinary_recall",
+      "sha256": "3f8237145370917ace69899e0f35fb7ca5216a89f834acd3ddc31318628f2851"
+    },
+    "list_memories": {
+      "module": "memory_ordinary_recall",
+      "sha256": "d05774c53b0a4615ebebc3dc842b22b49c8b6f1beed499b9e064be0a9a9b2019"
+    },
+    "verified_operator_preferences": {
+      "module": "memory_ordinary_recall",
+      "sha256": "0ada2fcf6e475e01c7b1018bf674445b3e81c8dc7081f2da5ecdaf3c82303688"
+    },
+    "_insert_task_locked": {
+      "module": "memory_tasks_scheduling",
+      "sha256": "dd6e80d851a5af2bde6bd960f2ec7b68b5262ddedeb2fc1c7aa2143e25910d54"
+    },
+    "add_task": {
+      "module": "memory_tasks_scheduling",
+      "sha256": "7799521fea544c70f78c1d9d3f3834cc6f4cd44fe4cebdc93ca09d873e0ceab6"
+    },
+    "delegate_specialist_task": {
+      "module": "memory_tasks_scheduling",
+      "sha256": "4edf06e75630613bd0163337e2a9e339561c2f00521b9fc1ade7bf3fb5e46ecd"
+    },
+    "specialist_task_reports": {
+      "module": "memory_tasks_scheduling",
+      "sha256": "090b3bf7a18c360efef61611dfbee55b157dfba2813fb359c7d0d28a41f9a50b"
+    },
+    "_recover_stale_locked": {
+      "module": "memory_tasks_scheduling",
+      "sha256": "0a8982cc7a4109a09c5843873b51d42781ed70c29abda00840e77a4e7b66bd94"
+    },
+    "recover_stale_tasks": {
+      "module": "memory_tasks_scheduling",
+      "sha256": "6d748cd1761913bf55852ce6831459d1dd335c8d11f8a8ba4d5a1d7b83f17c5f"
+    },
+    "claim_task": {
+      "module": "memory_tasks_scheduling",
+      "sha256": "893fed397a26c339e49594396214973e7c56196028bb17fefc886786dfcc2304"
+    },
+    "renew_task_lease": {
+      "module": "memory_tasks_scheduling",
+      "sha256": "94c75e3b2d7dc626fd34d9eae2a350bf8ce5f521b6c3d39d3d55287c16711c69"
+    },
+    "finish_task": {
+      "module": "memory_tasks_scheduling",
+      "sha256": "d9632b45e81cad1fb839b48e3705d9d910174b310b852af2897b7c206455a47f"
+    },
+    "fail_task": {
+      "module": "memory_tasks_scheduling",
+      "sha256": "aabe3864edd78b2cc69b09c690e54bc8e2ff70f8ae68a99857bbe34605dc708c"
+    },
+    "await_task_approval": {
+      "module": "memory_tasks_scheduling",
+      "sha256": "9e4666897afada0fa085e3415b4cb9020edf9fad64e56176535c60306c8f7b73"
+    },
+    "list_tasks": {
+      "module": "memory_tasks_scheduling",
+      "sha256": "e5d0ad075683859403f801865edd8d78d5c412d0c50e7d62e4a74a26cb438c11"
+    },
+    "add_scheduled_job": {
+      "module": "memory_tasks_scheduling",
+      "sha256": "d23925bec9c69d8ac762704f4d0d9fd806dafbfabca1d42bb9e48b1265ee923d"
+    },
+    "list_scheduled_jobs": {
+      "module": "memory_tasks_scheduling",
+      "sha256": "0f8324803275eab2a0f486465d6eb94d124a71cc855f910775aab8ca9373d689"
+    },
+    "set_scheduled_job_enabled": {
+      "module": "memory_tasks_scheduling",
+      "sha256": "c363696faad8230d24292c555c1776383e56cc8bc3e0d32be5b07f4da4e23cb0"
+    },
+    "delete_scheduled_job": {
+      "module": "memory_tasks_scheduling",
+      "sha256": "0fcdf03e5ff42f88e746e60837eea14f64d266a710906aa791d4ee293c59efea"
+    },
+    "queue_due_scheduled_jobs": {
+      "module": "memory_tasks_scheduling",
+      "sha256": "9f48430422d1177b8d1c2482b09ca3630919398f29b74363bf63da50c6f7b678"
+    },
+    "add_learning_topic": {
+      "module": "memory_tasks_scheduling",
+      "sha256": "e2ef25316411a76fef280be0544baedbcfabef51384657f27ba310928abf9318"
+    },
+    "ensure_learning_topic": {
+      "module": "memory_tasks_scheduling",
+      "sha256": "2c264fe1ac97d647ed3c8b64b36a5b3afd9f3341051a8477d23c144fdfc0577e"
+    },
+    "queue_due_learning": {
+      "module": "memory_tasks_scheduling",
+      "sha256": "497e3495ab5859ac7ed38be0e06236fed444aaf98c7a6955417ce3f70367474e"
+    },
+    "list_learning_topics": {
+      "module": "memory_tasks_scheduling",
+      "sha256": "d4e4e5b3b70ab8f64788629de9e4d4b1f8ef5e8aa04b7232f5c6f4c3a1ce4e4d"
+    },
+    "set_learning_topic_enabled": {
+      "module": "memory_tasks_scheduling",
+      "sha256": "3a2934d35d36df2eb9e44a06f0821ea1e650e63d57256dd419eb4f05838a27b2"
+    },
+    "list_learning_runs": {
+      "module": "memory_tasks_scheduling",
+      "sha256": "c20e0b36f17aae05e329d1b1fb8e14d9e6358801f7843b6e644f81fc08669254"
+    },
+    "control_state": {
+      "module": "memory_operator_state",
+      "sha256": "8d1e0e09322f0a02ba4f37dcf2cb0be79fabaa3a7d0d8d9860a1e486563bd027"
+    },
+    "set_control_state": {
+      "module": "memory_operator_state",
+      "sha256": "6d8184b8f28ce2fcf5b090e0ae04f413617c09594c6eab1494775f19c182da11"
+    },
+    "log_activity": {
+      "module": "memory_operator_state",
+      "sha256": "05111cc777975f5d1875f87101331a025a2806dcfbfd2639c4900d6180dd9cca"
+    },
+    "list_activity": {
+      "module": "memory_operator_state",
+      "sha256": "e3005315056f7580415e9b7604bb93bfa8c682ffd1b716c98778c77ded7d1038"
+    },
+    "activity_count_since": {
+      "module": "memory_operator_state",
+      "sha256": "07f889d06c2e72e67d21577de239d07c4cb5eba862f91053f42c696c522366ef"
+    },
+    "add_goal": {
+      "module": "memory_operator_state",
+      "sha256": "5d3ef7292d89cdb98b58a02d781939f616d1033685f808a4495cc5c42fb712f6"
+    },
+    "update_goal_status": {
+      "module": "memory_operator_state",
+      "sha256": "ae568bce59387b88cce3ff657f9580965e2fc19d7e2d2b26be9567646ed7eb52"
+    },
+    "list_goals": {
+      "module": "memory_operator_state",
+      "sha256": "9392d5bc74223f517381358a6a5272be426b124d3753cb831c33d584bdbdcbcb"
+    },
+    "add_journal_entry": {
+      "module": "memory_operator_state",
+      "sha256": "fb50df13aa85666d648d91c737a228e38aabac639177ab9bd43fdadfb16fcd78"
+    },
+    "list_journal": {
+      "module": "memory_operator_state",
+      "sha256": "32c635406b6480e46ba95bffd71c4053de9780ec0c6e9ca94bb4a7a97266e411"
+    },
+    "_set_preference_locked": {
+      "module": "memory_operator_state",
+      "sha256": "4d3e35b79a0e96eb86c5baa556ff522228371aca61f8c4f3820d9528244acc17"
+    },
+    "set_preference": {
+      "module": "memory_operator_state",
+      "sha256": "b173638aca1ec23e40df9fa0916b1b2101f7e26a45cd51081a53e5f891c1cbd9"
+    },
+    "list_preferences": {
+      "module": "memory_operator_state",
+      "sha256": "f7370dd32f65a24a85a9051e4c0aa75ed73fb0e92cfc07b1aba9218e574397da"
+    },
+    "approve_subject": {
+      "module": "memory_operator_state",
+      "sha256": "4d621a9a7b7aa9543ab672a99d4fe4d1d3e678210d4bb388b1c6ee2bb65b9ba2"
+    },
+    "list_subjects": {
+      "module": "memory_operator_state",
+      "sha256": "ccf1bf4b56278066048e87b98ae8f3692bd4620872d08186b1b89fabef90725d"
+    },
+    "add_backlog_item": {
+      "module": "memory_operator_state",
+      "sha256": "fe37ec65e8f818f223d382126d064bd6f65c2aba8d9e9141f597ebdad5358b4f"
+    },
+    "list_backlog": {
+      "module": "memory_operator_state",
+      "sha256": "b42a5abfe073da7202bdeb22e3094da59f143984d742166250ec6ae054fddc60"
+    },
+    "set_backlog_enabled": {
+      "module": "memory_operator_state",
+      "sha256": "af0f894da21818464b5978908aecd136d40018dc0d147f0cac51eb931a1bb821"
+    },
+    "_proactive_prompt": {
+      "module": "memory_operator_state",
+      "sha256": "97e7fbe1f450cbbf5bb86058af19e8e8286ec7ac2e82445203fc60a2e275651b"
+    },
+    "schedule_idle_activity": {
+      "module": "memory_operator_state",
+      "sha256": "2ef7e51d97b90c702e64b11428148ae71c31400dc75bf00e41a6660f9976d23e"
+    },
+    "_record_reflection_locked": {
+      "module": "memory_operator_state",
+      "sha256": "c793330f3a42077af7aa6fc90477ad7538f06fbeac07c279393a5be6df6f7486"
+    },
+    "record_reflection": {
+      "module": "memory_operator_state",
+      "sha256": "0af9140bb975ec340081cf0beb98696b5be26f64def3e6d0a3bcab9a9b8632a2"
+    },
+    "list_reflections": {
+      "module": "memory_operator_state",
+      "sha256": "7212955f2343c94f056a33db9c1ae2497ecad232d13c3fe68f47eecce78444f3"
+    },
+    "record_repair_proposal": {
+      "module": "memory_operator_state",
+      "sha256": "51365c9749494d9f9ff6c9339156d5e431020f2d1f874ef4e9f4aa15ace4c32d"
+    },
+    "list_repair_proposals": {
+      "module": "memory_operator_state",
+      "sha256": "3313010206ca972f9a63bed38d149ccb6f7d25ced8538448896793da30b467f9"
+    },
+    "get_repair_proposal": {
+      "module": "memory_operator_state",
+      "sha256": "ffdac5c8decd1956ca2cafd8e9120903b6df14313c340b52a7a89c525b980072"
+    },
+    "record_recovery_attestation": {
+      "module": "memory_operator_state",
+      "sha256": "6752bfdd1d08984d6b3b68983ce3be06201f61718792750e9475dc63370ea12a"
+    },
+    "latest_recovery_attestation": {
+      "module": "memory_operator_state",
+      "sha256": "a724dcf388ddd3bed4f7d5141faffc20d492476d38557687975e15374d930cc2"
+    },
+    "approve_work_domain": {
+      "module": "memory_operator_state",
+      "sha256": "2d30a7b5f4c6073cb64f9193870171480856df955b187799c4fab871fe8f8cef"
+    },
+    "list_work_domains": {
+      "module": "memory_operator_state",
+      "sha256": "b3d05c4f058070dbcf933583e717bf71c7bebbb40a534f3a4222210a56111932"
+    },
+    "revoke_work_domain": {
+      "module": "memory_operator_state",
+      "sha256": "39ae979ac4b939f78770cb44ddbeb11376b23b6646810e18c746ded0c9d94311"
+    },
+    "record_initiative_observation": {
+      "module": "memory_operator_state",
+      "sha256": "f1f0c1be0e120f1e47be93b50508badaa01e475e749ba27c969d8fb195d184a6"
+    },
+    "schedule_domain_recovery": {
+      "module": "memory_operator_state",
+      "sha256": "f1f8db33e80fd26e6f9e3ffef492bbfbc7c2549c9ff6641cc6bdc705017f4624"
+    },
+    "list_initiative_events": {
+      "module": "memory_operator_state",
+      "sha256": "0606bf6a22efdc142b5c6d68d59a622e919921c40d0ffec9d7bbc5b624df714d"
+    },
+    "approval_fingerprint": {
+      "module": "memory_approvals",
+      "sha256": "a3d91be337fffa225b6f00b2006c7a168b18cfa21af1c4de501565ead82eba58"
+    },
+    "approval_effect_fingerprint": {
+      "module": "memory_approvals",
+      "sha256": "340cab3f6f3b76229e1c4b5fb19058019ee42769de85757b9bc0b106f0d8c1cf"
+    },
+    "session_approval_fingerprint": {
+      "module": "memory_approvals",
+      "sha256": "d2078903355dc9d9530b521e907382b54c0c8f7ba2a8d008af034a716d2b9566"
+    },
+    "persistent_approval_eligible": {
+      "module": "memory_approvals",
+      "sha256": "ed390c6d15ca2d15d77ae98e54864828574dd6e8c99db74b92b21a5416fe357b"
+    },
+    "_validated_approval_scope": {
+      "module": "memory_approvals",
+      "sha256": "4294be79c5629d044cdff49464c7bc8fcab2147e57edebf5638e3e661004e0aa"
+    },
+    "_link_pending_approval_locked": {
+      "module": "memory_approvals",
+      "sha256": "bcd4015075377fd4e3a7470fb5180177320ea96ced4c3db48f7ea6bb3041f6bb"
+    },
+    "authorize_or_request": {
+      "module": "memory_approvals",
+      "sha256": "7aec45c1700956a0073de5b8fe0faae406f84302f86b3c15d6bed56432963983"
+    },
+    "decide_approval_always": {
+      "module": "memory_approvals",
+      "sha256": "b667dc64d8b3e496d58edc570093de0d7e958727608b41bc7034ebb5f76b8863"
+    },
+    "decide_approval_for_session": {
+      "module": "memory_approvals",
+      "sha256": "f6853a02550ef7384d80d99e27bbd84f90d5e021f3c7e21b263ec019995fd40a"
+    },
+    "list_persistent_approvals": {
+      "module": "memory_approvals",
+      "sha256": "acee5868679b8b616524e23a1e3915f0729b4fd82ca1332a496fc78bf51b1050"
+    },
+    "revoke_persistent_approval": {
+      "module": "memory_approvals",
+      "sha256": "7a48ffeb3963988a37b3710b899c276a36797e3fe13240e595caa047d9677501"
+    },
+    "decide_approval": {
+      "module": "memory_approvals",
+      "sha256": "fdd26bdbc2fd332502c5df9c9ebf0320cbc023fd4f063bf301f92815cf09aa4d"
+    },
+    "list_approvals": {
+      "module": "memory_approvals",
+      "sha256": "357cc72c83d552a63fa24a66391c8df4507c399a1e058aa99e675b136be76f59"
+    },
+    "get_approval": {
+      "module": "memory_approvals",
+      "sha256": "4e0f47ba645d912c6cfa6e27181fb09eb7d13572cc1b626e66be3d907678735c"
+    },
+    "save_self_snapshot": {
+      "module": "memory_operator_state",
+      "sha256": "842df35a34447fb45f9a7295d3e9b618034d4628c6520ca72806bc7c9a2d44ba"
+    },
+    "operational_summary": {
+      "module": "memory_operator_state",
+      "sha256": "7a45d4d453053c671aa1b3a259bb908a269645c4da87fd267440927c4a660430"
+    }
+  },
+  "domains": {
+    "memory_approvals": "ApprovalsMemoryMixin",
+    "memory_claims": "ClaimsMemoryMixin",
+    "memory_conversations": "ConversationsMemoryMixin",
+    "memory_embedding_store": "EmbeddingStoreMemoryMixin",
+    "memory_lessons": "LessonsMemoryMixin",
+    "memory_operator_state": "OperatorStateMemoryMixin",
+    "memory_ordinary_recall": "OrdinaryRecallMemoryMixin",
+    "memory_predictions": "PredictionsMemoryMixin",
+    "memory_presence_companion": "PresenceCompanionMemoryMixin",
+    "memory_projects_budget": "ProjectsBudgetMemoryMixin",
+    "memory_schema_migrations": "SchemaMigrationsMemoryMixin",
+    "memory_strategy_transfer": "StrategyTransferMemoryMixin",
+    "memory_strategy_trial": "StrategyTrialMemoryMixin",
+    "memory_tasks_scheduling": "TasksSchedulingMemoryMixin",
+    "memory_learning_ladder": "LearningLadderMemoryMixin",
+    "memory_governance": "GovernanceMemoryMixin",
+    "memory_conversation_compaction": "ConversationCompactionMemoryMixin"
+  },
+  "core_methods": [
+    "__enter__",
+    "__exit__",
+    "__init__",
+    "_ensure_open",
+    "_immediate_transaction",
+    "_migrate",
+    "_project_id",
+    "close",
+    "closed"
+  ],
+  "class_statements": [
+    "b123e268c91329a708ac82b314c1564ff3e68f1d158728ac04e5fe13cdfbcf06",
+    "63abf42b9b8933979f95d9aef83cacc2c978d2316a12664ae84030f397e9cad8",
+    "a659cf6c94ef9f4ab7ea21b8bb60f7ba429197077b88bc4c3cf8c4ef2d2e6b4a",
+    "dcce17faa94ede1dd1468c00dba635515d0782712bbe8b5112dab6fc991087a6",
+    "726e48f72eafc4bb9c8f895910e1d0aae67597edd31299121c6ee97404cd1d7e",
+    "b8036e791f50a84f0795520d30d4eb6f5020773d343b37a008ce80e9d9b41456",
+    "81e7a8ccebb76728042dd3b82ad2ee061e1c081fe21023a7dc8df0f06a36e780",
+    "4a2049e5e8392c275e4a976c58bd58390db7ba64fae4050f9548dd3cf12e0238",
+    "497f627184c736a35f92039001415631aa2c1905b49ce9be9599555d34bf1cb3",
+    "2995b66f938bd264fb70418a7e5a679b58fd6ffbc6fdc30f940c5d38e022029e"
+  ]
+}

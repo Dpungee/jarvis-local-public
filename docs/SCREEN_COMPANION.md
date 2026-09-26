@@ -49,6 +49,31 @@ Examples include:
 - Run a preapproved routine when Gmail or another app is opened, while still requiring
   normal approvals for any email, file, or account mutation.
 
+## Teach by demonstration
+
+The Companion page includes an explicit **Record** control for teaching one reusable
+workflow. Recording is always visible and stops when the operator presses **Stop** or
+the ten-minute bound is reached.
+
+- Recording samples at most 16 changing active-window keyframes and 128 foreground
+  transitions in process memory. It does not capture keystrokes, audio, clipboard
+  contents, or a continuous desktop video.
+- Existing excluded-app and sensitive-title checks run before every keyframe. An
+  excluded observation contributes only a hidden gap; its pixels and title are not
+  retained.
+- On Stop, Jarvis creates one in-memory contact sheet and performs two tool-free model
+  passes: workflow extraction, then critical refinement into a declarative skill. The
+  configured model provider receives that contact sheet for each pass.
+- Exact recorded window titles are removed from the generated draft. Raw frames,
+  transitions, and the contact sheet are discarded after analysis and never enter
+  SQLite, chat history, a Presence job, or the learned-skill directory.
+- The resulting dialog shows the proposed name, description, purpose, usage guidance,
+  and complete instructions. **Save edits** changes only the in-memory draft;
+  **Delete draft** discards it; **Create skill** is the only operation that writes a
+  skill under `.jarvis-skills`.
+- A demonstrated skill remains untrusted advisory guidance. It cannot grant computer,
+  browser, file, network, account, approval, or publishing authority.
+
 ## What it is not
 
 Screen Companion is not continuous video storage, covert surveillance, unrestricted

@@ -735,6 +735,8 @@ class LeakageScanTests(_TempCase):
         self.assertEqual(cache.sample_dataset_values(path), [])
 
     def test_a_planted_value_is_found_and_never_echoed(self) -> None:
+        # Synthetic public fixture text, deliberately written to exercise the
+        # leakage detector. This is not a credential or real dataset content.
         secret = "the quick brown widget marker sentence for leakage probing"
         planted = self.tmp / "tracked.md"
         planted.write_text(f"prose\n{secret}\nmore prose\n", encoding="utf-8")

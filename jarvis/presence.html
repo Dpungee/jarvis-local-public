@@ -185,8 +185,17 @@
             <div class="composer-left">
               <button id="attach-image" class="composer-button" type="button" title="Attach images (or paste / drop)" aria-label="Attach images">＋</button>
               <input id="image-input" type="file" accept="image/png,image/jpeg,image/webp,image/gif" multiple hidden>
+              <label class="access-mode-control" for="access-mode" title="Choose the authority cap for this chat">
+                <span class="access-mode-icon" aria-hidden="true">◉</span>
+                <select id="access-mode" aria-label="Privacy and access mode">
+                  <option value="read-only">Read only</option>
+                  <option value="workspace" selected>Workspace</option>
+                  <option value="full">Full access</option>
+                </select>
+              </label>
               <button id="microphone" class="composer-button" type="button" title="Voice input" aria-label="Voice input">⌁</button>
               <span class="composer-context">Enter to send · Shift+Enter for a new line</span>
+              <span id="access-mode-description" class="composer-context">Project tools only; private computer and accounts stay blocked.</span>
               <span id="prompt-counter" class="prompt-counter" aria-live="polite" hidden></span>
             </div>
             <button id="send" class="send" type="submit" title="Send message" aria-label="Send message">↑</button>
@@ -214,7 +223,17 @@
           <form id="secondary-composer" class="composer secondary-composer">
             <textarea id="secondary-prompt" rows="1" maxlength="50000" placeholder="Message Jarvis in this chat" autocomplete="off"></textarea>
             <div class="composer-actions">
-              <div class="composer-left"><span class="composer-context">Independent conversation · shared Jarvis agent pool</span></div>
+              <div class="composer-left">
+                <label class="access-mode-control" for="secondary-access-mode" title="Choose the authority cap for this chat">
+                  <span class="access-mode-icon" aria-hidden="true">◉</span>
+                  <select id="secondary-access-mode" aria-label="Privacy and access mode for second chat">
+                    <option value="read-only">Read only</option>
+                    <option value="workspace" selected>Workspace</option>
+                    <option value="full">Full access</option>
+                  </select>
+                </label>
+                <span id="secondary-access-mode-description" class="composer-context">Independent conversation · project tools only</span>
+              </div>
               <button id="secondary-send" class="send" type="submit" title="Send message" aria-label="Send message in second chat">↑</button>
             </div>
           </form>
@@ -355,6 +374,28 @@
       <button id="close-feature-onboarding" class="ghost" type="button">Finish later</button>
     </div>
     <div id="feature-onboarding-list" class="feature-onboarding-list"></div>
+  </dialog>
+
+  <dialog id="demonstration-skill-dialog" class="demonstration-skill-dialog">
+    <div class="dialog-head">
+      <div>
+        <h2>Review the skill JARVIS learned</h2>
+        <p>Name it, inspect what it does and how it works, then create, edit, or delete the draft.</p>
+      </div>
+      <button id="close-demonstration-skill" class="ghost" type="button">Close</button>
+    </div>
+    <div class="demonstration-skill-fields">
+      <label>Skill name<input id="demonstration-skill-name" maxlength="63" autocomplete="off"></label>
+      <label>Description<input id="demonstration-skill-description" maxlength="300" autocomplete="off"></label>
+      <label>What it does<textarea id="demonstration-skill-purpose" rows="3" maxlength="1200"></textarea></label>
+      <label>How to use it<textarea id="demonstration-skill-how" rows="5" maxlength="2000"></textarea></label>
+      <label>Skill instructions<textarea id="demonstration-skill-content" rows="12" maxlength="24000"></textarea></label>
+    </div>
+    <div class="utility-actions demonstration-skill-actions">
+      <button id="delete-demonstration-skill" class="danger" type="button">Delete draft</button>
+      <button id="edit-demonstration-skill" type="button">Save edits</button>
+      <button id="create-demonstration-skill" class="primary" type="button">Create skill</button>
+    </div>
   </dialog>
 
   <dialog id="pairing-dialog" class="pairing-dialog">

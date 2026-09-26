@@ -1,6 +1,29 @@
 # JARVIS Development Status
 
-## Cross-checkout public integration (2026-09-25, not published)
+## Public integration and release verification (2026-09-26)
+
+- The reviewed 274-path integration was published through protected PR #26 as
+  `63d3f82`. The exact candidate passed 5,481 local tests (nine skips), all three
+  hosted Windows Python versions (ten skips each), 76% displayed branch-aware
+  coverage, package/install checks, dependency audit, privacy, and CodeQL.
+  A fresh public-only clone matched the reviewed tree and passed privacy/secret
+  scans. The repository URL is unchanged and commit email identities are no-reply.
+- Post-merge CodeQL identified a medium-severity all-interface listener in a
+  synthetic network-exposure test. The test now retains real loopback-only
+  validation and uses mocked connection boundaries for reachable/refused non-
+  loopback addresses and resolution failure. No LAN listener is opened by that
+  fixture; production detection, query scope and security gates are unchanged.
+  This follow-up still requires its own complete checks and alert-resolution
+  verification; no finding was dismissed.
+- The published integration's Python 3.12 post-merge run hit a recurring 30-second
+  Node digest-fixture timeout. The log did not identify the stalled phase; 100
+  consecutive local invocations passed. The fixture now writes phase/result data
+  to an owned temporary file, waits directly on the process rather than pipe EOF,
+  and explicitly exits after synchronous result persistence. Real WebCrypto, the
+  30-second limit and all four payload-binding cases are retained. Additional
+  contracts reject incomplete/invalid results and preserve timeout diagnostics.
+  The 17-test browser-security group and 100 real digest invocations passed locally;
+  hosted acceptance remains required, and the original timeout cause is unconfirmed.
 
 - This candidate is based on published commit `93119c4`. Original development
   checkouts and the running Hub were not changed by this integration.

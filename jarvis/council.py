@@ -23,14 +23,18 @@ report writers are all testable without a model or a Tk window.
 from __future__ import annotations
 
 import json
+import os
 import random
 import re
+import sqlite3
 import time
+import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Callable
 
+from .memory import ModelBudgetExceeded, now_iso
 from .redaction import redact_secrets
 from .specialists import SPECIALISTS
 
@@ -427,6 +431,7 @@ class CouncilMeeting:
     """Everything one meeting knows about itself."""
 
     topic: str
+    meeting_id: str = field(default_factory=lambda: uuid.uuid4().hex)
     plan: CouncilPlan = field(default_factory=CouncilPlan)
     started_at: float = 0.0
     agenda: list[str] = field(default_factory=list)
@@ -1029,12 +1034,36 @@ def council_dir(data_dir: Path | str) -> Path:
     return Path(data_dir) / "council"
 
 
+def _exclusive_artifact_folder(
+    data_dir: Path | str, meeting: CouncilMeeting
+) -> Path:
+    """Claim a meeting directory atomically; never reuse an existing sitting."""
+    root = council_dir(data_dir)
+    root.mkdir(parents=True, exist_ok=True)
+    base = meeting_slug(meeting.topic, meeting.started_at)
+    candidates = (base, f"{base}-{meeting.meeting_id[:12]}")
+    for name in candidates:
+        target = root / name
+        try:
+            target.mkdir(exist_ok=False)
+        except FileExistsError:
+            continue
+        return target
+    for _attempt in range(16):
+        target = root / f"{base}-{uuid.uuid4().hex[:12]}"
+        try:
+            target.mkdir(exist_ok=False)
+        except FileExistsError:  # pragma: no cover - cryptographically remote
+            continue
+        return target
+    raise FileExistsError("Could not claim a unique Council artifact directory")
+
+
 def write_artifacts(
     data_dir: Path | str, meeting: CouncilMeeting, models: CouncilModels
 ) -> dict[str, str]:
     """Write agenda, minutes, report and transcript; return the paths written."""
-    folder = council_dir(data_dir) / meeting_slug(meeting.topic, meeting.started_at)
-    folder.mkdir(parents=True, exist_ok=True)
+    folder = _exclusive_artifact_folder(data_dir, meeting)
     documents = {
         "agenda": ("agenda.md", agenda_markdown(meeting, models)),
         "minutes": ("minutes.md", minutes_markdown(meeting, models)),
@@ -1086,15 +1115,27 @@ def list_meetings(data_dir: Path | str, limit: int = 20) -> list[dict[str, str]]
 
 COUNCIL_CONTEXT_LENGTH = 8192
 COUNCIL_TEMPERATURE = 0.45
+COUNCIL_COMPLETION_TOKEN_RESERVE = 512
+
+
+class CouncilCallBlocked(RuntimeError):
+    """A deterministic guard or durable budget refused a provider call."""
 
 
 def open_meeting(
-    topic: str, plan: CouncilPlan | None = None, started_at: float | None = None
+    topic: str,
+    plan: CouncilPlan | None = None,
+    started_at: float | None = None,
+    meeting_id: str | None = None,
 ) -> CouncilMeeting:
     """Start a meeting record; no model has been called yet."""
     subject = bounded_text(topic, 200) or "How to improve Jarvis"
+    identifier = str(meeting_id or uuid.uuid4().hex).strip().casefold()
+    if re.fullmatch(r"[0-9a-f]{32}", identifier) is None:
+        raise ValueError("Council meeting id must be 32 lowercase hexadecimal characters")
     return CouncilMeeting(
         topic=subject,
+        meeting_id=identifier,
         plan=plan or DEPTH_PLANS["Standard"],
         started_at=float(time.time() if started_at is None else started_at),
         status="opening",
@@ -1104,9 +1145,11 @@ def open_meeting(
 class CouncilRuntime:
     """Runs one directive at a time against the model client.
 
-    The runtime owns no state of its own beyond the client: the meeting is the
-    state, and every decision about who speaks next is made by
-    :func:`next_directive` before the runtime is asked for anything.
+    The meeting remains the deliberation state, and every decision about who
+    speaks next is made by :func:`next_directive`.  The runtime additionally
+    binds every provider call to the shared persistent control plane and a
+    durable per-meeting model budget; it never stores prompt or completion text
+    in those accounting rows.
     """
 
     def __init__(
@@ -1115,11 +1158,37 @@ class CouncilRuntime:
         client: Any = None,
         models: CouncilModels | None = None,
         client_factory: Callable[[Any], Any] | None = None,
+        memory: Any = None,
+        execution_guard: Callable[[], bool] | None = None,
     ) -> None:
         self.config = config
         self.models = models or resolve_models(config)
         self._client = client
         self._client_factory = client_factory
+        self.memory = memory
+        self.execution_guard = execution_guard
+
+    def bind_execution(
+        self,
+        memory: Any,
+        execution_guard: Callable[[], bool],
+    ) -> None:
+        """Bind this runtime to the persistent control and budget stores."""
+        if memory is None or not callable(execution_guard):
+            raise ValueError("Council execution requires memory and a callable guard")
+        self.memory = memory
+        self.execution_guard = execution_guard
+
+    def _cancelled(self, upstream: Callable[[], bool] | None = None) -> bool:
+        return bool(
+            (upstream is not None and upstream())
+            or (self.execution_guard is not None and self.execution_guard())
+        )
+
+    def _ensure_allowed(self, upstream: Callable[[], bool] | None = None) -> None:
+        if self._cancelled(upstream):
+            reason = str(getattr(self.execution_guard, "reason", "") or "")
+            raise CouncilCallBlocked(reason or "Council execution was stopped")
 
     def client(self) -> Any:
         if self._client is None:
@@ -1140,7 +1209,7 @@ class CouncilRuntime:
             except Exception:
                 pass
 
-    def verify_tier(self) -> str:
+    def verify_tier(self, cancelled: Callable[[], bool] | None = None) -> str:
         """Confirm the chosen tier can answer; otherwise drop to local models.
 
         A cloud flag in the configuration only says the operator *wants* that
@@ -1150,6 +1219,7 @@ class CouncilRuntime:
         turn. Returns the note to show the operator, or ``""`` when the tier
         stands.
         """
+        self._ensure_allowed(cancelled)
         mode = self.models.mode
         if mode not in {"codex-cli", "openai"}:
             return ""
@@ -1175,6 +1245,210 @@ class CouncilRuntime:
 
     # -- one directive -----------------------------------------------------
 
+    def _call_model(
+        self,
+        messages: list[dict[str, Any]],
+        model: str,
+        effort: bool | str,
+        *,
+        budget_scope: str,
+        profile: str,
+        temperature: float,
+        cancelled: Callable[[], bool] | None,
+    ) -> Any:
+        """Call one tool-free model under durable reservation and accounting."""
+        self._ensure_allowed(cancelled)
+        memory = self.memory
+        reservation: int | None = None
+        serialized = json.dumps(
+            messages, ensure_ascii=False, separators=(",", ":"), default=str
+        )
+        estimated_prompt = max(1, (len(serialized) + 3) // 4)
+        if memory is not None:
+            reservation = self._reserve_model_call(
+                memory,
+                budget_scope,
+                estimated_prompt_tokens=estimated_prompt,
+                call_limit=int(getattr(self.config, "model_call_limit_per_request", 48)),
+                prompt_token_limit=int(
+                    getattr(self.config, "prompt_token_limit_per_request", 400_000)
+                ),
+                completion_token_limit=int(
+                    getattr(self.config, "completion_token_limit_per_request", 40_000)
+                ),
+            )
+        started = time.monotonic()
+        try:
+            # The guard is checked after the atomic reservation too: an
+            # emergency stop racing the transaction consumes and finalizes the
+            # slot but reaches no provider.
+            self._ensure_allowed(cancelled)
+            response = self.client().chat(
+                messages,
+                [],
+                model,
+                context_length=COUNCIL_CONTEXT_LENGTH,
+                think=effort,
+                temperature=temperature,
+                cancellation_guard=lambda: self._cancelled(cancelled),
+            )
+        except BaseException as exc:
+            latency = max(0, round((time.monotonic() - started) * 1000))
+            if memory is not None and reservation is not None:
+                memory.complete_model_call(
+                    reservation,
+                    prompt_tokens=None,
+                    completion_tokens=COUNCIL_COMPLETION_TOKEN_RESERVE,
+                    success=False,
+                )
+                self._record_model_call(
+                    memory,
+                    model,
+                    profile,
+                    latency,
+                    None,
+                    None,
+                    False,
+                    type(exc).__name__,
+                    budget_scope,
+                )
+            raise
+        latency = max(0, round((time.monotonic() - started) * 1000))
+        metrics = getattr(response, "metrics", None)
+        prompt_tokens = getattr(metrics, "prompt_tokens", None)
+        completion_tokens = getattr(metrics, "completion_tokens", None)
+        if not (
+            isinstance(prompt_tokens, int)
+            and not isinstance(prompt_tokens, bool)
+            and prompt_tokens >= 0
+        ):
+            prompt_tokens = None
+        if not (
+            isinstance(completion_tokens, int)
+            and not isinstance(completion_tokens, bool)
+            and completion_tokens >= 0
+        ):
+            completion_tokens = None
+        if memory is not None and reservation is not None:
+            memory.complete_model_call(
+                reservation,
+                prompt_tokens=prompt_tokens,
+                completion_tokens=(
+                    completion_tokens
+                    if completion_tokens is not None
+                    else COUNCIL_COMPLETION_TOKEN_RESERVE
+                ),
+                success=True,
+            )
+            self._record_model_call(
+                memory,
+                model,
+                profile,
+                latency,
+                prompt_tokens,
+                completion_tokens,
+                True,
+                None,
+                budget_scope,
+            )
+        return response
+
+    @staticmethod
+    def _reserve_model_call(
+        memory: Any,
+        budget_scope: str,
+        *,
+        estimated_prompt_tokens: int,
+        call_limit: int,
+        prompt_token_limit: int,
+        completion_token_limit: int,
+    ) -> int:
+        """Atomically reserve Council prompt and completion capacity.
+
+        The shared model-budget schema predates completion reservations, so the
+        Council performs the stronger transaction locally without changing the
+        cryptographically pinned memory runtime. Completed calls still use the
+        public ``Memory.complete_model_call`` API and the same durable table.
+        """
+        scope = memory._model_budget_scope(budget_scope)
+        prompt_estimate = memory._metric_optional_count(
+            estimated_prompt_tokens, "estimated_prompt_tokens"
+        )
+        if prompt_estimate is None:
+            raise ValueError("estimated_prompt_tokens must be a non-negative integer")
+        maximum_calls = memory._positive_budget(call_limit, "call_limit")
+        maximum_prompt = memory._positive_budget(
+            prompt_token_limit, "prompt_token_limit"
+        )
+        maximum_completion = memory._positive_budget(
+            completion_token_limit, "completion_token_limit"
+        )
+        with memory._immediate_transaction():
+            usage = memory.db.execute(
+                """SELECT COUNT(*) AS calls,
+                          COALESCE(SUM(estimated_prompt_tokens), 0) AS prompt_tokens,
+                          COALESCE(SUM(completion_tokens), 0) AS completion_tokens
+                   FROM model_call_budget_events WHERE budget_scope=?""",
+                (scope,),
+            ).fetchone()
+            calls = int(usage["calls"] or 0)
+            prompt_tokens = int(usage["prompt_tokens"] or 0)
+            completion_tokens = int(usage["completion_tokens"] or 0)
+            if calls >= maximum_calls:
+                raise ModelBudgetExceeded(
+                    f"request model-call limit reached ({maximum_calls})"
+                )
+            if prompt_tokens + prompt_estimate > maximum_prompt:
+                raise ModelBudgetExceeded(
+                    f"request prompt-token limit reached ({maximum_prompt})"
+                )
+            if (
+                completion_tokens + COUNCIL_COMPLETION_TOKEN_RESERVE
+                > maximum_completion
+            ):
+                raise ModelBudgetExceeded(
+                    f"request completion-token limit reached ({maximum_completion})"
+                )
+            cursor = memory.db.execute(
+                """INSERT INTO model_call_budget_events(
+                       created_at, budget_scope, state, estimated_prompt_tokens,
+                       completion_tokens
+                   ) VALUES (?, ?, 'reserved', ?, ?)""",
+                (
+                    now_iso(),
+                    scope,
+                    prompt_estimate,
+                    COUNCIL_COMPLETION_TOKEN_RESERVE,
+                ),
+            )
+        return int(cursor.lastrowid)
+
+    @staticmethod
+    def _record_model_call(
+        memory: Any,
+        model: str,
+        profile: str,
+        latency_ms: int,
+        prompt_tokens: int | None,
+        completion_tokens: int | None,
+        success: bool,
+        failure_kind: str | None,
+        budget_scope: str,
+    ) -> None:
+        prefix, separator, _tail = str(model).partition(":")
+        provider = prefix if separator else "ollama"
+        memory.record_model_call(
+            provider=provider,
+            model=str(model),
+            profile=profile,
+            latency_ms=latency_ms,
+            prompt_tokens=prompt_tokens,
+            completion_tokens=completion_tokens,
+            success=success,
+            failure_kind=failure_kind,
+            budget_scope=budget_scope,
+        )
+
     def _ask(
         self,
         seat: CouncilSeat,
@@ -1187,14 +1461,14 @@ class CouncilRuntime:
             {"role": "system", "content": council_contract(seat, self.models)},
             {"role": "user", "content": directive_prompt(meeting, directive)},
         ]
-        response = self.client().chat(
+        response = self._call_model(
             messages,
-            [],
             model,
-            context_length=COUNCIL_CONTEXT_LENGTH,
-            think=effort,
+            effort,
+            budget_scope=f"council:{meeting.meeting_id}",
+            profile="council-chair" if seat.chair else "council-member",
             temperature=COUNCIL_TEMPERATURE,
-            cancellation_guard=cancelled,
+            cancelled=cancelled,
         )
         if isinstance(response, dict):
             return str(response.get("content", "") or "")
@@ -1293,6 +1567,8 @@ class CouncilRuntime:
     def finalize(self, meeting: CouncilMeeting, data_dir: Path | str) -> dict[str, str]:
         """Close the meeting and file its documents."""
         meeting.status = "closed"
+        if meeting.artifacts:
+            return meeting.artifacts
         try:
             meeting.artifacts = write_artifacts(data_dir, meeting, self.models)
         except OSError as exc:
@@ -1305,9 +1581,11 @@ class CouncilRuntime:
         recent_titles: list[str],
         rng: random.Random | None = None,
         cancelled: Callable[[], bool] | None = None,
+        budget_scope: str | None = None,
     ) -> tuple[str, str]:
         """Have the chair choose an unattended sitting's topic (see below)."""
-        return _pick_topic(self, plan, recent_titles, rng, cancelled)
+        scope = str(budget_scope or f"council:{uuid.uuid4().hex}")
+        return _pick_topic(self, plan, recent_titles, rng, cancelled, scope)
 
 
 # --------------------------------------------------------------------------
@@ -1533,6 +1811,243 @@ def night_row(meeting: CouncilMeeting) -> dict[str, Any]:
     }
 
 
+class NightLedger:
+    """Atomic, restart-safe record of unattended Council sittings.
+
+    Reserving a row consumes the night's cap before the topic provider is
+    called.  A process restart turns abandoned reservations into immutable
+    interruption rows, so neither a crash nor a repeated finalizer can erase a
+    sitting or silently buy another provider-call slot.
+    """
+
+    _STATUSES = frozenset({"reserved", "completed", "interrupted"})
+
+    def __init__(self, data_dir: Path | str) -> None:
+        folder = council_dir(data_dir)
+        folder.mkdir(parents=True, exist_ok=True)
+        self.path = folder / "night-ledger.sqlite3"
+        self.db = sqlite3.connect(self.path, timeout=5.0, isolation_level=None)
+        self.db.row_factory = sqlite3.Row
+        self.db.execute("PRAGMA busy_timeout=5000")
+        self.db.execute("PRAGMA journal_mode=WAL")
+        self.db.execute("PRAGMA synchronous=FULL")
+        self.db.execute(
+            """CREATE TABLE IF NOT EXISTS sittings (
+                sitting_id TEXT PRIMARY KEY,
+                night TEXT NOT NULL,
+                created_at REAL NOT NULL,
+                finalized_at REAL,
+                status TEXT NOT NULL
+                    CHECK(status IN ('reserved', 'completed', 'interrupted')),
+                focus TEXT NOT NULL,
+                topic TEXT NOT NULL DEFAULT '',
+                row_json TEXT
+            )"""
+        )
+        self.db.execute(
+            "CREATE INDEX IF NOT EXISTS idx_council_sittings_night "
+            "ON sittings(night, created_at, sitting_id)"
+        )
+
+    def close(self) -> None:
+        self.db.close()
+
+    def __enter__(self) -> "NightLedger":
+        return self
+
+    def __exit__(self, *_args: Any) -> None:
+        self.close()
+
+    @staticmethod
+    def _night(value: str) -> str:
+        normalized = str(value).strip()
+        if re.fullmatch(r"[0-9]{4}-[0-9]{2}-[0-9]{2}", normalized) is None:
+            raise ValueError("Council night key is invalid")
+        return normalized
+
+    @staticmethod
+    def _sitting_id(value: str) -> str:
+        normalized = str(value).strip().casefold()
+        if re.fullmatch(r"[0-9a-f]{32}", normalized) is None:
+            raise ValueError("Council sitting id is invalid")
+        return normalized
+
+    @staticmethod
+    def _safe_row(row: dict[str, Any]) -> dict[str, Any]:
+        source = row if isinstance(row, dict) else {}
+        proposals = source.get("proposals", [])
+        if not isinstance(proposals, list):
+            proposals = []
+        try:
+            turns = max(0, min(10_000, int(source.get("turns", 0))))
+        except (TypeError, ValueError, AttributeError):
+            turns = 0
+        return {
+            "topic": bounded_text(source.get("topic", ""), 200),
+            "decision": bounded_text(source.get("decision", ""), 1_200),
+            "proposals": [bounded_text(value, 300) for value in proposals[:6]],
+            "turns": turns,
+            "folder": bounded_text(source.get("folder", ""), 1_000),
+            "report": bounded_text(source.get("report", ""), 1_000),
+        }
+
+    def reserve(
+        self,
+        night: str,
+        cap: int,
+        focus: str,
+        *,
+        sitting_id: str | None = None,
+        created_at: float | None = None,
+    ) -> str | None:
+        """Atomically consume one per-night slot, or return ``None`` at cap."""
+        key = self._night(night)
+        if isinstance(cap, bool) or not isinstance(cap, int) or not 1 <= cap <= NIGHT_CAP_MAX:
+            raise ValueError("Council night cap is invalid")
+        identifier = self._sitting_id(sitting_id or uuid.uuid4().hex)
+        stamp = float(time.time() if created_at is None else created_at)
+        self.db.execute("BEGIN IMMEDIATE")
+        try:
+            used = int(
+                self.db.execute(
+                    "SELECT COUNT(*) FROM sittings WHERE night=?", (key,)
+                ).fetchone()[0]
+            )
+            if used >= cap:
+                self.db.rollback()
+                return None
+            self.db.execute(
+                """INSERT INTO sittings(
+                       sitting_id, night, created_at, status, focus
+                   ) VALUES (?, ?, ?, 'reserved', ?)""",
+                (identifier, key, stamp, bounded_text(focus, 400)),
+            )
+            self.db.commit()
+        except BaseException:
+            self.db.rollback()
+            raise
+        return identifier
+
+    def set_topic(self, sitting_id: str, topic: str) -> bool:
+        updated = self.db.execute(
+            "UPDATE sittings SET topic=? WHERE sitting_id=? AND status='reserved'",
+            (bounded_text(topic, 200), self._sitting_id(sitting_id)),
+        )
+        return updated.rowcount == 1
+
+    def count(self, night: str) -> int:
+        row = self.db.execute(
+            "SELECT COUNT(*) FROM sittings WHERE night=?", (self._night(night),)
+        ).fetchone()
+        return int(row[0]) if row is not None else 0
+
+    def nights(self) -> list[str]:
+        return [
+            str(row["night"])
+            for row in self.db.execute(
+                "SELECT DISTINCT night FROM sittings ORDER BY night"
+            ).fetchall()
+        ]
+
+    def rows(self, night: str) -> list[dict[str, Any]]:
+        records = self.db.execute(
+            """SELECT row_json FROM sittings
+               WHERE night=? AND row_json IS NOT NULL
+               ORDER BY created_at, sitting_id""",
+            (self._night(night),),
+        ).fetchall()
+        rows: list[dict[str, Any]] = []
+        for record in records:
+            try:
+                value = json.loads(str(record["row_json"]))
+            except (TypeError, ValueError, json.JSONDecodeError):
+                continue
+            if isinstance(value, dict):
+                rows.append(self._safe_row(value))
+        return rows
+
+    def focus(self, night: str, fallback: str) -> str:
+        row = self.db.execute(
+            """SELECT focus FROM sittings WHERE night=?
+               ORDER BY created_at, sitting_id LIMIT 1""",
+            (self._night(night),),
+        ).fetchone()
+        value = bounded_text(row["focus"], 400) if row is not None else ""
+        return value or bounded_text(fallback, 400)
+
+    def finalize(
+        self,
+        sitting_id: str,
+        row: dict[str, Any],
+        *,
+        interrupted: bool = False,
+        finalized_at: float | None = None,
+    ) -> dict[str, Any]:
+        """Finalize once; repeated or late finalizers receive the stored row."""
+        identifier = self._sitting_id(sitting_id)
+        safe = self._safe_row(row)
+        encoded = json.dumps(safe, ensure_ascii=False, sort_keys=True)
+        state = "interrupted" if interrupted else "completed"
+        stamp = float(time.time() if finalized_at is None else finalized_at)
+        self.db.execute("BEGIN IMMEDIATE")
+        try:
+            existing = self.db.execute(
+                "SELECT status, row_json FROM sittings WHERE sitting_id=?",
+                (identifier,),
+            ).fetchone()
+            if existing is None:
+                raise KeyError("Council sitting reservation does not exist")
+            if str(existing["status"]) != "reserved":
+                stored = json.loads(str(existing["row_json"] or "{}"))
+                self.db.commit()
+                return self._safe_row(stored if isinstance(stored, dict) else {})
+            self.db.execute(
+                """UPDATE sittings
+                   SET finalized_at=?, status=?, topic=?, row_json=?
+                   WHERE sitting_id=? AND status='reserved'""",
+                (stamp, state, safe["topic"], encoded, identifier),
+            )
+            self.db.commit()
+        except BaseException:
+            self.db.rollback()
+            raise
+        return safe
+
+    def recover_incomplete(self, reason: str = "The previous process ended before filing this sitting.") -> int:
+        """Turn crash-left reservations into durable interruption rows."""
+        self.db.execute("BEGIN IMMEDIATE")
+        try:
+            pending = self.db.execute(
+                """SELECT sitting_id, topic FROM sittings
+                   WHERE status='reserved' ORDER BY created_at, sitting_id"""
+            ).fetchall()
+            stamp = time.time()
+            for record in pending:
+                row = self._safe_row({
+                    "topic": record["topic"] or "Interrupted Council sitting",
+                    "decision": bounded_text(reason, 1_200),
+                    "proposals": [],
+                    "turns": 0,
+                    "folder": "",
+                    "report": "",
+                })
+                self.db.execute(
+                    """UPDATE sittings
+                       SET finalized_at=?, status='interrupted', row_json=?
+                       WHERE sitting_id=? AND status='reserved'""",
+                    (
+                        stamp,
+                        json.dumps(row, ensure_ascii=False, sort_keys=True),
+                        record["sitting_id"],
+                    ),
+                )
+            self.db.commit()
+        except BaseException:
+            self.db.rollback()
+            raise
+        return len(pending)
+
+
 def night_digest_markdown(night: str, rows: list[dict[str, Any]], focus: str) -> str:
     """One page for the morning: every sitting, its decision, its proposals."""
     lines = [
@@ -1575,8 +2090,18 @@ def write_night_digest(
     folder.mkdir(parents=True, exist_ok=True)
     safe_night = re.sub(r"[^0-9-]", "", str(night)) or "unknown"
     path = folder / f"night-{safe_night}.md"
-    with open(path, "w", encoding="utf-8", newline="\n") as handle:
-        handle.write(night_digest_markdown(night, rows, focus))
+    temporary = folder / f".{path.name}.{uuid.uuid4().hex}.tmp"
+    try:
+        with open(temporary, "x", encoding="utf-8", newline="\n") as handle:
+            handle.write(night_digest_markdown(night, rows, focus))
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+    finally:
+        try:
+            temporary.unlink()
+        except FileNotFoundError:
+            pass
     return path
 
 
@@ -1605,6 +2130,7 @@ def _pick_topic(
     recent_titles: list[str],
     rng: random.Random | None = None,
     cancelled: Callable[[], bool] | None = None,
+    budget_scope: str | None = None,
 ) -> tuple[str, str]:
     """Have the chair choose tonight's topic; fall back to the focus itself."""
     spark = pick_spark(rng)
@@ -1614,14 +2140,14 @@ def _pick_topic(
         {"role": "system", "content": council_contract(chair, runtime.models)},
         {"role": "user", "content": topic_prompt(plan, recent_titles, spark)},
     ]
-    response = runtime.client().chat(
+    response = runtime._call_model(
         messages,
-        [],
         model,
-        context_length=COUNCIL_CONTEXT_LENGTH,
-        think=effort,
+        effort,
+        budget_scope=str(budget_scope or f"council:{uuid.uuid4().hex}"),
+        profile="council-topic",
         temperature=0.8,
-        cancellation_guard=cancelled,
+        cancelled=cancelled,
     )
     text = str(response.get("content", "") or "") if isinstance(response, dict) else str(response or "")
     topic = parse_topic(text)

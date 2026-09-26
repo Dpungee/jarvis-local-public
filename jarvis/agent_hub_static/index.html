@@ -1,0 +1,106 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="color-scheme" content="dark">
+<title>JARVIS · Agent Hub</title>
+<link rel="stylesheet" href="/hub.css">
+</head>
+<body>
+<div class="app">
+  <!-- Sidebar: everything here belongs to the agent chosen in the picker. -->
+  <aside id="hub-sidebar" class="sidebar" aria-label="Agent workspace">
+    <div class="picker">
+      <button id="agent-picker" type="button" aria-haspopup="menu" aria-expanded="false"></button>
+      <div id="agent-menu" class="menu picker-menu" role="menu" hidden></div>
+    </div>
+    <label class="side-search"><span class="sr-only">Filter conversations</span><input id="chat-filter" type="search" placeholder="Search conversations" autocomplete="off"></label>
+    <div class="side-heading">Workspace</div>
+    <div id="space-links" class="space-links"></div>
+    <div class="side-heading">Folder</div>
+    <div id="project-tree"></div>
+    <div class="side-heading">Conversations</div>
+    <div id="conversation-tree"><p class="note">Choose an agent to see its conversations.</p></div>
+    <div class="side-foot">
+      <a href="#/overview">All agents</a>
+      <a href="#/settings">Settings</a>
+      <span class="spacer"></span>
+      <span id="connection" class="connection" role="status" aria-live="polite" title="Connecting…"><i></i><span class="sr-only">Connecting…</span></span>
+    </div>
+  </aside>
+
+  <main class="main">
+    <header class="main-head">
+      <button id="sidebar-toggle" type="button" aria-label="Toggle sidebar" aria-expanded="false" aria-controls="hub-sidebar">☰</button>
+      <div id="main-title" class="main-title"></div>
+      <span class="spacer"></span>
+      <span id="provider-chips" class="provider-chips"></span>
+      <button id="details-toggle" type="button" class="ghost" aria-controls="details" aria-expanded="true" title="Agent details">◧</button>
+    </header>
+    <div id="view" class="view" tabindex="-1" aria-live="polite"></div>
+  </main>
+
+  <!-- Agent profile, tasks, access and schedules (the Muse-style right panel). -->
+  <aside id="details" class="details" aria-label="Agent details"></aside>
+</div>
+
+<!-- A running app the agent built and verified. It is framed from its own loopback address,
+     outside the chat view, so it is isolated from this page and never reloaded by polling. -->
+<aside id="app-panel" class="app-panel" hidden aria-labelledby="app-panel-title">
+  <div class="app-panel-head">
+    <strong id="app-panel-title">App preview</strong><span id="app-panel-state" class="tag"></span>
+    <span class="spacer"></span>
+    <a id="app-panel-newtab" target="_blank" rel="noopener noreferrer">Open in new tab ↗</a>
+    <button id="app-panel-reload" type="button">Reload</button>
+    <button id="app-panel-power" type="button">Stop</button>
+    <button id="app-panel-close" type="button" class="icon" aria-label="Close preview panel">×</button>
+  </div>
+  <div id="app-panel-frame" class="app-panel-frame"></div>
+  <p id="app-panel-note" class="note"></p>
+</aside>
+
+<div id="item-menu" class="menu" role="menu" hidden></div>
+
+<dialog id="agent-dialog" aria-labelledby="agent-dialog-title">
+  <form id="agent-form" method="dialog" class="dialog-body">
+    <div class="dialog-head"><h2 id="agent-dialog-title">New agent</h2><button type="button" class="icon" data-close aria-label="Close">×</button></div>
+    <div class="form-grid">
+      <label>Name<input name="name" required maxlength="120" autocomplete="off" placeholder="e.g. Atlas"></label>
+      <label>Role<input name="role" required maxlength="200" autocomplete="off" placeholder="e.g. Research analyst"></label>
+      <label class="wide">Purpose<input name="purpose" maxlength="4000" autocomplete="off" placeholder="What this agent is for"></label>
+      <label class="wide" hidden>Instructions<textarea name="instructions" maxlength="8000" rows="3"></textarea></label>
+      <label>Provider<select name="provider" id="agent-provider"></select></label>
+      <label>Model<select name="model" id="agent-model"></select></label>
+      <p id="agent-model-note" class="note wide"></p>
+      <label class="wide">Project<select name="project_id" id="agent-project"></select></label>
+      <fieldset class="wide permissions"><legend>What this agent may do</legend><div id="agent-permissions"></div>
+        <p class="note">Sensitive actions still ask you first.</p></fieldset>
+      <label class="check wide"><input type="checkbox" name="enable" checked> Enable chat (no model is called until you send a message)</label>
+    </div>
+    <div class="dialog-actions"><button type="button" data-close>Cancel</button><button class="primary" type="submit">Create agent</button></div>
+  </form>
+</dialog>
+
+<dialog id="preview-dialog" aria-labelledby="preview-title" class="wide-dialog">
+  <div class="dialog-body">
+    <div class="dialog-head"><h2 id="preview-title">Preview</h2><button type="button" class="icon" data-close aria-label="Close">×</button></div>
+    <div id="preview-meta" class="note"></div>
+    <div class="tabs" id="preview-tabs"></div>
+    <div id="preview-body" class="preview-body"></div>
+  </div>
+</dialog>
+
+<dialog id="pair-dialog" aria-labelledby="pair-title">
+  <form id="pair-form" method="dialog" class="dialog-body">
+    <div class="dialog-head"><h2 id="pair-title">Pair this device</h2></div>
+    <p class="note">Create a one-time code on the JARVIS host with<br><code>python -m jarvis.agent_hub pairing --label "my phone"</code><br>then enter it here. The code works once and expires after ten minutes.</p>
+    <label>Pairing code<input name="code" required autocomplete="one-time-code" inputmode="text" maxlength="64"></label>
+    <div class="dialog-actions"><button class="primary" type="submit">Pair</button></div>
+  </form>
+</dialog>
+
+<div id="toast" role="status" aria-live="polite"></div>
+<script src="/hub.js"></script>
+</body>
+</html>

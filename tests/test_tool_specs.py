@@ -37,7 +37,7 @@ EXPECTED_TOOL_NAMES = (
     "move_path", "trash_path", "search_files", "detect_project",
     "install_project_dependencies", "run_process", "start_process",
     "process_status", "process_logs", "stop_process", "http_health",
-    "remember", "recall", "session_search", "screen_companion_status",
+    "web_app_check", "remember", "recall", "session_search", "screen_companion_status",
     "screen_companion_control", "schedule_create", "schedule_list",
     "schedule_set_enabled", "schedule_delete", "connector_list",
     "connector_describe", "connector_validate", "connector_install",
@@ -54,7 +54,7 @@ EXPECTED_TOOL_NAMES = (
     "photoshop_remove_background", "launch_artifact",
 )
 EXPECTED_SCHEMA_SHA256 = (
-    "d28091c2abf10c273df8573ebfcb657340a2c64927bfa38d7dfe517006fc23ed"
+    "1029ade4eb5aeabb211f8e7a6271274156d5adef3e2c507fdfc2c49166649786"
 )
 
 

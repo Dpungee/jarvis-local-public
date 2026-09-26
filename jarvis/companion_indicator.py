@@ -16,6 +16,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from .local_broker import LocalBrokerClient, LocalBrokerError, validate_pipe_name
 from .screen_companion import (
     COMPANION_INDICATOR_TITLE,
     COMPANION_SUGGESTION_TTL_SECONDS,
@@ -175,7 +176,14 @@ def indicator_should_be_visible(state: dict[str, Any] | None) -> bool:
 class CompanionIndicatorClient:
     """Minimal loopback client that never requests titles, rules, or screen data."""
 
-    def __init__(self, host: str, port: int, *, timeout: float = 2.0) -> None:
+    def __init__(
+        self,
+        host: str,
+        port: int,
+        *,
+        timeout: float = 2.0,
+        pipe_name: str | None = None,
+    ) -> None:
         normalized_host = str(host).strip().casefold()
         if normalized_host not in {"127.0.0.1", "localhost", "::1"}:
             raise ValueError("Companion indicator host must be loopback")
@@ -185,8 +193,47 @@ class CompanionIndicatorClient:
         self.base_url = f"http://{authority}:{port}"
         self.timeout = max(0.25, min(float(timeout), 10.0))
         self._opener = urllib.request.build_opener(_NoRedirectHandler()).open
+        # When Presence names its authenticated broker pipe, every request goes
+        # through it and the loopback HTTP path is never used.
+        self._pipe = (
+            LocalBrokerClient(validate_pipe_name(pipe_name), timeout=self.timeout)
+            if pipe_name
+            else None
+        )
+
+    @staticmethod
+    def _broker_route(path: str, payload: dict[str, Any] | None) -> tuple[str, dict[str, Any]]:
+        """Map the indicator's HTTP routes onto the closed broker request kinds."""
+        if path == "/api/screen-companion/indicator" and payload is None:
+            return "companion.indicator", {}
+        if path == "/api/screen-companion/control" and payload is not None:
+            return "companion.control", dict(payload)
+        suggestion = re.fullmatch(
+            r"/api/screen-companion/suggestions/([0-9a-f]{32})/(accept|dismiss)", path
+        )
+        if suggestion and payload is not None:
+            return "companion.suggestion", {
+                "id": suggestion.group(1),
+                "accept": suggestion.group(2) == "accept",
+            }
+        action = re.fullmatch(r"/api/screen-companion/actions/([0-9a-f]{32})", path)
+        if action and payload is None:
+            return "companion.action", {"id": action.group(1)}
+        raise RuntimeError("Companion indicator request is not available over the local broker")
+
+    def _broker_request(self, path: str, payload: dict[str, Any] | None) -> dict[str, Any]:
+        kind, body = self._broker_route(path, payload)
+        try:
+            decoded = self._pipe.call(kind, body)
+        except LocalBrokerError as exc:
+            raise RuntimeError(f"Presence broker request failed: {exc}") from None
+        if not isinstance(decoded, dict):
+            raise RuntimeError("Presence returned an invalid indicator response")
+        return decoded
 
     def _request(self, path: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
+        if self._pipe is not None:
+            return self._broker_request(path, payload)
         body = None
         headers = {"Accept": "application/json"}
         method = "GET"
@@ -840,7 +887,9 @@ class CompanionIndicatorApp:
         self.root.mainloop()
 
 
-def start_indicator_process(host: str, port: int) -> subprocess.Popen[bytes] | None:
+def start_indicator_process(
+    host: str, port: int, *, pipe_name: str | None = None
+) -> subprocess.Popen[bytes] | None:
     if os.name != "nt":
         return None
     executable = Path(sys.executable)
@@ -852,6 +901,8 @@ def start_indicator_process(host: str, port: int) -> subprocess.Popen[bytes] | N
         "--port", str(port),
         "--parent-pid", str(os.getpid()),
     ]
+    if pipe_name is not None:
+        command.extend(["--pipe", validate_pipe_name(pipe_name)])
     try:
         return subprocess.Popen(
             command,
@@ -883,6 +934,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8787)
     parser.add_argument("--parent-pid", type=int, required=True)
+    parser.add_argument("--pipe", default=None)
     args = parser.parse_args(argv)
     if os.name != "nt" or not _parent_is_alive(args.parent_pid):
         return 0
@@ -890,7 +942,7 @@ def main(argv: list[str] | None = None) -> int:
     if mutex is None:
         return 0
     try:
-        client = CompanionIndicatorClient(args.host, args.port)
+        client = CompanionIndicatorClient(args.host, args.port, pipe_name=args.pipe)
         CompanionIndicatorApp(client, args.parent_pid).run()
     except (ImportError, RuntimeError, ValueError):
         return 1

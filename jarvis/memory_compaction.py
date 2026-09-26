@@ -1915,7 +1915,7 @@ def fit_history_rows(
 # 11. The runtime pin
 # ---------------------------------------------------------------------------
 
-#: The four files the sealed M5 holdout pins (design 4.3), in a fixed order.
+#: The original M5 pin (design 4.3) plus extracted memory implementations.
 #: ``jarvis/agent.py`` is deliberately not among them: with ruling H-5 applied
 #: nothing in the fixture depends on assembled agent output.
 COMPACTION_RUNTIME_FILES: tuple[str, ...] = (
@@ -1923,11 +1923,31 @@ COMPACTION_RUNTIME_FILES: tuple[str, ...] = (
     "jarvis/memory_compaction.py",
     "jarvis/memory_spine.py",
     "jarvis/redaction.py",
+    "jarvis/memory_retrieval.py",
+    "jarvis/memory_embeddings.py",
+    "jarvis/memory_runtime.py",
+    "jarvis/memory_schema_migrations.py",
+    "jarvis/memory_projects_budget.py",
+    "jarvis/memory_predictions.py",
+    "jarvis/memory_conversations.py",
+    "jarvis/memory_presence_companion.py",
+    "jarvis/memory_ordinary_recall.py",
+    "jarvis/memory_claims.py",
+    "jarvis/memory_embedding_store.py",
+    "jarvis/memory_lessons.py",
+    "jarvis/memory_strategy_transfer.py",
+    "jarvis/memory_strategy_trial.py",
+    "jarvis/memory_tasks_scheduling.py",
+    "jarvis/memory_operator_state.py",
+    "jarvis/memory_approvals.py",
+    "jarvis/memory_learning_ladder.py",
+    "jarvis/memory_governance.py",
+    "jarvis/memory_conversation_compaction.py",
 )
 
 
 def compaction_runtime_sha256(root: Path | None = None) -> str:
-    """The sealed holdout's runtime pin: canonical JSON of four file digests.
+    """The sealed holdout's runtime pin: canonical JSON of implementation digests.
 
     Same shape as ``learning_ladder.learning_ladder_runtime_sha256``, so the
     reseal tool's fourth cascade is the third one with the names changed.

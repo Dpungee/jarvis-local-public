@@ -368,6 +368,66 @@ store without the projection. See [The temporal graph](MEMORY_GRAPH.md) for the
 bounds, the identity floors, the widened privacy screen that the graph and the
 history helpers apply, and the operator surfaces.
 
+## Prior conversation excerpts (the transcript recall channel)
+
+A brand-new conversation used to reach what was said in an earlier one only
+through the explicit `session_search` tool, which the model rarely chose: the
+first live public-benchmark runs (`docs/BENCHMARKS.md`) measured 4 tool calls
+in 100 LongMemEval turns and 0 in 50 LoCoMo turns, and every other turn saw an
+empty recall block plus the `not_recorded` cue and declined. The automatic
+read path therefore carries one more channel, `prior_conversation_excerpts`,
+on by default and switched with `JARVIS_MEMORY_TRANSCRIPT_RECALL=false`
+(`Config.memory_transcript_recall`), which restores the earlier prompt byte
+for byte. `session_search` is unchanged and stays the deep explicit search.
+
+`Memory.prior_conversation_excerpts(query, exclude_conversation_id=,
+project_id=)` reads the transcript rows (`messages`, through `message_fts`)
+of **other** conversations in the same store and project; the current
+conversation is never read, because same-conversation recall inflates memory
+scores and is banned. It runs behind the claims lane's query screens (secret,
+private identifier, authority evasion, length), discovers candidates with the
+same staged narrowing the memory lane uses -- OR of every query term, then
+only the terms that discriminate inside the visible scope (counted over that
+scope, everyday terms dropped and named in `dropped_terms`), then every term
+required -- and abstains `unknown-identity` when the question names a
+structured identifier the visible transcripts never mention, so a look-alike
+row is never substituted. The order inside the pool is FTS5's rank; no new
+ranker was added. One deadline covers the whole call (25 ms warm, 40 ms for
+the first read on a store object), checked between stages and after every
+screened row; on expiry what was screened so far is returned with mode
+`budget-exceeded`, never a partial list presented as complete. At most eight
+excerpts are returned, oldest first, each cut to about 600 characters around
+its first matched term and carrying the conversation title, timestamp and
+role. Every excerpt passes the widened private-identifier screen the temporal
+graph uses (`redaction.screen_endpoint`, in overlapping 512-character windows
+so prose is never rejected merely for its length): a phone number, bare IPv4
+or IPv6 host, SSN-like or Luhn-valid card number, street address, e-mail,
+user-home path or secret drops the whole excerpt and is counted in
+`excluded_by_screen`. A governed command (`Remember|Forget|Erase this project
+fact:`) or its receipt is never an excerpt (`excluded_governed`): those facts
+live in the claims lane, which outranks this channel, so an erased value does
+not return through the transcript of the command that stored it.
+
+In the prompt the block renders **after** `temporal_claims` (in the dialogue
+lane it is re-attached to the user turn in that order too), under a heading
+that says the entries are earlier conversations rather than stored facts. Its
+one guidance line replaces the `not_recorded` cue whenever excerpts exist: the
+model is told to answer from the excerpts and quote their dates, that a later
+date supersedes an earlier one on the same point, that a `temporal_claims`
+fact outranks every excerpt, and to say the earlier conversations do not cover
+the question rather than guess. When the claims lane, the graph and this
+channel are all empty the cue fires exactly as before. An excerpt never
+becomes a claim, a memory or a receipt. `Memory.recall_report()["transcript"]`
+(also `Memory.transcript_recall_report()`) records the read: `mode` (`or`,
+`narrowed`, `all-terms`, `like`, `screened`, `empty`, `project-unavailable`,
+`unknown-identity`, `overflow`, `error`, `budget-exceeded`), `candidates`,
+`returned`, `budget_ms` / `elapsed_ms` / `budget`, `dropped_terms`,
+`unknown_terms`, `excluded_by_screen`, `excluded_governed`, `abstained` and
+`reason`, so an empty block is never silent. Rows a typed-invariant compaction
+replaced are no longer transcript rows and are not reachable through this
+channel; a question that carries explicit prior-session intent ("in an earlier
+conversation ...") still routes to the `session_search` tool as before.
+
 ## Read path locking and scale
 
 `current_claims` reads in one deferred snapshot and never takes the write lock.

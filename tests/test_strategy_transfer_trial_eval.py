@@ -18,8 +18,8 @@ FIXTURE = (
     / "evaluation_fixtures"
     / "strategy_transfer_trial_holdout_v1.json"
 )
-ARTIFACT_SHA256 = "0e54c5f63f638a8ba24e5221630ec3829a5bfcf25716924c8b9e4ffe4cd05e30"
-MANIFEST_SHA256 = "8b1eeca6cfd67ef5dbad0aeda4be25733449403aa4b3fe361fd7184eb7a8edfb"
+ARTIFACT_SHA256 = "d16c0e0eeb30a9d8be1a19026f3c4c4f43b333a92279f3cd42a050cfe403805a"
+MANIFEST_SHA256 = "d08d4a048ae04e8dd767df56ecb94cb8588815e5f3fa0e3830ec0e2df4ceed37"
 EVALUATOR_SHA256 = "1998d4f177bb2a8f10b0fcdee162aec4a3e681c82d2b97b31a8df55b38c1dc8b"
 
 

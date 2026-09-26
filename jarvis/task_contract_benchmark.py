@@ -5,6 +5,8 @@ import json
 import math
 import tempfile
 import time
+from copy import deepcopy
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Mapping, Protocol, Sequence
@@ -28,6 +30,18 @@ from .task_contract_eval import (
 
 
 _SERVED_MODEL_ATTESTATION_PROVIDERS = frozenset({"openai", "anthropic", "ollama"})
+
+DEFAULT_BENCHMARK_OLLAMA_BASE_URL = "http://127.0.0.1:11434"
+
+
+class BenchmarkProviderError(RuntimeError):
+    """The requested provider cannot back an exact-model benchmark run.
+
+    Raised before the first provider call.  A provider that cannot attest the
+    served model produces a full receipt of ``model_unattested`` rows, which
+    reads like a measurement and is not one; failing at startup with the reason
+    keeps that outcome impossible to reach by accident.
+    """
 
 
 class TaskContractBenchmarkClient(Protocol):
@@ -76,6 +90,250 @@ def _exact_model_reference(model: str) -> tuple[str, str, str]:
     if not provider_model or provider_model.casefold() == "auto":
         raise ValueError("live TaskContract benchmark does not accept an auto model")
     return requested, provider, provider_model
+
+
+def _model_client_class() -> type:
+    """Import ``ModelClient`` lazily; this module must stay import-light."""
+    from .model_client import ModelClient
+
+    return ModelClient
+
+
+class _DelegatingBenchmarkClient:
+    """Forward every unknown attribute to the wrapped client.
+
+    ``Agent`` reaches through its client for more than ``chat``: it calls
+    ``models(refresh=True)`` in ``__init__`` (agent.py:6024, catching only
+    ``TypeError`` - an ``AttributeError`` from a wrapper aborts construction),
+    looks up ``preload`` (:6032) and ``supports_thinking`` (:7456), and reads
+    generation metadata off the response.  Anything that wraps a client on the
+    benchmark path has to stay transparent for all of it.
+    """
+
+    _client: Any
+
+    def __getattr__(self, name: str) -> Any:
+        # Only reached when normal lookup fails, so wrapper-owned attributes
+        # always win and a partially constructed wrapper cannot recurse.
+        client = self.__dict__.get("_client")
+        if client is None:
+            raise AttributeError(name)
+        return getattr(client, name)
+
+
+class RequestRecordingBenchmarkClient(_DelegatingBenchmarkClient):
+    """Record what a client was actually asked to send, and change nothing else.
+
+    ``_observed_tool_names`` reads ``client.requests``.  No production client
+    keeps such a list, so an outcome run against a real provider observes an
+    empty offered-tool set for every case and reports tool exposure of zero -
+    a measurement artefact, not agent behaviour.  This wrapper is the
+    instrumentation that closes that gap.
+
+    It is deliberately inert with respect to the response: the provider's own
+    object is returned unchanged, so ``model`` and ``model_attested`` reach the
+    receipt exactly as the provider set them.  Instrumentation must never
+    become a place where attestation is synthesised.
+
+    Benchmark-only.  Nothing in the shipped agent, CLI, or tool paths
+    constructs it.
+    """
+
+    _RESERVED_RECORD_KEYS = frozenset({"messages", "tools", "model", "streamed"})
+
+    def __init__(self, client: Any) -> None:
+        self._client = client
+        self.requests: list[dict[str, Any]] = []
+        # ``Agent._resolve_task_contract`` (agent.py:8096-8100) engages the
+        # resolver only for a ``ModelClient`` or a client that opts in with
+        # this flag.  Wrapping breaks the isinstance test, so without this the
+        # instrumentation would silently switch the very feature under
+        # measurement to "not_supported".  The flag mirrors the wrapped
+        # client's own capability and never asserts more than it has.
+        self.supports_task_contract = bool(
+            isinstance(client, _model_client_class())
+            or getattr(client, "supports_task_contract", False)
+        )
+        if callable(getattr(client, "chat_stream", None)):
+            # Bind explicitly rather than relying on delegation: ``__getattr__``
+            # would hand back the wrapped client's own ``chat_stream``, and every
+            # streamed call would then bypass the recorder and go unrecorded.
+            # The binding is per instance so that a client without streaming is
+            # not given one it does not have.
+            self.chat_stream = self._recording_chat_stream
+
+    @property
+    def wrapped(self) -> Any:
+        """The underlying client, for callers that must reach past the wrapper."""
+        return self._client
+
+    def _record(
+        self,
+        messages: Any,
+        tools: Any,
+        model: Any,
+        streamed: bool,
+        kwargs: Mapping[str, Any],
+    ) -> None:
+        record: dict[str, Any] = {
+            "messages": messages,
+            "tools": tools,
+            "model": model,
+            "streamed": streamed,
+        }
+        for key, value in kwargs.items():
+            if key not in self._RESERVED_RECORD_KEYS:
+                record[key] = value
+        self.requests.append(record)
+
+    def chat(
+        self,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]],
+        model: str | None = None,
+        **kwargs: Any,
+    ) -> Any:
+        self._record(messages, tools, model, False, kwargs)
+        return self._client.chat(messages, tools, model, **kwargs)
+
+    def _recording_chat_stream(
+        self,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]],
+        model: str | None,
+        on_delta: Callable[[str], None],
+        **kwargs: Any,
+    ) -> Any:
+        # ``on_delta`` is a live callback owned by the caller, not request
+        # content, and is deliberately not retained by the recorder.
+        self._record(messages, tools, model, True, kwargs)
+        return self._client.chat_stream(messages, tools, model, on_delta, **kwargs)
+
+
+class ExactModelBenchmarkClient(_DelegatingBenchmarkClient):
+    """Dispatch one exact ``provider:model`` reference to a real client.
+
+    The benchmark passes the full reference (``ollama:qwen3.5:9b``) on every
+    call because its receipt is an exact-model claim.  Production clients take
+    a bare provider model name and fall back to their own configured default
+    when it is missing or unknown, so the reference has to be translated
+    somewhere.  Doing it here keeps the fallback impossible: the adapter
+    accepts only the reference it was built for, and always names the model
+    explicitly on the wire.
+    """
+
+    def __init__(
+        self,
+        *,
+        requested_model: str,
+        provider: str,
+        provider_model: str,
+        client: Any,
+        provider_version: str | None = None,
+    ) -> None:
+        self.requested_model = requested_model
+        self.provider = provider
+        self.provider_model = provider_model
+        self.provider_version = provider_version
+        self._client = client
+        # Carried for the same reason as on the recorder, so that a stacked
+        # recorder(adapter(client)) still reports the wrapped client's real
+        # capability rather than losing it at the inner layer.
+        self.supports_task_contract = bool(
+            isinstance(client, _model_client_class())
+            or getattr(client, "supports_task_contract", False)
+        )
+
+    @property
+    def wrapped(self) -> Any:
+        return self._client
+
+    def chat(
+        self,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]],
+        model: str,
+        **kwargs: Any,
+    ) -> Any:
+        requested = str(model).strip()
+        if requested not in {self.requested_model, self.provider_model}:
+            raise BenchmarkProviderError(
+                "the exact-model benchmark adapter was asked for a model it was "
+                "not built for; a run must never measure a model its receipt "
+                "does not name"
+            )
+        return self._client.chat(messages, tools, self.provider_model, **kwargs)
+
+
+def build_exact_model_benchmark_client(
+    model: str,
+    *,
+    base_url: str | None = None,
+    client_factory: Callable[[str, str], Any] | None = None,
+) -> ExactModelBenchmarkClient:
+    """Bind one attesting provider to one exact model, or fail at startup.
+
+    Only providers that can attest the served model are accepted, and the
+    check happens before any network call: an unattestable reference raises
+    ``BenchmarkProviderError`` naming attestation instead of producing a
+    receipt full of ``model_unattested`` rows.
+
+    Ollama is the only provider this function constructs, matching the Phase 2
+    provider ruling.  ``openai`` and ``anthropic`` are structurally supported -
+    they clear the attestation gate and work through ``client_factory`` - but
+    this function never reads an API key, an environment credential, or a
+    dotenv file to build one; a caller that wants a cloud client supplies it.
+    """
+    requested_model, provider, provider_model = _exact_model_reference(model)
+    if provider not in _SERVED_MODEL_ATTESTATION_PROVIDERS:
+        raise BenchmarkProviderError(
+            f"provider '{provider}' cannot attest which model actually served a "
+            "response, so this benchmark would record only unattested rows; "
+            "select a provider that attests the served model"
+        )
+    provider_version: str | None = None
+    if client_factory is not None:
+        client = client_factory(provider, provider_model)
+    elif provider == "ollama":
+        from .ollama_client import OllamaClient
+
+        client = OllamaClient(
+            base_url or DEFAULT_BENCHMARK_OLLAMA_BASE_URL,
+            provider_model,
+        )
+        installed = {str(name) for name in client.models(refresh=True)}
+        if provider_model not in installed:
+            raise BenchmarkProviderError(
+                "the requested Ollama model is not installed on this host; "
+                "install it before recording benchmark evidence"
+            )
+        provider_version = client.version()
+    else:
+        raise BenchmarkProviderError(
+            f"provider '{provider}' attests the served model but this runner "
+            "does not construct cloud clients or read credentials; supply one "
+            "through client_factory"
+        )
+    return ExactModelBenchmarkClient(
+        requested_model=requested_model,
+        provider=provider,
+        provider_model=provider_model,
+        client=client,
+        provider_version=provider_version,
+    )
+
+
+@dataclass(frozen=True)
+class LiveTaskContractRun:
+    """A live resolver run's receipt plus its in-memory contract predictions.
+
+    The predictions are the resolver's parsed contracts.  They quote operator
+    text and are therefore returned to the caller only - the receipt stays
+    prompt-free and is the only thing this module's callers write to disk.
+    """
+
+    receipt: dict[str, Any]
+    predictions: tuple[dict[str, Any], ...]
 
 
 def _pending_contract(case: Mapping[str, Any]) -> TaskContract | None:
@@ -232,7 +490,8 @@ def run_live_task_contract_benchmark(
     allow_live: bool = False,
     clock: Callable[[], float] = time.perf_counter,
     created_at: str | None = None,
-) -> dict[str, Any]:
+    return_predictions: bool = False,
+) -> dict[str, Any] | LiveTaskContractRun:
     """Run the frozen resolver holdout with one exact model and no side effects.
 
     This function is deliberately not wired into the ordinary CLI, agent, memory,
@@ -240,6 +499,12 @@ def run_live_task_contract_benchmark(
     receives exactly one direct ``client.chat`` call with an empty tool list.  The
     returned receipt contains case IDs, status, latency, and boolean checks only;
     prompts, model output, contracts, and provider error text are never retained.
+
+    With ``return_predictions=True`` the caller additionally receives the parsed
+    contracts as a :class:`LiveTaskContractRun`, so a composed outcome run can
+    reuse them without paying for 66 more calls.  The receipt is byte-identical
+    either way: predictions are handed to the caller in memory and are never
+    written into it, because they quote operator text.
     """
     if allow_live is not True:
         raise PermissionError("live TaskContract benchmark requires allow_live=True")
@@ -370,6 +635,14 @@ def run_live_task_contract_benchmark(
     # This detects accidental corruption only.  It is intentionally named a
     # checksum because an unkeyed hash can be recomputed after tampering.
     receipt["receipt_checksum_sha256"] = _receipt_checksum_sha256(receipt)
+    if return_predictions:
+        # Deep copy: the predictions carry mutable lists (constraint quotes,
+        # acceptance), and a caller editing one must not reach back into the
+        # rows this run scored.
+        return LiveTaskContractRun(
+            receipt=receipt,
+            predictions=tuple(deepcopy(item) for item in predictions),
+        )
     return receipt
 
 

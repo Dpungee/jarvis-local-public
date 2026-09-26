@@ -14,6 +14,7 @@ import json
 import sqlite3
 import time
 import unittest
+from unittest.mock import patch
 from pathlib import Path
 
 from jarvis import (
@@ -286,14 +287,35 @@ class BoundaryCopyTests(unittest.TestCase):
 
 
 class RuntimePinTests(unittest.TestCase):
-    def test_the_pin_covers_exactly_the_four_files(self) -> None:
+    def test_the_pin_covers_original_and_extracted_files(self) -> None:
         self.assertEqual(
             graph.MEMORY_GRAPH_RUNTIME_FILES,
-            ("memory.py", "memory_graph.py", "memory_retrieval.py", "redaction.py"),
+            (
+                "memory.py", "memory_graph.py", "memory_retrieval.py", "redaction.py",
+                "memory_embeddings.py",
+                "memory_runtime.py",
+                "memory_schema_migrations.py",
+                "memory_projects_budget.py",
+                "memory_predictions.py",
+                "memory_conversations.py",
+                "memory_presence_companion.py",
+                "memory_ordinary_recall.py",
+                "memory_claims.py",
+                "memory_embedding_store.py",
+                "memory_lessons.py",
+                "memory_strategy_transfer.py",
+                "memory_strategy_trial.py",
+                "memory_tasks_scheduling.py",
+                "memory_operator_state.py",
+                "memory_approvals.py",
+                "memory_learning_ladder.py",
+                "memory_governance.py",
+                "memory_conversation_compaction.py",
+            ),
         )
         self.assertNotIn("agent.py", graph.MEMORY_GRAPH_RUNTIME_FILES)
 
-    def test_the_digest_is_the_canonical_json_of_the_four_file_digests(self) -> None:
+    def test_the_digest_is_the_canonical_json_of_the_registered_file_digests(self) -> None:
         package = Path(graph.__file__).resolve().parent
         material = {
             name: hashlib.sha256((package / name).read_bytes()).hexdigest()
@@ -1197,11 +1219,16 @@ class OverflowProbeTests(GraphTestCase):
 
     def test_a_hub_still_overflows_and_a_small_fan_out_still_answers(self) -> None:
         self._hub(graph.FANOUT_CAP + 5)
-        overflowed = self.ask("", ["Alpha hub"])
+        # This tests the fan-out decision, not host scheduling latency. Deadline
+        # enforcement has separate expired/advancing-clock regressions below.
+        with patch.object(graph.time, "monotonic", return_value=100.0):
+            overflowed = self.ask("", ["Alpha hub"])
         self.assertEqual(overflowed["report"]["mode"], "overflow")
+        self.db.close()
         self.setUp()
         self._hub(3)
-        answered = self.ask("", ["Alpha hub"])
+        with patch.object(graph.time, "monotonic", return_value=100.0):
+            answered = self.ask("", ["Alpha hub"])
         self.assertEqual(answered["report"]["mode"], "complete")
         self.assertEqual(len(answered["rows"]), 3)
 

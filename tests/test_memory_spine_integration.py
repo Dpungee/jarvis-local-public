@@ -321,7 +321,7 @@ class MemorySpineIntegrationTests(_SpineStoreCase):
     # --- schema, key, lineage -------------------------------------------------
 
     def test_fresh_store_is_at_48_with_a_key_sidecar_and_a_genesis_event(self) -> None:
-        self.assertEqual(SCHEMA_VERSION, 50)
+        self.assertEqual(SCHEMA_VERSION, 54)
         self.assertEqual(
             self.memory.db.execute("PRAGMA user_version").fetchone()[0], SCHEMA_VERSION
         )
@@ -1274,7 +1274,10 @@ class MemorySpineSliceTwoTests(_SpineStoreCase):
         self.memory.close()
         self._downgrade_to_46(drop_column=True)
         self.memory = Memory(self.db_path)
-        self.assertEqual(self.memory.db.execute("PRAGMA user_version").fetchone()[0], 50)
+        self.assertEqual(
+            self.memory.db.execute("PRAGMA user_version").fetchone()[0],
+            SCHEMA_VERSION,
+        )
         # The re-migration re-projects the graph and receipts exactly that:
         # one projection.rebuilt, and no re-import of any memory or claim.
         self.assertEqual(self._event_count(), events_before + 1)
@@ -1325,7 +1328,10 @@ class MemorySpineSliceTwoTests(_SpineStoreCase):
         raw.commit()
         raw.close()
         self.memory = Memory(self.db_path)
-        self.assertEqual(self.memory.db.execute("PRAGMA user_version").fetchone()[0], 50)
+        self.assertEqual(
+            self.memory.db.execute("PRAGMA user_version").fetchone()[0],
+            SCHEMA_VERSION,
+        )
         self.assertNotIn("memory.imported", self._kinds())
         verification = self.memory.verify_spine()
         self.assertTrue(verification["ok"], verification["problems"])
@@ -1343,7 +1349,10 @@ class MemorySpineSliceTwoTests(_SpineStoreCase):
         self.memory.db.execute("PRAGMA user_version=45")
         self.memory.close()
         self.memory = Memory(self.db_path)
-        self.assertEqual(self.memory.db.execute("PRAGMA user_version").fetchone()[0], 50)
+        self.assertEqual(
+            self.memory.db.execute("PRAGMA user_version").fetchone()[0],
+            SCHEMA_VERSION,
+        )
         kinds = self._kinds()
         self.assertEqual(kinds.count("claim.imported"), 3)
         self.assertEqual(kinds.count("memory.imported"), 3)

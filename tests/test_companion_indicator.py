@@ -1,6 +1,11 @@
 from __future__ import annotations
 
 import unittest
+from jarvis import companion_indicator
+from jarvis.local_broker import PIPE_PREFIX, LocalBrokerServer
+from unittest.mock import patch
+import uuid
+import os
 from types import SimpleNamespace
 from unittest import mock
 
@@ -149,3 +154,92 @@ class CompanionIndicatorTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+@unittest.skipUnless(os.name == "nt", "named pipes exist only on Windows")
+class CompanionIndicatorBrokerTests(unittest.TestCase):
+    def test_start_indicator_process_passes_the_broker_pipe(self):
+        captured: dict[str, list[str]] = {}
+
+        def fake_popen(command, **_kwargs):
+            captured["command"] = list(command)
+            return SimpleNamespace(poll=lambda: None)
+
+        name = PIPE_PREFIX + "jarvis-test-" + uuid.uuid4().hex[:16]
+        with patch("jarvis.companion_indicator.subprocess.Popen", fake_popen):
+            companion_indicator.start_indicator_process("127.0.0.1", 8787, pipe_name=name)
+            command = captured["command"]
+            self.assertIn("--pipe", command)
+            self.assertEqual(command[command.index("--pipe") + 1], name)
+            companion_indicator.start_indicator_process("127.0.0.1", 8787)
+            self.assertNotIn("--pipe", captured["command"])
+            with self.assertRaises(ValueError):
+                companion_indicator.start_indicator_process("127.0.0.1", 8787, pipe_name="not-a-pipe")
+
+    def test_client_uses_the_broker_for_every_indicator_operation(self):
+        name = PIPE_PREFIX + "jarvis-test-" + uuid.uuid4().hex[:16]
+        seen: list[tuple[str, dict]] = []
+        state = {
+            "mode": "observe",
+            "paused": False,
+            "available": True,
+            "updated_at": "now",
+            "suggestion": None,
+        }
+
+        def handler(request):
+            seen.append((request["kind"], dict(request["payload"])))
+            kind = request["kind"]
+            if kind == "companion.indicator":
+                return dict(state)
+            if kind == "companion.control":
+                return {"state": {**state, "mode": request["payload"].get("mode") or "observe"}}
+            if kind == "companion.suggestion":
+                return {"accepted": bool(request["payload"].get("accept"))}
+            if kind == "companion.action":
+                return {
+                    "action": {
+                        "job_id": request["payload"]["id"],
+                        "state": "running",
+                        "message": "Working",
+                        "terminal": False,
+                    }
+                }
+            raise LookupError(kind)
+
+        server = LocalBrokerServer(name, handler)
+        server.start()
+        self.addCleanup(server.stop)
+        client = CompanionIndicatorClient("127.0.0.1", 8787, pipe_name=name)
+        self.assertEqual(client.status()["mode"], "observe")
+        self.assertEqual(client.control("mode", mode="suggest")["mode"], "suggest")
+        self.assertEqual(client.respond_suggestion("a" * 32, accept=True), {"accepted": True})
+        self.assertEqual(client.action_status("b" * 32)["state"], "running")
+        self.assertEqual(
+            [kind for kind, _ in seen],
+            ["companion.indicator", "companion.control", "companion.suggestion", "companion.action"],
+        )
+        self.assertEqual(seen[0][1], {})
+        self.assertEqual(seen[1][1], {"action": "mode", "mode": "suggest"})
+        self.assertEqual(seen[2][1], {"id": "a" * 32, "accept": True})
+        self.assertEqual(seen[3][1], {"id": "b" * 32})
+        self.assertEqual(server.stats["served"], 4)
+
+    def test_broker_failures_surface_as_runtime_errors_without_http_fallback(self):
+        missing = PIPE_PREFIX + "jarvis-test-" + uuid.uuid4().hex[:16]
+        client = CompanionIndicatorClient("127.0.0.1", 8787, pipe_name=missing)
+        with patch.object(client, "_opener", side_effect=AssertionError("HTTP must not be used")):
+            with self.assertRaisesRegex(RuntimeError, "broker request failed"):
+                client.status()
+
+    def test_routes_outside_the_indicator_surface_never_reach_the_broker(self):
+        for path, payload in (
+            ("/api/status", None),
+            ("/api/screen-companion/forget", {}),
+            ("/api/screen-companion/rules", {"pattern": "x"}),
+            ("/api/screen-companion/indicator", {}),
+            ("/api/screen-companion/control", None),
+        ):
+            with self.subTest(path=path):
+                with self.assertRaises(RuntimeError):
+                    CompanionIndicatorClient._broker_route(path, payload)

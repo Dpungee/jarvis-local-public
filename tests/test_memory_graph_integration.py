@@ -295,7 +295,7 @@ class MigrationTo48Tests(_GraphStoreCase):
         )
 
     def test_a_fresh_store_is_current_with_a_projected_graph(self) -> None:
-        self.assertEqual(SCHEMA_VERSION, 50)
+        self.assertEqual(SCHEMA_VERSION, 54)
         self.assertEqual(
             self._count("SELECT COUNT(*) FROM sqlite_master WHERE type='table' "
                         "AND name IN ('memory_graph_edges','memory_graph_entities',"

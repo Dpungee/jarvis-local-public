@@ -50,6 +50,7 @@ _RESEARCH_BRAND_TERMS = frozenset({
 _DIALOGUE_DYNAMIC_TAGS = (
     "untrusted_memory_records",
     "temporal_claims",
+    "prior_conversation_excerpts",
     "matched_lessons",
     "matched_learned_skills",
 )

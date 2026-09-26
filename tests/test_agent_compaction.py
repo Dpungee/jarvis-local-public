@@ -956,6 +956,11 @@ class GuidanceInvarianceTests(SurfaceTestCase):
         whole: list[str] = []
         for rows in ([], milestone_rows(3, summary=" ".join(GUIDANCE_LITERALS))):
             agent, client = self.make_agent([FakeResponse(content="The port is 9.")])
+            # The transcript recall channel would let the second conversation
+            # quote the first one's turns, which is its job and not what this
+            # closure measures: hold it off so the two elements differ only by
+            # the compacted-history sibling.
+            agent.config = replace(agent.config, memory_transcript_recall=False)
             self.stub_reader(agent, milestone_report(rows))
             conversation_id = self.memory.new_conversation("relay")
             agent.run(

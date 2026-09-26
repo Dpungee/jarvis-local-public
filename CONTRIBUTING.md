@@ -39,3 +39,34 @@ python -m jarvis doctor
 
 Optional provider, document, Drive, and training dependencies are documented in
 `pyproject.toml` and the README.
+
+## Dependency locks
+
+CI installs Python packages only from `requirements/*.txt`. Each file pins one exact
+release per package with the SHA-256 digest of every file PyPI publishes for it, so
+`pip install --require-hashes` resolves to identical bytes on every supported Python
+version and platform. `pyproject.toml` still carries the user-facing version ranges.
+
+Regenerate the locks after changing `pyproject.toml` or when a dependency update is
+wanted, from a fresh virtual environment:
+
+```powershell
+python -m venv .lock-venv
+.lock-venv\Scripts\python -m pip install ".[documents]"
+.lock-venv\Scripts\python -m pip freeze --exclude-editable | Out-File -Encoding utf8 pins.txt
+python scripts/lock_dependencies.py --pins pins.txt --require-python 3.11 --output requirements/runtime-documents.txt
+python scripts/lock_dependencies.py --latest pip --latest setuptools --require-python 3.11 --output requirements/build-backend.txt
+python scripts/lock_dependencies.py --check requirements/runtime-documents.txt
+```
+
+Always pass `--require-python 3.11` (the oldest interpreter in `pyproject.toml`): a
+closure resolved on a newer Python can otherwise pin a release that publishes no wheel
+for the oldest CI leg, and the generator refuses such a pin instead of writing it. If
+the freeze came from a newer interpreter, lower the offending pin by hand and rerun.
+Dependabot can bump one pinned release and recompute its hashes, but it never adds a
+new transitive dependency or refreshes the header; such a change fails closed under
+`--require-hashes` until the locks are regenerated here.
+
+`requirements/ci-tools.txt` is produced the same way from `coverage build pip-audit
+ruff bandit`. `tests/test_dependency_locks.py` fails when a lock no longer satisfies
+`pyproject.toml` or when the workflow installs anything outside the locks.

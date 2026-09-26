@@ -53,7 +53,7 @@ import hashlib
 import json
 import re
 import sys
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 ALLOWED_CHANGED_SUFFIX = "_sha256"
@@ -149,17 +149,46 @@ def serialize(
     ).encode("utf-8")
 
 
-def reseal_per_file_pin(artifact: dict[str, Any], root: Path) -> dict[str, Any]:
+def registered_runtime_files(stem: str) -> tuple[str, ...]:
+    """Read the current holdout family's reviewed runtime coverage registry."""
+    if stem == "learning_ladder":
+        from jarvis.learning_ladder import LADDER_RUNTIME_FILES
+
+        return tuple(LADDER_RUNTIME_FILES)
+    if stem == "memory_graph":
+        from jarvis.memory_graph import MEMORY_GRAPH_RUNTIME_FILES
+
+        return tuple(f"jarvis/{name}" for name in MEMORY_GRAPH_RUNTIME_FILES)
+    return ()
+
+
+def reseal_per_file_pin(
+    artifact: dict[str, Any], root: Path, *, runtime_files: tuple[str, ...] = ()
+) -> dict[str, Any]:
     """Fill a holdout's per-file runtime pin, whichever family it belongs to.
 
     The pin is an ordered object of path -> sha256 of the file bytes, exactly
-    as the holdout test recomputes it; nothing else moves.
+    as the holdout test recomputes it; nothing else moves. Registered files may
+    extend coverage after a structural extraction, but existing pins never drop.
     """
     artifact = json.loads(json.dumps(artifact))
     pin = artifact["runtime_sha256"]
-    for name in list(pin):
+    for name in dict.fromkeys((*pin, *runtime_files)):
+        relative = PurePosixPath(name)
+        if (
+            relative.is_absolute()
+            or relative.as_posix() != name
+            or "\\" in name
+            or not relative.parts
+            or relative.parts[0] != "jarvis"
+            or any(part in {".", ".."} for part in relative.parts)
+            or relative.suffix != ".py"
+        ):
+            raise SystemExit("runtime pin must name a canonical Python source under jarvis/")
         path = root / name
-        if not path.exists():
+        if not path.resolve().is_relative_to(root.resolve()):
+            raise SystemExit("runtime pin resolves outside the selected source root")
+        if not path.is_file():
             raise SystemExit(f"pinned file missing: {name}")
         pin[name] = hashlib.sha256(path.read_bytes()).hexdigest()
     return artifact
@@ -394,7 +423,9 @@ def main(argv: list[str] | None = None) -> None:
             )
             continue
         old_artifact = json.loads(fixture_path.read_text(encoding="utf-8"))
-        new_artifact = reseal_per_file_pin(old_artifact, root)
+        new_artifact = reseal_per_file_pin(
+            old_artifact, root, runtime_files=registered_runtime_files(stem)
+        )
         holdout_changes += check_invariant(
             fixture_path.name, old_artifact, new_artifact
         )

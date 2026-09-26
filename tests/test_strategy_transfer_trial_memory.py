@@ -164,7 +164,7 @@ class StrategyTransferTrialMemoryTests(unittest.TestCase):
         )
 
     def test_v39_migration_and_deterministic_balanced_blocks(self) -> None:
-        self.assertEqual(SCHEMA_VERSION, 50)
+        self.assertEqual(SCHEMA_VERSION, 54)
         with Memory(Path(":memory:")) as memory:
             self.assertEqual(memory.db.execute("PRAGMA user_version").fetchone()[0], SCHEMA_VERSION)
             for table in (

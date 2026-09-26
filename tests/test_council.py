@@ -8,11 +8,15 @@ all pure, and the runtime is exercised against a scripted fake client.
 from __future__ import annotations
 
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
 
 from jarvis import council
+from jarvis.memory import Memory
+from jarvis.ollama_client import ChatResponse
+from jarvis.proactive import RuntimeGuard
 from jarvis.council import (
     CHAIR_KEY,
     COUNCIL_SEATS,
@@ -426,6 +430,216 @@ class RuntimeTests(unittest.TestCase):
         self.assertTrue(client.closed)
 
 
+class GovernedRuntimeTests(unittest.TestCase):
+    class MetricsClient:
+        def __init__(self, *, prompt=12, completion=4, failure=None):
+            self.prompt = prompt
+            self.completion = completion
+            self.failure = failure
+            self.calls = []
+            self.closed = False
+
+        def chat(self, messages, tools, model, **kwargs):
+            self.calls.append((messages, tools, model, kwargs))
+            if self.failure is not None:
+                raise self.failure
+            if self.prompt is None and self.completion is None:
+                return {"role": "assistant", "content": "1. First item"}
+            return ChatResponse(
+                {"role": "assistant", "content": "1. First item"},
+                {
+                    "done": True,
+                    "model": model,
+                    "prompt_eval_count": self.prompt,
+                    "eval_count": self.completion,
+                },
+            )
+
+        def close(self):
+            self.closed = True
+
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory()
+        self.database = Path(self.temporary.name) / "jarvis.db"
+        self.memory = Memory(self.database)
+
+    def tearDown(self):
+        self.memory.close()
+        self.temporary.cleanup()
+
+    def config(self, **overrides):
+        values = {
+            "cloud_enabled": False,
+            "openai_api_enabled": False,
+            "codex_cli_enabled": False,
+            "reasoning_model": "qwen-test",
+            "fast_model": "qwen-test",
+            "model": "qwen-test",
+            "model_call_limit_per_request": 48,
+            "prompt_token_limit_per_request": 400_000,
+            "completion_token_limit_per_request": 40_000,
+            "proactive_max_task_seconds": 1800,
+            "daily_tool_limit": 500,
+        }
+        values.update(overrides)
+        return SimpleNamespace(**values)
+
+    def runtime(self, client, config=None, *, background=False):
+        config = config or self.config()
+        guard = RuntimeGuard(self.memory, config, background=background)
+        return CouncilRuntime(
+            config,
+            client=client,
+            models=resolve_models(config, {}),
+            memory=self.memory,
+            execution_guard=guard,
+        )
+
+    def test_persisted_emergency_stop_blocks_manual_calls_before_the_provider(self):
+        self.memory.set_control_state("stopped", "operator emergency stop")
+        self.memory.close()
+        self.memory = Memory(self.database)
+        client = self.MetricsClient()
+        runtime = self.runtime(client)
+        with self.assertRaises(council.CouncilCallBlocked):
+            runtime.verify_tier()
+        meeting = open_meeting("Stopped meeting")
+        runtime.step(meeting)
+        self.assertEqual(client.calls, [])
+        self.assertEqual(
+            self.memory.db.execute(
+                "SELECT COUNT(*) FROM model_call_budget_events"
+            ).fetchone()[0],
+            0,
+        )
+
+    def test_persisted_pause_blocks_unattended_topic_calls_but_not_foreground(self):
+        self.memory.set_control_state("paused", "maintenance")
+        client = self.MetricsClient()
+        background = self.runtime(client, background=True)
+        with self.assertRaises(council.CouncilCallBlocked):
+            background.pick_topic(
+                council.NightPlan(enabled=True),
+                [],
+                budget_scope="council:" + "b" * 32,
+            )
+        self.assertEqual(client.calls, [])
+        foreground = self.runtime(client, background=False)
+        foreground.step(open_meeting("Manual while paused"))
+        self.assertEqual(len(client.calls), 1)
+
+    def test_unknown_usage_is_conservatively_charged_and_call_is_tool_free(self):
+        client = self.MetricsClient(prompt=None, completion=None)
+        runtime = self.runtime(client)
+        meeting = open_meeting("Unknown usage", meeting_id="c" * 32)
+        runtime.step(meeting)
+        self.assertEqual(client.calls[0][1], [])
+        event = self.memory.db.execute(
+            "SELECT state, completion_tokens, success FROM model_call_budget_events"
+        ).fetchone()
+        self.assertEqual(
+            (event["state"], event["completion_tokens"], event["success"]),
+            ("completed", council.COUNCIL_COMPLETION_TOKEN_RESERVE, 1),
+        )
+        metric = self.memory.db.execute(
+            "SELECT prompt_tokens, completion_tokens, profile FROM model_call_metrics"
+        ).fetchone()
+        self.assertEqual(
+            (metric["prompt_tokens"], metric["completion_tokens"], metric["profile"]),
+            (None, None, "council-chair"),
+        )
+
+    def test_provider_error_completes_the_reservation_and_failure_metric(self):
+        client = self.MetricsClient(failure=RuntimeError("offline"))
+        runtime = self.runtime(client)
+        runtime.step(open_meeting("Provider failure", meeting_id="d" * 32))
+        event = self.memory.db.execute(
+            "SELECT state, completion_tokens, success FROM model_call_budget_events"
+        ).fetchone()
+        self.assertEqual(
+            (event["state"], event["completion_tokens"], event["success"]),
+            ("completed", council.COUNCIL_COMPLETION_TOKEN_RESERVE, 0),
+        )
+        metric = self.memory.db.execute(
+            "SELECT success, failure_kind FROM model_call_metrics"
+        ).fetchone()
+        self.assertEqual((metric["success"], metric["failure_kind"]), (0, "RuntimeError"))
+
+    def test_call_prompt_and_completion_exhaustion_precede_provider_calls(self):
+        cases = (
+            {"prompt_token_limit_per_request": 1},
+            {
+                "completion_token_limit_per_request":
+                    council.COUNCIL_COMPLETION_TOKEN_RESERVE - 1
+            },
+        )
+        for index, overrides in enumerate(cases):
+            with self.subTest(overrides=overrides):
+                client = self.MetricsClient()
+                runtime = self.runtime(client, self.config(**overrides))
+                runtime.step(open_meeting("Exhausted", meeting_id=f"{index + 1:032x}"))
+                self.assertEqual(client.calls, [])
+
+        client = self.MetricsClient()
+        runtime = self.runtime(client, self.config(model_call_limit_per_request=1))
+        meeting = open_meeting("One call", meeting_id="e" * 32)
+        runtime.step(meeting)
+        runtime.step(meeting)
+        self.assertEqual(len(client.calls), 1)
+
+    def test_known_max_output_overrun_blocks_the_next_call(self):
+        client = self.MetricsClient(completion=700)
+        runtime = self.runtime(
+            client, self.config(completion_token_limit_per_request=600)
+        )
+        meeting = open_meeting("Output cap", meeting_id="f" * 32)
+        runtime.step(meeting)
+        runtime.step(meeting)
+        self.assertEqual(len(client.calls), 1)
+        self.assertEqual(
+            self.memory.db.execute(
+                "SELECT completion_tokens FROM model_call_budget_events"
+            ).fetchone()[0],
+            700,
+        )
+
+    def test_budget_scope_survives_restart_and_interjections_share_it(self):
+        config = self.config(model_call_limit_per_request=2)
+        client = self.MetricsClient()
+        meeting = open_meeting("Continuity", meeting_id="a" * 32)
+        runtime = self.runtime(client, config)
+        runtime.step(meeting)
+        meeting.interject("Please include the restart case.")
+        runtime.step(meeting)
+        rows = self.memory.db.execute(
+            "SELECT DISTINCT budget_scope FROM model_call_budget_events"
+        ).fetchall()
+        self.assertEqual([row[0] for row in rows], ["council:" + "a" * 32])
+        self.assertEqual(len(client.calls), 2)
+
+        self.memory.close()
+        self.memory = Memory(self.database)
+        after_restart = self.MetricsClient()
+        runtime = self.runtime(after_restart, config)
+        runtime.step(meeting)
+        self.assertEqual(after_restart.calls, [])
+
+    def test_topic_selection_uses_the_supplied_durable_scope(self):
+        client = self.MetricsClient()
+        runtime = self.runtime(client)
+        scope = "council:" + "9" * 32
+        runtime.pick_topic(council.NightPlan(), [], budget_scope=scope)
+        event = self.memory.db.execute(
+            "SELECT budget_scope FROM model_call_budget_events"
+        ).fetchone()
+        metric = self.memory.db.execute(
+            "SELECT budget_scope, profile FROM model_call_metrics"
+        ).fetchone()
+        self.assertEqual(event["budget_scope"], scope)
+        self.assertEqual((metric["budget_scope"], metric["profile"]), (scope, "council-topic"))
+        self.assertEqual(client.calls[0][1], [])
+
+
 class DocumentTests(unittest.TestCase):
     def _meeting(self) -> CouncilMeeting:
         meeting = open_meeting("Improve recall", DEPTH_PLANS["Brief"], 1_700_000_000.0)
@@ -483,6 +697,123 @@ class DocumentTests(unittest.TestCase):
     def test_listing_an_absent_council_directory_is_empty_not_an_error(self):
         with tempfile.TemporaryDirectory() as raw:
             self.assertEqual(list_meetings(Path(raw) / "missing"), [])
+
+    def test_colliding_meetings_claim_distinct_directories_without_overwrite(self):
+        models = resolve_models(_config(), {})
+        with tempfile.TemporaryDirectory() as raw:
+            first = self._meeting()
+            first.meeting_id = "1" * 32
+            original = write_artifacts(raw, first, models)
+            original_report = Path(original["report"]).read_text(encoding="utf-8")
+            second = self._meeting()
+            second.meeting_id = "2" * 32
+            second.decision = "A different collision-safe decision."
+            collided = write_artifacts(raw, second, models)
+            self.assertNotEqual(original["folder"], collided["folder"])
+            self.assertEqual(
+                Path(original["report"]).read_text(encoding="utf-8"),
+                original_report,
+            )
+            self.assertIn(
+                "A different collision-safe decision.",
+                Path(collided["report"]).read_text(encoding="utf-8"),
+            )
+
+
+class NightLedgerTests(unittest.TestCase):
+    def test_restart_recovery_cap_digest_and_finalization_are_deduplicated(self):
+        with tempfile.TemporaryDirectory() as raw:
+            ledger = council.NightLedger(raw)
+            first = ledger.reserve(
+                "2026-09-02", 2, "apps", sitting_id="1" * 32
+            )
+            second = ledger.reserve(
+                "2026-09-02", 2, "apps", sitting_id="2" * 32
+            )
+            self.assertEqual((first, second), ("1" * 32, "2" * 32))
+            stored = ledger.finalize(
+                first,
+                {
+                    "topic": "First",
+                    "decision": "Keep the original.",
+                    "proposals": ["one"],
+                    "turns": 4,
+                    "folder": "first",
+                    "report": "first/report.md",
+                },
+            )
+            ledger.close()
+
+            ledger = council.NightLedger(raw)
+            self.assertEqual(ledger.recover_incomplete(), 1)
+            self.assertEqual(ledger.count("2026-09-02"), 2)
+            self.assertIsNone(ledger.reserve("2026-09-02", 2, "apps"))
+            repeated = ledger.finalize(
+                first,
+                {
+                    "topic": "First",
+                    "decision": "This must not overwrite the completed row.",
+                    "proposals": [],
+                    "turns": 0,
+                    "folder": "wrong",
+                    "report": "wrong",
+                },
+            )
+            self.assertEqual(repeated, stored)
+            rows = ledger.rows("2026-09-02")
+            self.assertEqual(len(rows), 2)
+            self.assertEqual(rows[0]["decision"], "Keep the original.")
+            self.assertIn("previous process ended", rows[1]["decision"])
+            path = council.write_night_digest(
+                raw,
+                "2026-09-02",
+                rows,
+                ledger.focus("2026-09-02", "fallback"),
+            )
+            digest = path.read_text(encoding="utf-8")
+            self.assertIn("2 sittings filed", digest)
+            self.assertIn("Keep the original", digest)
+            self.assertIn("previous process ended", digest)
+            ledger.close()
+
+    def test_cross_midnight_key_and_parallel_reservations_share_one_atomic_cap(self):
+        from datetime import datetime
+
+        key_before = council.night_key(
+            "23:30-07:00", datetime(2026, 9, 2, 23, 45)
+        )
+        key_after = council.night_key(
+            "23:30-07:00", datetime(2026, 9, 3, 2, 0)
+        )
+        self.assertEqual(key_before, key_after)
+        with tempfile.TemporaryDirectory() as raw:
+            with council.NightLedger(raw):
+                pass
+            barrier = threading.Barrier(8)
+            outcomes = []
+            lock = threading.Lock()
+
+            def reserve(index):
+                with council.NightLedger(raw) as ledger:
+                    barrier.wait(timeout=5)
+                    claimed = ledger.reserve(
+                        key_after,
+                        3,
+                        "apps",
+                        sitting_id=f"{index + 1:032x}",
+                    )
+                with lock:
+                    outcomes.append(claimed is not None)
+
+            workers = [threading.Thread(target=reserve, args=(index,)) for index in range(8)]
+            for worker in workers:
+                worker.start()
+            for worker in workers:
+                worker.join(timeout=10)
+            self.assertEqual(outcomes.count(True), 3)
+            self.assertEqual(outcomes.count(False), 5)
+            with council.NightLedger(raw) as ledger:
+                self.assertEqual(ledger.count(key_before), 3)
 
 
 class TierVerificationTests(unittest.TestCase):

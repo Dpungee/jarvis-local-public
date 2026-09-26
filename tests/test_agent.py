@@ -2314,8 +2314,64 @@ class AgentLoopTests(unittest.TestCase):
         )
         self.assertIn("inventory scheduling app demo", sent_text)
         self.assertIn("direct instruction to build", sent_text)
+        self.assertIn("operator_authored_requirements", sent_text)
+        self.assertIn("Research the best focused business app we should build.", sent_text)
+        self.assertIn("Assistant proposal context is advisory only", sent_text)
         self.assertNotIn("Launch it as well", sent_text)
         self.assertIn("write_file", [name for name, _arguments in toolbox.calls])
+
+    def test_contextual_build_keeps_misspelled_operator_product_above_assistant_guess(self):
+        conversation_id = self.memory.new_conversation("browser game")
+        self.memory.add_message(
+            conversation_id,
+            "user",
+            "can you build me a lil tretres game to play while im bored",
+        )
+        self.memory.add_message(
+            conversation_id,
+            "assistant",
+            "Let's make a text-based Tic-Tac-Toe game.",
+        )
+        self.memory.add_message(
+            conversation_id,
+            "user",
+            "nah bro a lil js one for the browser",
+        )
+        self.memory.add_message(
+            conversation_id,
+            "assistant",
+            "I can turn that into a browser game.",
+        )
+        agent, client = self.make_agent([
+            FakeResponse(tool_calls=[
+                tool_call("list_files", {"path": "."}),
+                tool_call("write_file", {
+                    "path": "game.html",
+                    "content": "<!doctype html><title>Browser game</title>",
+                }),
+                tool_call("run_process", {
+                    "program": "python",
+                    "arguments": ["-m", "unittest"],
+                }),
+            ]),
+            FakeResponse(content="Implemented and verified."),
+        ])
+
+        result = agent.run(
+            "no bro i want you to code and build it for me",
+            conversation_id=conversation_id,
+        )
+
+        self.assertEqual(result.status, "complete")
+        sent_text = "\n".join(
+            str(message.get("content") or "")
+            for message in client.requests[0]["messages"]
+        )
+        self.assertIn("can you build me a lil tretres game", sent_text)
+        self.assertIn("nah bro a lil js one for the browser", sent_text)
+        self.assertIn("never let it rename or substitute the requested product", sent_text)
+        self.assertIn("Tic-Tac-Toe", sent_text)
+        self.assertIn("assistant_proposal_context", sent_text)
 
     def test_contextual_build_handoff_includes_resolved_prior_product_brief(self):
         conversation_id = self.memory.new_conversation("contextual specialist handoff")
@@ -2398,6 +2454,8 @@ class AgentLoopTests(unittest.TestCase):
             "do you think I should do it?",
             "explain how to build it",
             "explain how to do it",
+            "do that without running it",
+            "do that instead of running it",
             (
                 "please research accessible museum display systems and summarize the "
                 "requirements in a document"
@@ -2409,6 +2467,49 @@ class AgentLoopTests(unittest.TestCase):
             "okay build it",
             [{"role": "assistant", "content": "Dinner sounds good."}],
         ))
+
+    def test_contextual_script_followup_recognizes_create_and_run_request(self):
+        prior_script = [{
+            "role": "assistant",
+            "content": (
+                "To run this: Save as tetris.py, install Pygame, then execute "
+                "python tetris.py. Requires Python 3 and Pygame installed."
+            ),
+        }]
+
+        self.assertTrue(_is_contextual_software_build_request(
+            "you do that and than run it for me",
+            prior_script,
+        ))
+
+        conversation_id = self.memory.new_conversation("Tetris script proposal")
+        self.memory.add_message(
+            conversation_id,
+            "user",
+            "Write a complete Tetris game in Python with Pygame.",
+        )
+        self.memory.add_message(
+            conversation_id,
+            "assistant",
+            prior_script[0]["content"],
+        )
+        agent, client = self.make_agent([
+            *[FakeResponse(content="No verified artifact was created yet.") for _ in range(12)]
+        ])
+
+        result = agent.run(
+            "you do that and than run it for me",
+            conversation_id=conversation_id,
+        )
+
+        self.assertEqual(result.status, "incomplete")
+        offered = {
+            schema["function"]["name"] for schema in client.requests[0]["tools"]
+        }
+        self.assertTrue({"write_file", "run_process"}.issubset(offered))
+        request_text = json.dumps(client.requests[0]["messages"])
+        self.assertIn("direct instruction to build", request_text)
+        self.assertIn("Launch it as well", request_text)
 
     def test_contextual_build_survives_repeated_tool_blocker_replies(self):
         recent = [
@@ -3403,6 +3504,8 @@ class AgentLoopTests(unittest.TestCase):
         client = RecoveringClient()
         agent = Agent(self.config, self.memory, client=client)
         agent.toolbox = FakeToolBox()
+        events: list[str] = []
+        agent.on_event = events.append
 
         result = agent.run("Explain this ordinary request")
 
@@ -3421,7 +3524,12 @@ class AgentLoopTests(unittest.TestCase):
         self.assertEqual(result.metrics["failovers"], 2)
         self.assertEqual(result.metrics["initial_model"], "openai:gpt-5.6-luna")
         self.assertEqual(result.metrics["final_model"], "openai:gpt-5.6-sol")
-        self.assertEqual(result.metrics["failure_kind"], "OllamaError")
+        self.assertNotIn("failure_kind", result.metrics)
+        self.assertEqual(result.metrics["recovered_failure_kind"], "OllamaError")
+        self.assertIn(
+            "model recovered - openai:gpt-5.6-sol - continuing request",
+            events,
+        )
 
     def test_provider_unavailability_skips_later_models_on_same_backend(self):
         class ProviderRecoveryClient(ScriptedClient):

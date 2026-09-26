@@ -9,7 +9,7 @@ from jarvis.bluetooth_inventory import BluetoothInventory
 from jarvis.config import Config
 from jarvis.memory import Memory
 from jarvis.network_inventory import NetworkInventory
-from jarvis.presence import PresenceRuntime
+from jarvis.presence import PresenceRuntime, chat_access_policy, config_for_chat_access
 
 
 def _network_snapshot() -> dict[str, object]:
@@ -138,6 +138,67 @@ class PresenceRuntimeContractTests(unittest.TestCase):
         self.assertEqual(restarted_status["control"]["state"], "paused")
         self.assertEqual(restarted_status["pending_approvals"], 0)
         self.assertEqual(restarted.approvals()[0]["status"], "denied")
+
+    def test_chat_access_mode_is_visible_request_scoped_and_fail_closed(self) -> None:
+        runtime = PresenceRuntime(self.config)
+        conversation_id = runtime.create_conversation("Privacy controls")
+        policy = chat_access_policy(self.config)
+        self.assertEqual(policy["default"], "workspace")
+        self.assertFalse(next(
+            item["available"] for item in policy["modes"] if item["id"] == "full"
+        ))
+        with self.assertRaisesRegex(PermissionError, "startup security boundary"):
+            runtime.submit(
+                conversation_id,
+                "Use the active desktop application.",
+                "auto",
+                access_mode="full",
+            )
+        with self.assertRaisesRegex(ValueError, "read-only, workspace, or full"):
+            runtime.submit(conversation_id, "hello", "auto", access_mode="unbounded")
+
+        job_id = runtime.submit(
+            conversation_id,
+            "Inspect the project without changing it.",
+            "auto",
+            access_mode="read-only",
+        )
+        with Memory(self.data / "jarvis.db") as memory:
+            stored = memory.get_presence_job(job_id)
+            self.assertEqual(stored["status"], "queued")
+            self.assertNotIn("access_mode", stored)
+        self.assertEqual(
+            runtime._conversation_access_modes[conversation_id], "read-only"
+        )
+
+        readonly = config_for_chat_access(self.config, "read-only")
+        self.assertEqual(readonly.autonomy, "readonly")
+        self.assertEqual(readonly.execution_mode, "disabled")
+        self.assertEqual(readonly.computer_access, "disabled")
+        self.assertEqual(readonly.external_access, "disabled")
+
+        trusted = replace(
+            self.config,
+            execution_mode="trusted-host",
+            computer_access="trusted-desktop",
+            external_access="trusted-external",
+        )
+        self.assertTrue(next(
+            item["available"]
+            for item in chat_access_policy(trusted)["modes"]
+            if item["id"] == "full"
+        ))
+        self.assertIs(config_for_chat_access(trusted, "full"), trusted)
+        external_only = replace(self.config, external_access="trusted-external")
+        self.assertTrue(next(
+            item["available"]
+            for item in chat_access_policy(external_only)["modes"]
+            if item["id"] == "full"
+        ))
+        workspace = config_for_chat_access(trusted, "workspace")
+        self.assertEqual(workspace.execution_mode, "trusted-host")
+        self.assertEqual(workspace.computer_access, "disabled")
+        self.assertEqual(workspace.external_access, "disabled")
 
     def test_projects_and_schedule_overview_are_durable_and_bounded(self) -> None:
         runtime = PresenceRuntime(self.config)

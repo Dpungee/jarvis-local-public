@@ -325,11 +325,24 @@ def _distance_at_most_one(left: str, right: str) -> bool:
     return True
 
 
+# Real words one edit away from an intent word are not typos. ``browser`` in "a game that
+# runs in the browser" is a build target, not a request to browse the web.
+_NOT_TYPOS = frozenset({"browser", "abort", "thing", "thank", "thick", "chick", "cheek"})
+
+
 def _correct_intent_token(token: str) -> str:
     folded = token.casefold().replace("’", "'")
+    # ``browser`` is a valid product/runtime noun, not a misspelling of the
+    # web-action verb ``browse``.  Preserving it keeps requests such as
+    # "build a browser JavaScript game" local instead of silently granting a
+    # public-web research route.
+    if folded in {"browser", "browsers"}:
+        return token
     replacement = _SHORTHAND.get(folded)
     if replacement is not None:
         return replacement
+    if folded in _NOT_TYPOS:
+        return token
     # Three-letter ordinary words have too many one-edit neighbors (for
     # example ``new`` -> ``news``). Shorthand remains handled explicitly
     # above; fuzzy correction starts at four characters.

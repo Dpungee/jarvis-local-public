@@ -25,7 +25,11 @@ const state = {
   jobs: [],
   pendingImages: [],
   screenCompanion: null,
+  demonstrationState: "idle",
+  demonstrationPollTimer: null,
   publicPresence: null,
+  accessPolicy: null,
+  accessModes: {},
   featureOnboarding: null,
   featureDecisionPending: new Set(),
   onboardingDismissedForSession: false,
@@ -89,6 +93,91 @@ function rememberNetworkAlertReceipt(value) {
 }
 
 const bluetoothAlertStorageKey = "jarvis.bluetooth.first-observed-alerts.v1";
+const accessModeStorageKey = "jarvis.presence.chat-access-modes.v1";
+const validAccessModes = new Set(["read-only", "workspace", "full"]);
+
+function loadAccessModes() {
+  try {
+    const saved = JSON.parse(window.localStorage.getItem(accessModeStorageKey) || "{}");
+    if (!saved || typeof saved !== "object" || Array.isArray(saved)) return;
+    const bounded = {};
+    for (const [conversationId, mode] of Object.entries(saved).slice(-100)) {
+      if (/^[1-9][0-9]{0,18}$/.test(conversationId) && validAccessModes.has(mode)) {
+        bounded[conversationId] = mode;
+      }
+    }
+    state.accessModes = bounded;
+  } catch (_error) {
+    state.accessModes = {};
+  }
+}
+
+function saveAccessModes() {
+  try {
+    const entries = Object.entries(state.accessModes).slice(-100);
+    window.localStorage.setItem(accessModeStorageKey, JSON.stringify(Object.fromEntries(entries)));
+  } catch (_error) {
+    // The current request still carries its visible selection when storage is unavailable.
+  }
+}
+
+function accessModeDetails(mode) {
+  const configured = state.accessPolicy?.modes;
+  if (!Array.isArray(configured)) {
+    return {id: mode, label: mode, available: true, description: ""};
+  }
+  return configured.find((item) => item?.id === mode) || null;
+}
+
+function accessModeForConversation(conversationId) {
+  const saved = state.accessModes[String(conversationId)] || state.accessPolicy?.default || "workspace";
+  const normalized = validAccessModes.has(saved) ? saved : "workspace";
+  const details = accessModeDetails(normalized);
+  return details?.available === false ? "workspace" : normalized;
+}
+
+function setConversationAccessMode(conversationId, mode) {
+  if (!Number.isSafeInteger(Number(conversationId)) || Number(conversationId) <= 0) return;
+  const normalized = validAccessModes.has(mode) ? mode : "workspace";
+  const details = accessModeDetails(normalized);
+  if (details?.available === false) {
+    toast(details.unavailable_reason || "That access mode is unavailable.");
+    syncAccessModeControls();
+    return;
+  }
+  state.accessModes[String(conversationId)] = normalized;
+  saveAccessModes();
+  syncAccessModeControls();
+}
+
+function syncAccessModeControl(selectId, descriptionId, conversationId) {
+  const select = $(selectId);
+  const description = $(descriptionId);
+  if (!select) return;
+  for (const option of select.querySelectorAll("option")) {
+    const details = accessModeDetails(option.value);
+    option.disabled = details?.available === false;
+    option.title = details?.available === false
+      ? (details.unavailable_reason || "Unavailable")
+      : (details?.description || "");
+  }
+  const mode = accessModeForConversation(conversationId);
+  select.value = mode;
+  const details = accessModeDetails(mode);
+  const control = select.parentElement;
+  control?.classList.toggle("full-access", mode === "full");
+  if (control) control.title = details?.description || "Choose the authority cap for this chat";
+  if (description) description.textContent = details?.description || "";
+}
+
+function syncAccessModeControls() {
+  syncAccessModeControl("access-mode", "access-mode-description", state.conversationId);
+  syncAccessModeControl(
+    "secondary-access-mode",
+    "secondary-access-mode-description",
+    state.secondaryConversationId,
+  );
+}
 
 function loadBluetoothAlertReceipts() {
   if (state.notifiedBluetoothDevices.size) return;
@@ -1611,6 +1700,7 @@ async function newConversation() {
     project_id: state.projectId,
   });
   state.conversationId = result.conversation_id;
+  syncAccessModeControls();
   $("chat-title").textContent = "New task";
   updateProjectChrome();
   localStorage.setItem("jarvis.presence.conversation", String(state.conversationId));
@@ -1630,6 +1720,7 @@ async function loadConversation(id) {
   ) ? state.conversationId : null;
   const result = await api(`/api/conversations/${id}/messages`);
   state.conversationId = result.conversation_id;
+  syncAccessModeControls();
   const conversation = state.conversations.get(state.conversationId);
   $("chat-title").textContent = conversation?.title || "Jarvis task";
   if (conversation?.project_id) {
@@ -1697,6 +1788,7 @@ async function loadSecondaryConversation(id) {
   }
   const result = await api(`/api/conversations/${numericId}/messages`);
   state.secondaryConversationId = result.conversation_id;
+  syncAccessModeControls();
   localStorage.setItem(
     "jarvis.presence.secondary-conversation",
     String(state.secondaryConversationId),
@@ -1909,6 +2001,8 @@ async function confirmConversationDelete() {
       state.secondaryConversationId = null;
       localStorage.removeItem("jarvis.presence.secondary-conversation");
     }
+    delete state.accessModes[String(conversationId)];
+    saveAccessModes();
     state.activeJobs.delete(conversationId);
     state.pendingDeleteConversationId = null;
     $("delete-chat-dialog").close();
@@ -4841,6 +4935,77 @@ async function controlCompanionQuick(action, mode = null) {
   if (state.activeView === "companion") await renderCompanion();
 }
 
+function demonstrationDraftPayload() {
+  return {
+    name: $("demonstration-skill-name").value.trim(),
+    description: $("demonstration-skill-description").value.trim(),
+    what_it_does: $("demonstration-skill-purpose").value.trim(),
+    how_to_use: $("demonstration-skill-how").value.trim(),
+    content: $("demonstration-skill-content").value.trim(),
+  };
+}
+
+function showDemonstrationSkillDraft(draft) {
+  if (!draft) return;
+  $("demonstration-skill-name").value = draft.name || "";
+  $("demonstration-skill-description").value = draft.description || "";
+  $("demonstration-skill-purpose").value = draft.what_it_does || "";
+  $("demonstration-skill-how").value = draft.how_to_use || "";
+  $("demonstration-skill-content").value = draft.content || "";
+  const dialog = $("demonstration-skill-dialog");
+  if (!dialog.open) dialog.showModal();
+}
+
+function scheduleDemonstrationPoll(delay = 1200) {
+  if (state.demonstrationPollTimer) clearTimeout(state.demonstrationPollTimer);
+  state.demonstrationPollTimer = setTimeout(() => {
+    state.demonstrationPollTimer = null;
+    pollDemonstration().catch(showError);
+  }, delay);
+}
+
+async function pollDemonstration() {
+  const recording = await api("/api/screen-companion/recording");
+  const previous = state.demonstrationState;
+  state.demonstrationState = recording.state || (recording.recording ? "recording" : "idle");
+  if (recording.state === "draft_ready" && recording.draft) {
+    showDemonstrationSkillDraft(recording.draft);
+    if (previous !== "draft_ready") toast("JARVIS finished the skill draft. Review it before creating it.");
+  } else if (recording.state === "failed" && recording.error && previous !== "failed") {
+    toast(recording.error);
+  }
+  if (state.activeView === "companion") await renderCompanion();
+  if (recording.recording || recording.state === "analyzing") scheduleDemonstrationPoll();
+}
+
+async function saveDemonstrationDraftEdits() {
+  const result = await post(
+    "/api/screen-companion/recording/draft/edit",
+    demonstrationDraftPayload(),
+  );
+  showDemonstrationSkillDraft(result.draft);
+  toast("Skill draft updated. It has not been created yet.");
+}
+
+async function createDemonstrationSkill() {
+  const result = await post(
+    "/api/screen-companion/recording/draft/create",
+    demonstrationDraftPayload(),
+  );
+  $("demonstration-skill-dialog").close();
+  state.demonstrationState = "created";
+  toast(`Created skill ${result.skill.name}.`);
+  if (state.activeView === "companion") await renderCompanion();
+}
+
+async function deleteDemonstrationSkillDraft() {
+  await post("/api/screen-companion/recording/draft/delete");
+  $("demonstration-skill-dialog").close();
+  state.demonstrationState = "idle";
+  toast("Deleted the unsaved skill draft.");
+  if (state.activeView === "companion") await renderCompanion();
+}
+
 async function renderCompanion(generation = null) {
   const render = beginUtilityRender("companion", generation);
   if (!render) return;
@@ -4936,6 +5101,72 @@ async function renderCompanion(generation = null) {
   actions.append(save, suggest, forget);
   overview.append(head, privacy, current, controls, actions);
   content.append(overview);
+
+  const demonstration = data.demonstration || {};
+  state.demonstrationState = demonstration.state || (demonstration.recording ? "recording" : "idle");
+  const recorderCard = document.createElement("section");
+  recorderCard.className = "utility-card companion-recorder";
+  const recorderHead = document.createElement("div");
+  recorderHead.className = "utility-card-head";
+  const recorderTitle = document.createElement("h3");
+  recorderTitle.textContent = "Teach JARVIS by demonstration";
+  recorderHead.append(recorderTitle, makePill(
+    demonstration.recording ? "recording" : (demonstration.state || "ready")
+  ));
+  const recorderPrivacy = document.createElement("p");
+  recorderPrivacy.textContent = "Record captures bounded active-window keyframes and app transitions in memory. It never records keystrokes, audio, password-manager windows, or a hidden desktop video. Your configured model provider receives one in-memory contact sheet for each of the two analysis passes; JARVIS discards the raw frames afterward.";
+  const recorderStatus = document.createElement("p");
+  recorderStatus.className = "companion-recording-status";
+  if (demonstration.recording) {
+    recorderStatus.textContent = `Recording · ${Number(demonstration.duration_seconds || 0).toFixed(0)}s · ${Number(demonstration.frame_count || 0)} keyframes · ${Number(demonstration.transition_count || 0)} transitions`;
+  } else if (demonstration.state === "analyzing") {
+    recorderStatus.textContent = `JARVIS is reviewing the demonstration · pass ${Math.max(1, Math.min(2, Number(demonstration.analysis_pass || 0)))} of 2`;
+  } else if (demonstration.state === "draft_ready") {
+    recorderStatus.textContent = "Skill draft ready. Review its name, purpose, steps, and boundaries before saving.";
+  } else if (demonstration.state === "failed") {
+    recorderStatus.textContent = demonstration.error || "The demonstration could not be analyzed.";
+  } else if (demonstration.state === "created" && demonstration.created_skill) {
+    recorderStatus.textContent = `Created ${demonstration.created_skill.name}. Start another recording whenever you are ready.`;
+  } else {
+    recorderStatus.textContent = "Press Record, perform the task once, then press Stop. JARVIS will review the sequence twice and prepare a skill draft.";
+  }
+  const recorderActions = document.createElement("div");
+  recorderActions.className = "utility-actions";
+  const recordButton = document.createElement("button");
+  recordButton.type = "button";
+  recordButton.className = demonstration.recording ? "companion-record-button recording" : "primary companion-record-button";
+  recordButton.textContent = demonstration.recording
+    ? "Stop recording"
+    : demonstration.state === "draft_ready"
+      ? "Review skill"
+      : demonstration.state === "analyzing"
+        ? "Analyzing…"
+        : "Record";
+  recordButton.disabled = demonstration.state === "analyzing";
+  recordButton.addEventListener("click", async () => {
+    if (demonstration.state === "draft_ready" && demonstration.draft) {
+      showDemonstrationSkillDraft(demonstration.draft);
+      return;
+    }
+    if (demonstration.recording) {
+      await post("/api/screen-companion/recording/stop");
+      toast("Recording stopped. JARVIS is reviewing it twice before drafting the skill.");
+    } else {
+      await post("/api/screen-companion/recording/start");
+      toast("Recording started. Sensitive windows remain excluded.");
+    }
+    scheduleDemonstrationPoll(250);
+    await renderCompanion();
+  });
+  recorderActions.append(recordButton);
+  recorderCard.append(recorderHead, recorderPrivacy, recorderStatus, recorderActions);
+  content.append(recorderCard);
+  if (demonstration.recording || demonstration.state === "analyzing") {
+    scheduleDemonstrationPoll();
+  }
+  if (demonstration.state === "draft_ready" && demonstration.draft) {
+    showDemonstrationSkillDraft(demonstration.draft);
+  }
 
   const learning = data.learning || {};
   const learningCard = document.createElement("section");
@@ -5410,6 +5641,8 @@ function applyStatus(data) {
   $("agent-label").textContent = `${data.active_agent_count || 0}/${data.max_agents || 1} agents active · ${data.queued_jobs || 0} queued`;
   renderAgentTabs(data.specialists || [], data.models || {});
   state.models = data.models || {};
+  state.accessPolicy = data.access_policy || null;
+  syncAccessModeControls();
   state.jobs = Array.isArray(data.jobs) ? data.jobs : (data.active_jobs || []);
   state.screenCompanion = data.screen_companion || null;
   state.publicPresence = data.public_presence || null;
@@ -5709,6 +5942,7 @@ async function submitPrompt(event) {
       conversation_id: state.conversationId,
       prompt: text,
       model: $("model").value,
+      access_mode: accessModeForConversation(state.conversationId),
       images: sentImages.map(({name, mime, data}) => ({name, mime, data})),
     });
     state.activeJobs.set(state.conversationId, result.job_id);
@@ -5733,6 +5967,7 @@ async function submitSecondaryPrompt(event) {
       conversation_id: state.secondaryConversationId,
       prompt: text,
       model: $("model").value,
+      access_mode: accessModeForConversation(state.secondaryConversationId),
     });
     state.activeJobs.set(state.secondaryConversationId, result.job_id);
     syncBusy();
@@ -6002,6 +6237,15 @@ $("feature-onboarding-dialog").addEventListener("cancel", () => {
 $("feature-onboarding-dialog").addEventListener("close", schedulePriorityDialogs);
 $("home-mode").addEventListener("click", () => setWorkspaceMode("home"));
 $("code-mode").addEventListener("click", () => setWorkspaceMode("code"));
+$("access-mode").addEventListener("change", () => {
+  setConversationAccessMode(state.conversationId, $("access-mode").value);
+});
+$("secondary-access-mode").addEventListener("change", () => {
+  setConversationAccessMode(
+    state.secondaryConversationId,
+    $("secondary-access-mode").value,
+  );
+});
 $("close-utility").addEventListener("click", showChat);
 $("project-context").addEventListener("click", () => openUtility("projects").catch(showError));
 $("pin-project").addEventListener("click", toggleCurrentProjectPin);
@@ -6142,6 +6386,10 @@ $("companion-off").addEventListener("click", () => controlCompanionQuick("off").
 $("companion-quick-mode").addEventListener("change", () => {
   controlCompanionQuick("mode", $("companion-quick-mode").value).catch(showError);
 });
+$("close-demonstration-skill").addEventListener("click", () => $("demonstration-skill-dialog").close());
+$("edit-demonstration-skill").addEventListener("click", () => saveDemonstrationDraftEdits().catch(showError));
+$("create-demonstration-skill").addEventListener("click", () => createDemonstrationSkill().catch(showError));
+$("delete-demonstration-skill").addEventListener("click", () => deleteDemonstrationSkillDraft().catch(showError));
 document.addEventListener("click", (event) => {
   if (!$("companion-popover").hidden && !event.target.closest(".companion-quick")) {
     setCompanionPopover(false);
@@ -6177,6 +6425,7 @@ async function boot() {
   updateTitleBadge();
   const savedRailState = localStorage.getItem("jarvis.presence.rail-collapsed");
   setRailCollapsed(savedRailState === "1" || (savedRailState === null && window.matchMedia("(max-width: 760px)").matches));
+  loadAccessModes();
   loadPinnedProjects();
   if (!state.recognition) setupVoice();
   await refreshProjects();

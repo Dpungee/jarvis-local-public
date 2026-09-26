@@ -125,9 +125,14 @@ class TrustedDesktopTests(unittest.TestCase):
             "size_bytes": 1_000_000,
             "status": "OK",
         }]
-        with patch("jarvis.desktop._physical_storage_devices", return_value=devices):
+        with (
+            patch("jarvis.desktop._physical_storage_devices", return_value=devices),
+            patch("jarvis.desktop.platform.node", return_value="private-hostname"),
+        ):
             snapshot = json.loads(self.toolbox.execute("system_snapshot", {}))
         self.assertTrue(snapshot["ok"])
+        self.assertNotIn("computer", snapshot["result"])
+        self.assertNotIn("private-hostname", json.dumps(snapshot))
         self.assertIn("logical_cpu_count", snapshot["result"])
         self.assertEqual(snapshot["result"]["physical_storage"]["device_count"], 1)
         self.assertEqual(snapshot["result"]["physical_storage"]["devices"], devices)

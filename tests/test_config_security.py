@@ -29,14 +29,14 @@ def load_config(environment):
 
 
 class ConfigSecurityTests(unittest.TestCase):
-    def test_example_documents_every_supported_operator_setting(self):
+    def test_example_matches_supported_operator_settings(self):
         example = (Path(__file__).resolve().parents[1] / ".env.example").read_text(
             encoding="utf-8"
         )
         documented = set(
             re.findall(r"(?m)^(?:#\s*)?([A-Z][A-Z0-9_]+)=", example)
         )
-        self.assertEqual(config_module._DOTENV_KEYS - documented, set())
+        self.assertEqual(config_module._DOTENV_KEYS, documented)
 
     def test_every_active_example_setting_is_loadable(self):
         """Copying .env.example to .env must never fail startup.
@@ -67,6 +67,8 @@ class ConfigSecurityTests(unittest.TestCase):
         self.assertEqual(config.ollama_deep_keep_alive, "0")
         self.assertIsNone(config.ollama_num_thread)
         self.assertFalse(config.ollama_preload)
+        self.assertEqual(config.local_coding_context, "disabled")
+        self.assertEqual(config.local_coding_context_max_tokens, 2048)
         self.assertTrue(config.reasoning_thinking)
         self.assertTrue(config.cloud_enabled)
         self.assertEqual(config.self_inspect, "disabled")
@@ -145,6 +147,22 @@ class ConfigSecurityTests(unittest.TestCase):
                 ValueError, "STRATEGY_TRANSFER"
             ):
                 load_config({"JARVIS_STRATEGY_TRANSFER": value})
+
+    def test_local_coding_context_requires_closed_mode_and_bounded_prompt(self):
+        config = load_config({
+            "JARVIS_LOCAL_CODING_CONTEXT": " SHADOW ",
+            "JARVIS_LOCAL_CODING_CONTEXT_MAX_TOKENS": "3072",
+        })
+        self.assertEqual(config.local_coding_context, "shadow")
+        self.assertEqual(config.local_coding_context_max_tokens, 3072)
+        for value in ("", "true", "auto", "cloud"):
+            with self.subTest(value=value), self.assertRaisesRegex(
+                ValueError, "LOCAL_CODING_CONTEXT"
+            ):
+                load_config({"JARVIS_LOCAL_CODING_CONTEXT": value})
+        for value in ("255", "4097", "many"):
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                load_config({"JARVIS_LOCAL_CODING_CONTEXT_MAX_TOKENS": value})
 
     def test_execution_mode_requires_explicit_valid_opt_in(self):
         trusted = load_config({"JARVIS_EXECUTION_MODE": " TRUSTED-HOST "})

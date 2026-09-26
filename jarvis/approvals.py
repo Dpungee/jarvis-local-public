@@ -32,6 +32,7 @@ SENSITIVE_ACTIONS: dict[str, tuple[str, str]] = {
     "vercel_deploy": ("publish_external", "This publishes a deployment to an external service."),
     "connector_install": ("extend_capability", "This installs the exact declarative connector shown and grants Jarvis a new bounded API surface."),
     "connector_call": ("communicate_external", "This sends the exact shown request through an operator-installed external connector."),
+    "browser_confirm_click": ("communicate_external", "This clicks the exact button shown on the exact page shown in the agent browser, which may buy, book, send, submit or delete something."),
     "feature_setup_decide": ("extend_capability", "This changes the exact optional Jarvis capability shown. It never downloads a tool, runs a probe, or authorizes containment."),
 }
 

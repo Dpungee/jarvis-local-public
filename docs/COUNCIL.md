@@ -75,6 +75,15 @@ The council is a different thing: a deliberation room.
 
 - **No tools.** Every council turn is a plain text completion with `tools=[]`.
   No filesystem, no network, no processes, no devices, no memory writes.
+- **The global control plane still wins.** The persistent emergency stop blocks
+  both manual and unattended calls before a provider is reached. Persistent
+  pause blocks the night watch while leaving an operator-convened sitting
+  available. The guard is checked again at every turn.
+- **Every call is budgeted durably.** Topic selection, agenda, member turns,
+  crosstalk, interjections, rulings and the report share one meeting-scoped
+  model-call/prompt/completion budget. Reservations happen atomically before
+  dispatch and survive restart; missing provider usage is charged
+  conservatively rather than treated as free.
 - **Nothing said here executes.** Members are told so in their contract and are
   instructed never to claim they ran, read, fetched or changed anything.
 - **JARVIS still orchestrates.** Members see the transcript because the chair
@@ -160,6 +169,13 @@ desktop idle for ten minutes — and the status line always says which gate is
 holding it ("Waiting for 4 more idle minutes", "Tonight's cap of 3 sittings
 is reached"). When all five open:
 
+The cap is not an in-memory counter. Before topic selection, the worker claims
+one slot in `data/council/night-ledger.sqlite3` under an immediate SQLite
+transaction. Completed and interrupted slots are immutable and deduplicated;
+they remain counted after restart and both sides of a cross-midnight window use
+the date on which that window opened. The morning digest is rebuilt atomically
+from that ledger, so restart cannot forget or duplicate a sitting.
+
 1. **The chair picks the topic.** JARVIS is given the focus, the titles of
    meetings already held (so nothing repeats), and one random *spark* drawn
    from a fixed list ("something for the first ten minutes of the morning",
@@ -196,6 +212,14 @@ At the end of a meeting, under `<data dir>/council/<timestamp>-<topic>/`:
 
 All four are written with LF endings.
 
+Meeting directories are claimed with exclusive creation. Two sittings with the
+same topic in the same second receive distinct directories; an existing report
+is never opened as the destination of a later sitting.
+
+Closing the desktop cancels the current call, closes the model client to release
+blocked I/O, records and files an interruption, and waits boundedly for both the
+chat and Council workers before destroying the window.
+
 **Open report folder** opens the directory. **Take the decision to chat**
 switches to the chat view with the decision loaded into the composer, which is
 how a meeting turns into work.
@@ -223,8 +247,10 @@ heads, so they cannot cut across a face.
 
 ## Testing
 
-`tests/test_council.py` covers the roster, the model tiers and their env
-overrides, the scheduler's choreography, reply parsing, the contracts, the
-runtime against a scripted client (including an unreachable seat and an
-operator interjection), the documents, and the view's pure colour and layout
-helpers. No test opens a window or reaches a model.
+`tests/test_council.py`, `tests/test_ui_desktop.py`, and
+`tests/test_redaction.py` cover the roster, model policy, choreography, reply
+parsing, contracts, documents, persistent stop/pause, durable call budgets,
+unknown/error usage, restart and interjection continuity, atomic night caps and
+idempotent finalization, directory collisions, duplicate convenes, blocked-I/O
+shutdown, and every split point of every supported streamed-secret family. No
+test reaches a real model.

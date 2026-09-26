@@ -36,6 +36,11 @@ class NaturalLanguageIntentTests(unittest.TestCase):
         self.assertEqual(intent_classification_text(source), source)
         self.assertFalse(has_current_public_information_shape(source))
 
+    def test_browser_software_target_does_not_become_browse_command(self) -> None:
+        source = "Build a browser JavaScript Tetris game."
+        self.assertEqual(intent_routing_text(source), source)
+        self.assertFalse(_requires_web(source))
+
     def test_preserves_urls_and_local_paths_exactly(self) -> None:
         source = (
             "chek https://example.com/wht/u?yr=rn and "

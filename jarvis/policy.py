@@ -248,6 +248,51 @@ def _has_windows_device_or_ads(value: str) -> bool:
     return False
 
 
+_LOOPBACK_BIND_ADDRESSES = frozenset({"127.0.0.1", "::1", "localhost"})
+
+
+def _validate_static_server(arguments: list[str]) -> tuple[bool, str]:
+    """``python -m http.server`` only as a loopback-bound static file server.
+
+    Its default binds every interface, so an explicit loopback ``--bind`` is required.
+    CGI execution and every other option are refused; the served directory is the working
+    directory or an in-workspace ``--directory`` (the generic path checks already confine
+    paths to the workspace).
+    """
+    bind: str | None = None
+    port: str | None = None
+    index = 0
+    while index < len(arguments):
+        item = arguments[index]
+        folded = item.casefold()
+        name, has_value, inline = folded.partition("=")
+        if name in {"--bind", "-b", "--directory", "-d"}:
+            if has_value:
+                value = item.split("=", 1)[1]
+            elif index + 1 < len(arguments):
+                index += 1
+                value = arguments[index]
+            else:
+                return False, f"http.server option {item} needs a value"
+            if name in {"--bind", "-b"}:
+                bind = value.strip().casefold()
+            elif not value.strip():
+                return False, "http.server --directory needs a workspace path"
+        elif item.isdigit() and port is None:
+            port = item
+        else:
+            return False, (
+                "http.server accepts only --bind 127.0.0.1 (or ::1/localhost), an optional "
+                "--directory inside the workspace, and a port; CGI and other options are blocked"
+            )
+        index += 1
+    if bind not in _LOOPBACK_BIND_ADDRESSES:
+        return False, "http.server must be bound to this computer only: add --bind 127.0.0.1"
+    if port is not None and not 1024 <= int(port) <= 65535:
+        return False, "http.server port must be between 1024 and 65535"
+    return True, ""
+
+
 def validate_process(
     workspace: Path,
     program: str,
@@ -323,8 +368,18 @@ def validate_process(
                     return False, "clustered Python command and module flags are blocked"
         if "-m" in lowered:
             module_index = lowered.index("-m") + 1
+            if module_index < len(lowered) and lowered[module_index] == "http.server":
+                allowed_server, server_reason = _validate_static_server(
+                    inspected_args[module_index + 1:]
+                )
+                if not allowed_server:
+                    return False, server_reason
+                return True, "loopback static file server"
             if module_index >= len(lowered) or lowered[module_index] not in _PYTHON_MODULES:
-                return False, "only unittest, pytest, and compileall Python modules are allowed"
+                return False, (
+                    "only unittest, pytest, compileall, and loopback-bound http.server "
+                    "Python modules are allowed"
+                )
             python_module = lowered[module_index]
             python_module_option_names = [
                 _option_name(item) for item in args[module_index + 1:]

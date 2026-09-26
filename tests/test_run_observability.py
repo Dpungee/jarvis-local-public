@@ -76,6 +76,7 @@ class RunObservabilityTests(unittest.TestCase):
                 "provider": "codex-cli",
                 "model": "codex-cli:gpt-5.6-luna",
                 "profile": "fast",
+                "recovered_failure_kind": "OllamaError",
                 "route_reason": "clear_dialogue",
                 "task_contract_status": "not_attempted",
                 "strategy_transfer_mode": "observe",
@@ -101,6 +102,7 @@ class RunObservabilityTests(unittest.TestCase):
         self.assertEqual(metrics["strategy_transfer_selected"], 2)
         self.assertFalse(metrics["strategy_transfer_applied"])
         self.assertEqual(metrics["strategy_transfer_trial_manifest_id"], 41)
+        self.assertEqual(metrics["recovered_failure_kind"], "OllamaError")
         self.assertEqual(metrics["strategy_transfer_trial_arm"], "control")
         self.assertTrue(metrics["strategy_transfer_trial_prompt_recorded"])
         self.assertTrue(metrics["strategy_transfer_trial_dispatched"])

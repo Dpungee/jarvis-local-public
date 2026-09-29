@@ -36,6 +36,7 @@ _MANAGED_KEYS = (
     "JARVIS_CODEX_CLI_ENABLED",
     "JARVIS_CLAUDE_CLI_ENABLED",
     "JARVIS_OPENAI_API_ENABLED",
+    "JARVIS_XAI_API_ENABLED",
     "JARVIS_ANTHROPIC_API_ENABLED",
     "JARVIS_CLOUD_ENABLED",
     "JARVIS_OLLAMA_ENABLED",
@@ -49,7 +50,14 @@ _MANAGED_KEYS = (
 )
 _KEY_PATTERN = re.compile(r"^\s*([A-Z][A-Z0-9_]*)\s*=")
 _WINDOWS_REPARSE_POINT = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
-_CHOICES = frozenset({"ollama", "codex", "claude", "both"})
+_CHOICES = frozenset({
+    "ollama", "codex", "claude", "both", "openai-api", "anthropic-api", "grok"
+})
+_CLI_CHOICES = frozenset({"codex", "claude", "both"})
+_CHOICE_ERROR = (
+    "provider choice must be ollama, codex, claude, both, openai-api, "
+    "anthropic-api, or grok"
+)
 _AUTH_STATUS_MAX_BYTES = 4096
 _SETUP_MARKER = "# JARVIS_PROVIDER_SETUP=complete:v1"
 _CANARY_SENTINEL = "JARVIS_CANARY_OK"
@@ -68,6 +76,7 @@ _TEMPLATE_PROVIDER_VALUES = {
     "JARVIS_BACKGROUND_MODEL": "fast",
     "JARVIS_OLLAMA_ENABLED": "true",
     "JARVIS_OPENAI_API_ENABLED": "false",
+    "JARVIS_XAI_API_ENABLED": "false",
     "JARVIS_ANTHROPIC_API_ENABLED": "false",
     "JARVIS_CODEX_CLI_ENABLED": "false",
     "JARVIS_CLAUDE_CLI_ENABLED": "false",
@@ -82,6 +91,7 @@ _LOCAL_PROVIDER_KEYS = frozenset({
     "JARVIS_LEARNING_MODEL",
     "JARVIS_OLLAMA_ENABLED",
     "JARVIS_OPENAI_API_ENABLED",
+    "JARVIS_XAI_API_ENABLED",
     "JARVIS_ANTHROPIC_API_ENABLED",
     "JARVIS_CODEX_CLI_ENABLED",
     "JARVIS_CLAUDE_CLI_ENABLED",
@@ -247,7 +257,12 @@ def _env_assignments(text: str) -> dict[str, str]:
 def _is_template_provider_configuration(values: Mapping[str, str]) -> bool:
     """Recognize the provider portion of an unchanged copied .env.example."""
     return all(
-        values.get(key, "").casefold() == expected.casefold()
+        values.get(
+            key,
+            # Older copies of .env.example predate the xAI switch; its absence
+            # still means an unchanged template, not a customized route.
+            expected if key == "JARVIS_XAI_API_ENABLED" else "",
+        ).casefold() == expected.casefold()
         for key, expected in _TEMPLATE_PROVIDER_VALUES.items()
     )
 
@@ -263,6 +278,7 @@ def _has_completed_local_configuration(text: str) -> bool:
         for key in (
             "JARVIS_OLLAMA_ENABLED",
             "JARVIS_OPENAI_API_ENABLED",
+            "JARVIS_XAI_API_ENABLED",
             "JARVIS_ANTHROPIC_API_ENABLED",
             "JARVIS_CODEX_CLI_ENABLED",
             "JARVIS_CLAUDE_CLI_ENABLED",
@@ -323,6 +339,16 @@ def _legacy_database_has_user_state(path: Path) -> bool:
     return False
 
 
+def has_provider_configuration(root: Path | str | None = None) -> bool:
+    """Return whether this installation has an explicit, non-template provider route."""
+    base = _root_path(root)
+    env_path = base / ".env"
+    if not os.path.lexists(env_path):
+        return False
+    _ordinary_file(env_path)
+    return _has_completed_local_configuration(_read_local_env(env_path))
+
+
 def is_setup_complete(
     root: Path | None = None,
     *,
@@ -337,11 +363,8 @@ def is_setup_complete(
     status commands can create an otherwise empty database before the wizard runs.
     """
     base = _root_path(root)
-    env_path = base / ".env"
-    if os.path.lexists(env_path):
-        _ordinary_file(env_path)
-        if _has_completed_local_configuration(_read_local_env(env_path)):
-            return True
+    if has_provider_configuration(base):
+        return True
 
     values = os.environ if environ is None else environ
     configured_data = str(values.get("JARVIS_DATA", "")).strip()
@@ -352,7 +375,7 @@ def is_setup_complete(
 def _provider_values(choice: str) -> dict[str, str]:
     normalized = str(choice).strip().casefold()
     if normalized not in _CHOICES:
-        raise ValueError("provider choice must be ollama, codex, claude, or both")
+        raise ValueError(_CHOICE_ERROR)
     if normalized == "ollama":
         profiles = {
             "JARVIS_FAST_MODEL": "qwen3.5:9b",
@@ -380,7 +403,7 @@ def _provider_values(choice: str) -> dict[str, str]:
             "JARVIS_BACKGROUND_MODEL": _PINNED_CLAUDE_SONNET_4_5_MODEL,
             "JARVIS_LEARNING_MODEL": _PINNED_CLAUDE_SONNET_4_5_MODEL,
         }
-    else:
+    elif normalized == "both":
         profiles = {
             "JARVIS_FAST_MODEL": "claude-cli:haiku",
             "JARVIS_REASONING_MODEL": "claude-cli:sonnet",
@@ -389,13 +412,42 @@ def _provider_values(choice: str) -> dict[str, str]:
             "JARVIS_BACKGROUND_MODEL": "claude-cli:haiku",
             "JARVIS_LEARNING_MODEL": "claude-cli:haiku",
         }
+    elif normalized == "openai-api":
+        profiles = {
+            "JARVIS_FAST_MODEL": "openai:gpt-5.6-luna",
+            "JARVIS_REASONING_MODEL": "openai:gpt-5.6-terra",
+            "JARVIS_CODING_MODEL": "openai:gpt-5.6-sol",
+            "JARVIS_DEEP_MODEL": "openai:gpt-5.6-sol",
+            "JARVIS_BACKGROUND_MODEL": "openai:gpt-5.6-luna",
+            "JARVIS_LEARNING_MODEL": "openai:gpt-5.6-luna",
+        }
+    elif normalized == "anthropic-api":
+        profiles = {
+            "JARVIS_FAST_MODEL": "anthropic:claude-sonnet-5",
+            "JARVIS_REASONING_MODEL": "anthropic:claude-sonnet-5",
+            "JARVIS_CODING_MODEL": "anthropic:claude-sonnet-5",
+            "JARVIS_DEEP_MODEL": "anthropic:claude-sonnet-5",
+            "JARVIS_BACKGROUND_MODEL": "anthropic:claude-sonnet-5",
+            "JARVIS_LEARNING_MODEL": "anthropic:claude-sonnet-5",
+        }
+    else:
+        profiles = {
+            "JARVIS_FAST_MODEL": "xai:grok-4.6",
+            "JARVIS_REASONING_MODEL": "xai:grok-4.6",
+            "JARVIS_CODING_MODEL": "xai:grok-4.6",
+            "JARVIS_DEEP_MODEL": "xai:grok-4.6",
+            "JARVIS_BACKGROUND_MODEL": "xai:grok-4.6",
+            "JARVIS_LEARNING_MODEL": "xai:grok-4.6",
+        }
     return {
         "JARVIS_CODEX_CLI_ENABLED": "true" if normalized in {"codex", "both"} else "false",
         "JARVIS_CLAUDE_CLI_ENABLED": "true" if normalized in {"claude", "both"} else "false",
         # Subscription choices must not silently fail over to separately billed
-        # API keys that happen to exist in the parent process environment.
-        "JARVIS_OPENAI_API_ENABLED": "false",
-        "JARVIS_ANTHROPIC_API_ENABLED": "false",
+        # API keys that happen to exist in the parent process environment. An
+        # API key is used only when its own API route was chosen explicitly.
+        "JARVIS_OPENAI_API_ENABLED": "true" if normalized == "openai-api" else "false",
+        "JARVIS_XAI_API_ENABLED": "true" if normalized == "grok" else "false",
+        "JARVIS_ANTHROPIC_API_ENABLED": "true" if normalized == "anthropic-api" else "false",
         "JARVIS_CLOUD_ENABLED": "false" if normalized == "ollama" else "true",
         "JARVIS_OLLAMA_ENABLED": "true" if normalized == "ollama" else "false",
         "JARVIS_MODEL": "auto",
@@ -407,6 +459,7 @@ _CONFIG_FIELDS_BY_ENV = {
     "JARVIS_CODEX_CLI_ENABLED": "codex_cli_enabled",
     "JARVIS_CLAUDE_CLI_ENABLED": "claude_cli_enabled",
     "JARVIS_OPENAI_API_ENABLED": "openai_api_enabled",
+    "JARVIS_XAI_API_ENABLED": "xai_api_enabled",
     "JARVIS_ANTHROPIC_API_ENABLED": "anthropic_api_enabled",
     "JARVIS_CLOUD_ENABLED": "cloud_enabled",
     "JARVIS_OLLAMA_ENABLED": "ollama_enabled",
@@ -433,6 +486,12 @@ def provider_choice_from_config(config: Any) -> str:
         return "claude"
     if ollama:
         return "ollama"
+    if bool(getattr(config, "xai_api_enabled", False)):
+        return "grok"
+    if bool(getattr(config, "openai_api_enabled", False)):
+        return "openai-api"
+    if bool(getattr(config, "anthropic_api_enabled", False)):
+        return "anthropic-api"
     return "ollama"
 
 
@@ -757,9 +816,35 @@ def _login_provider(
 
 
 def _selected_providers(choice: str) -> tuple[str, ...]:
+    """Return the subscription CLIs a choice needs; API and local choices need none."""
     if choice == "both":
         return ("codex", "claude")
-    return (choice,)
+    if choice in {"codex", "claude"}:
+        return (choice,)
+    return ()
+
+
+def _required_api_key(choice: str) -> tuple[str, str] | None:
+    return {
+        "openai-api": ("OPENAI_API_KEY", "OpenAI API"),
+        "anthropic-api": ("ANTHROPIC_API_KEY", "Anthropic API"),
+        "grok": ("XAI_API_KEY", "xAI Grok API"),
+    }.get(choice)
+
+
+def _require_api_key(choice: str, environ: Mapping[str, str]) -> None:
+    """Refuse an API route whose key is absent; never read or persist the key itself."""
+    requirement = _required_api_key(choice)
+    if requirement is None:
+        return
+    variable, label = requirement
+    if str(environ.get(variable, "")).strip():
+        return
+    raise ProviderSetupRequired(
+        f"{label} was selected, but {variable} is not set. Add it as a Windows "
+        "user environment variable (never to the project .env), open a new terminal, "
+        "and rerun setup.bat."
+    )
 
 
 def _configured_canary_checks(config: Any) -> tuple[ProviderCanaryCheck, ...]:
@@ -935,21 +1020,28 @@ def _prompt_choice(input_fn: Callable[[str], str], output: TextIO) -> str:
         "  2. Claude CLI (your Claude subscription)\n"
         "  3. Both (Claude for fast/reasoning; Codex for coding/deep)\n"
         "  4. Ollama (local models on this computer)\n"
+        "  5. OpenAI API (usage billed by OpenAI)\n"
+        "  6. Anthropic API (usage billed by Anthropic)\n"
+        "  7. Grok through the xAI API (usage billed by xAI)\n"
+        "Jarvis routes models automatically; picking a model later is optional.\n"
     )
     mapping = {
         "1": "codex", "codex": "codex", "chatgpt": "codex",
         "2": "claude", "claude": "claude",
         "3": "both", "both": "both",
         "4": "ollama", "ollama": "ollama", "local": "ollama",
+        "5": "openai-api", "openai": "openai-api", "openai-api": "openai-api",
+        "6": "anthropic-api", "anthropic": "anthropic-api", "anthropic-api": "anthropic-api",
+        "7": "grok", "xai": "grok", "grok": "grok",
     }
     for _attempt in range(3):
         try:
-            answer = input_fn("Provider [1/2/3/4]: ").strip().casefold()
+            answer = input_fn("Provider [1-7]: ").strip().casefold()
         except (EOFError, KeyboardInterrupt) as exc:
             raise ProviderSetupRequired(SETUP_NEEDED_MESSAGE) from exc
         if answer in mapping:
             return mapping[answer]
-        output.write("Enter 1, 2, 3, or 4.\n")
+        output.write("Enter a number from 1 through 7.\n")
     raise ProviderSetupRequired(SETUP_NEEDED_MESSAGE)
 
 
@@ -963,9 +1055,10 @@ def configure_provider(
 ) -> ProviderSetupResult:
     normalized = str(choice).strip().casefold()
     if normalized not in _CHOICES:
-        raise ValueError("provider choice must be ollama, codex, claude, or both")
+        raise ValueError(_CHOICE_ERROR)
     values = os.environ if environ is None else environ
     if require_ready:
+        _require_api_key(normalized, values)
         unavailable = [
             provider
             for provider in _selected_providers(normalized)
@@ -981,32 +1074,19 @@ def configure_provider(
     return ProviderSetupResult("configured", normalized, env_path)
 
 
-def ensure_ready(
-    interactive: bool,
+def select_provider_interactive(
     root: Path | None = None,
     *,
     environ: Mapping[str, str] | None = None,
     input_fn: Callable[[str], str] = input,
     output: TextIO | None = None,
-    stdin_isatty: bool | None = None,
     runner: Callable[..., subprocess.CompletedProcess] = subprocess.run,
 ) -> ProviderSetupResult:
-    """Ensure first-run provider setup without ever prompting a headless caller.
-
-    Already-configured and migrated installations return ``state='existing'``.
-    A headless first run raises :class:`ProviderSetupRequired` before ``input_fn``
-    is called. Interactive setup persists a verified CLI choice atomically.
-    """
-    if is_setup_complete(root, environ=environ):
-        return ProviderSetupResult("existing")
-    if not interactive:
-        raise ProviderSetupRequired(SETUP_NEEDED_MESSAGE)
-    terminal = sys.stdin.isatty() if stdin_isatty is None else bool(stdin_isatty)
-    if not terminal:
-        raise ProviderSetupRequired(SETUP_NEEDED_MESSAGE)
+    """Prompt once, prepare the selected provider, and atomically save routing."""
     destination = sys.stdout if output is None else output
     values = os.environ if environ is None else environ
     choice = _prompt_choice(input_fn, destination)
+    _require_api_key(choice, values)
     for provider in _selected_providers(choice):
         if provider == "ollama":
             continue
@@ -1025,12 +1105,49 @@ def ensure_ready(
         environ=values,
         runner=runner,
     )
-    destination.write("Provider setup complete. Jarvis will not ask again on normal launches.\n")
+    destination.write(
+        "Provider setup complete. Automatic routing is configured; model picking is optional, "
+        "and Jarvis will not ask again on normal launches.\n"
+    )
     return result
 
 
+def ensure_ready(
+    interactive: bool,
+    root: Path | None = None,
+    *,
+    environ: Mapping[str, str] | None = None,
+    input_fn: Callable[[str], str] = input,
+    output: TextIO | None = None,
+    stdin_isatty: bool | None = None,
+    runner: Callable[..., subprocess.CompletedProcess] = subprocess.run,
+) -> ProviderSetupResult:
+    """Ensure first-run provider setup without ever prompting a headless caller.
+
+    Already-configured and migrated installations return ``state='existing'``.
+    A headless first run raises :class:`ProviderSetupRequired` before ``input_fn``
+    is called. Interactive setup persists a verified provider choice atomically.
+    """
+    if is_setup_complete(root, environ=environ):
+        return ProviderSetupResult("existing")
+    if not interactive:
+        raise ProviderSetupRequired(SETUP_NEEDED_MESSAGE)
+    terminal = sys.stdin.isatty() if stdin_isatty is None else bool(stdin_isatty)
+    if not terminal:
+        raise ProviderSetupRequired(SETUP_NEEDED_MESSAGE)
+    return select_provider_interactive(
+        root,
+        environ=environ,
+        input_fn=input_fn,
+        output=output,
+        runner=runner,
+    )
+
+
 def _parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Configure Jarvis subscription-backed model CLIs")
+    parser = argparse.ArgumentParser(
+        description="Configure Jarvis model providers and automatic routing"
+    )
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument("--interactive", action="store_true", help="run the first-use wizard when needed")
     mode.add_argument("--ensure", action="store_true", help="check readiness without prompting")
@@ -1042,7 +1159,7 @@ def _parser() -> argparse.ArgumentParser:
     )
     mode.add_argument(
         "--login",
-        choices=("both", "claude", "codex"),
+        choices=sorted(_CLI_CHOICES),
         help="install/sign in and select a provider even on an existing installation",
     )
     return parser

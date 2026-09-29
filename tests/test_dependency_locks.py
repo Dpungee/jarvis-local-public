@@ -121,6 +121,8 @@ class DependencyLockTests(unittest.TestCase):
         allowed = (
             re.compile(r".*--require-hashes -r requirements/(build-backend|runtime-documents|ci-tools)\.txt\s*$"),
             re.compile(r".*pip install --disable-pip-version-check --no-deps --no-build-isolation -e \.\s*$"),
+            # The locally built artifact is installed offline against locked dependencies.
+            re.compile(r"\s*& \$python -m pip install --disable-pip-version-check --no-index --no-deps --no-build-isolation \$sdist\s*$"),
         )
         installs = [index for index, line in enumerate(lines) if "pip install" in line]
         self.assertTrue(installs, "no pip install steps found")

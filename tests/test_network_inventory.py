@@ -639,7 +639,7 @@ class NetworkToolAndRoutingTests(unittest.TestCase):
                 conversation_id = self.memory.new_conversation(
                     "live network device check"
                 )
-                if "using those tools" in prompt:
+                if prompt != "ight now whos on our network right now":
                     self.memory.begin_conversation_goal(
                         conversation_id,
                         "Check whether any phones are currently connected to our network.",
@@ -661,10 +661,82 @@ class NetworkToolAndRoutingTests(unittest.TestCase):
                 self.assertIs(toolbox.calls[0][1]["include_identifiers"], False)
                 self.assertEqual(client.chat_calls, 0)
                 self.assertIn("known phone", str(result).casefold())
-                if "using those tools" in prompt:
+                if prompt != "ight now whos on our network right now":
                     self.assertIsNone(
                         self.memory.pending_conversation_goal(conversation_id)
                     )
+
+    def test_current_device_question_reuses_completed_observation_during_cooldown(self):
+        class Client:
+            def __init__(self):
+                self.chat_calls = 0
+
+            def models(self, refresh=True):
+                return ["qwen3.5:9b"]
+
+            def chat(self, messages, tools, model, context_length, **kwargs):
+                self.chat_calls += 1
+                raise AssertionError(
+                    "a scan cooldown must not hand the factual request to the model"
+                )
+
+        class InventoryToolBox:
+            def __init__(self):
+                self.calls = []
+                self.schemas = [{
+                    "type": "function",
+                    "function": {
+                        "name": "network_inventory",
+                        "description": "bounded private-LAN inventory",
+                        "parameters": {"type": "object", "properties": {}},
+                    },
+                }]
+
+            def execute(self, name, arguments):
+                self.calls.append((name, arguments))
+                if arguments["action"] == "scan":
+                    return json.dumps({
+                        "ok": False,
+                        "error": (
+                            "NetworkInventoryRateLimited: Please wait briefly before "
+                            "checking this network again"
+                        ),
+                    })
+                return json.dumps({
+                    "ok": True,
+                    "result": {
+                        "last_scan_at": "2026-08-29T05:48:42+00:00",
+                        "devices": [{
+                            "display_name": "Known phone",
+                            "device_type": "phone",
+                            "visible_now": True,
+                        }],
+                    },
+                })
+
+        client = Client()
+        toolbox = InventoryToolBox()
+        agent = Agent(
+            replace(self.config, network_access="private-lan", max_steps=4),
+            self.memory,
+            client=client,
+            coding_review=False,
+            coding_planning=False,
+        )
+        agent.toolbox = toolbox
+
+        result = agent.run(
+            "ok so using those tools can you see if we have any phones on the network"
+        )
+
+        self.assertEqual(result.status, "complete", result.reason)
+        self.assertEqual(
+            [arguments["action"] for _name, arguments in toolbox.calls],
+            ["scan", "list"],
+        )
+        self.assertEqual(client.chat_calls, 0)
+        self.assertIn("reused", str(result).casefold())
+        self.assertIn("known phone", str(result).casefold())
 
     def test_saved_posture_request_cannot_be_upgraded_to_active_scan_by_model(self):
         class Response(dict):
@@ -776,6 +848,9 @@ class NetworkToolAndRoutingTests(unittest.TestCase):
         self.assertIn("cached data", lowered)
         self.assertIn("2 connected endpoints remain unidentified", lowered)
         self.assertIn("does not prove that no phone is connected", lowered)
+        self.assertIn("1 saved phone profile", lowered)
+        self.assertIn("old phone", lowered)
+        self.assertIn("not counting saved-only evidence as connected", lowered)
         self.assertNotIn("yes —", lowered)
 
     def test_router_telemetry_can_identify_a_connected_phone(self):

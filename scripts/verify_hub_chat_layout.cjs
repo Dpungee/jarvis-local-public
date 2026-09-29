@@ -40,12 +40,17 @@ const root = path.resolve(__dirname, '../jarvis/agent_hub_static');
   try {
     await page.goto('http://hub.test/#/agents/atlas');
     await page.locator('#chat-request').waitFor();
-    assert.equal(await page.locator('input[name=title]').count(),0);
+    assert.equal(await page.locator('#view input[name=title]').count(),0);  // no task-title field in the chat
+    // The project folder now lives in the workspace panel's Files tab (panel starts closed).
+    assert(await page.evaluate(()=>document.body.classList.contains('details-closed')));
+    await page.locator('#details-toggle').click();
+    await page.locator('[data-rp-tab=files]').click();
     assert.equal(await page.locator('#project-tree summary').textContent(),'▱ Research');
+    await page.locator('#rp-close').click();
     await page.locator('#chat-request').fill('Keep my draft');
     await page.evaluate(() => { pageData.status.detail='Updated state'; paint(renderAgent(pageData)); });
     assert.equal(await page.locator('#chat-request').inputValue(),'Keep my draft');
-    await page.locator('#chat-form button').click();
+    await page.locator('#chat-form .send-button').click();
     await page.locator('.assistant-message').waitFor();
     assert.equal(sent.body,'Keep my draft'); assert.equal(sent.chat_id,'chat1'); assert(sent.request_id);
     assert.deepEqual(Object.keys(sent).sort(),['body','chat_id','request_id']);
@@ -60,7 +65,7 @@ const root = path.resolve(__dirname, '../jarvis/agent_hub_static');
     assert.equal(await page.locator('[data-task-action], #task-form, #steer-form').count(),0);
     await page.evaluate(() => {pageData.conversation.agent_turns=[{task_id:'active1',state:'RUNNING',progress:'Searching the web',actions:['cancel'],artifacts:[]}]; paint(renderAgent(pageData));});
     assert(await page.locator('[data-chat-cancel]').isVisible());
-    assert(await page.locator('#chat-form button').isEnabled());
+    assert(await page.locator('#chat-form .send-button').isEnabled());
     await page.locator('#chat-request').press('Shift+Enter');
     assert((await page.locator('#chat-request').inputValue()).includes('\n'));
     assert.equal(conversation.messages.length,2);
@@ -71,7 +76,7 @@ const root = path.resolve(__dirname, '../jarvis/agent_hub_static');
       assert(await page.evaluate(()=>document.documentElement.scrollWidth <= innerWidth),`Overflow at ${width}`);
     }
     await page.locator('#sidebar-toggle').click();
-    await page.locator('#conversation-tree .new-conversation').click();
+    await page.locator('#space-links .nav-new').click();
     await page.locator('#chat-request').waitFor();
     assert.equal(await page.locator('#chat-request').inputValue(),'');
     const bounds=await page.locator('#chat-form').boundingBox();

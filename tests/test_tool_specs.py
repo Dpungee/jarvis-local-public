@@ -30,7 +30,7 @@ EXPECTED_TOOL_NAMES = (
     "vercel_status", "vercel_list_projects", "vercel_project_status",
     "vercel_deploy", "vercel_deployment_status", "vercel_build_logs",
     "vercel_runtime_logs", "vercel_discover_databases",
-    "vercel_list_databases", "list_files", "read_file", "read_files",
+    "vercel_list_databases", "list_files", "code_context_graph", "read_file", "read_files",
     "write_file", "build_document", "build_document_preview",
     "image_visual_qa", "image_generation_status", "generate_image",
     "edit_attached_image", "edit_file", "make_directory", "copy_path",
@@ -54,7 +54,7 @@ EXPECTED_TOOL_NAMES = (
     "photoshop_remove_background", "launch_artifact",
 )
 EXPECTED_SCHEMA_SHA256 = (
-    "1029ade4eb5aeabb211f8e7a6271274156d5adef3e2c507fdfc2c49166649786"
+    "70fe1362c971e0ad9961c3ee05cb395dd76a1b6c29bb45c6112c4f9cdab945df"
 )
 
 
@@ -142,6 +142,13 @@ class ToolSpecTests(unittest.TestCase):
                 self.assertIs(tool.parameters, spec.parameters)
                 self.assertIs(tool.function.__self__, toolbox)
                 self.assertIs(tool.function.__func__, getattr(ToolBox, spec.handler_name))
+
+    def test_process_tools_describe_both_effective_execution_boundaries(self):
+        descriptions = {spec.name: spec.description for spec in _specs()}
+        self.assertIn("unsandboxed host", descriptions["run_process"])
+        self.assertIn("networkless Docker container", descriptions["run_process"])
+        self.assertIn("read-write workspace bind", descriptions["run_process"])
+        self.assertIn("host or Docker execution boundary", descriptions["start_process"])
 
 
 if __name__ == "__main__":

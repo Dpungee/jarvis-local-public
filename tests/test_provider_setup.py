@@ -224,6 +224,104 @@ JARVIS_CLAUDE_CLI_ENABLED=false
             (self.root / ".env").read_text(encoding="utf-8"),
         )
 
+    def test_first_run_can_choose_grok_api_without_subscription_setup(self) -> None:
+        output = io.StringIO()
+        with (
+            patch.object(
+                provider_setup,
+                "detect_provider",
+                side_effect=AssertionError("API setup must not probe a subscription CLI"),
+            ),
+            patch.object(
+                provider_setup,
+                "_prepare_provider",
+                side_effect=AssertionError("API setup must not launch a CLI login"),
+            ),
+        ):
+            result = provider_setup.ensure_ready(
+                True,
+                self.root,
+                environ={"XAI_API_KEY": "xai-test-key-not-real"},
+                input_fn=Mock(side_effect=["7"]),
+                output=output,
+                stdin_isatty=True,
+            )
+
+        self.assertEqual(result.choice, "grok")
+        self.assertIn("7. Grok through the xAI API", output.getvalue())
+        saved = (self.root / ".env").read_text(encoding="utf-8")
+        self.assertIn("JARVIS_XAI_API_ENABLED=true", saved)
+        self.assertIn("JARVIS_OPENAI_API_ENABLED=false", saved)
+        self.assertIn("JARVIS_ANTHROPIC_API_ENABLED=false", saved)
+        self.assertIn("JARVIS_OLLAMA_ENABLED=false", saved)
+        self.assertIn("JARVIS_CODING_MODEL=xai:grok-4.6", saved)
+        self.assertNotIn("xai-test-key-not-real", saved)
+        self.assertTrue(provider_setup.has_provider_configuration(self.root))
+
+    def test_api_choice_without_its_key_is_refused_before_anything_is_saved(self) -> None:
+        for choice, answer, variable in (
+            ("openai-api", "5", "OPENAI_API_KEY"),
+            ("anthropic-api", "6", "ANTHROPIC_API_KEY"),
+            ("grok", "7", "XAI_API_KEY"),
+        ):
+            with self.subTest(choice=choice):
+                with self.assertRaisesRegex(provider_setup.ProviderSetupRequired, variable):
+                    provider_setup.configure_provider(choice, self.root, environ={})
+                with self.assertRaisesRegex(provider_setup.ProviderSetupRequired, variable):
+                    provider_setup.ensure_ready(
+                        True,
+                        self.root,
+                        environ={},
+                        input_fn=Mock(side_effect=[answer]),
+                        output=io.StringIO(),
+                        stdin_isatty=True,
+                    )
+                self.assertFalse((self.root / ".env").exists())
+
+    def test_api_choices_enable_only_their_own_billed_adapter(self) -> None:
+        expected = {
+            "openai-api": ("JARVIS_OPENAI_API_ENABLED", "openai:gpt-5.6-sol"),
+            "anthropic-api": ("JARVIS_ANTHROPIC_API_ENABLED", "anthropic:claude-sonnet-5"),
+            "grok": ("JARVIS_XAI_API_ENABLED", "xai:grok-4.6"),
+        }
+        switches = {switch for switch, _model in expected.values()}
+        for choice, (switch, coding_model) in expected.items():
+            with self.subTest(choice=choice):
+                values = provider_setup._provider_values(choice)
+                self.assertEqual(values[switch], "true")
+                for other in switches - {switch}:
+                    self.assertEqual(values[other], "false")
+                self.assertEqual(values["JARVIS_CODEX_CLI_ENABLED"], "false")
+                self.assertEqual(values["JARVIS_CLAUDE_CLI_ENABLED"], "false")
+                self.assertEqual(values["JARVIS_CLOUD_ENABLED"], "true")
+                self.assertEqual(values["JARVIS_OLLAMA_ENABLED"], "false")
+                self.assertEqual(values["JARVIS_CODING_MODEL"], coding_model)
+        for choice in ("codex", "claude", "both", "ollama"):
+            with self.subTest(choice=choice):
+                values = provider_setup._provider_values(choice)
+                for switch in switches:
+                    self.assertEqual(values[switch], "false")
+
+    def test_grok_choice_round_trips_through_config(self) -> None:
+        configured = SimpleNamespace(
+            codex_cli_enabled=False,
+            claude_cli_enabled=False,
+            ollama_enabled=False,
+            xai_api_enabled=True,
+            openai_api_enabled=False,
+            anthropic_api_enabled=False,
+        )
+        self.assertEqual(provider_setup.provider_choice_from_config(configured), "grok")
+
+    def test_template_without_xai_switch_is_still_the_unchanged_template(self) -> None:
+        template = (ROOT / ".env.example").read_text(encoding="utf-8")
+        legacy = "\n".join(
+            line for line in template.splitlines()
+            if not line.strip().startswith("JARVIS_XAI_API_ENABLED")
+        )
+        self.assertFalse(provider_setup._has_completed_local_configuration(template))
+        self.assertFalse(provider_setup._has_completed_local_configuration(legacy))
+
     def test_both_routes_fast_work_to_claude_and_coding_to_codex(self) -> None:
         provider_setup.persist_provider_choice("both", self.root)
         saved = (self.root / ".env").read_text(encoding="utf-8")
@@ -626,7 +724,7 @@ JARVIS_CLAUDE_CLI_ENABLED=false
             presence.index("Start-Process"),
         )
         setup = (ROOT / "setup.ps1").read_text(encoding="utf-8")
-        self.assertIn('"jarvis.provider_setup", "--interactive"', setup)
+        self.assertIn('"jarvis.installer", "--interactive"', setup)
 
 
 if __name__ == "__main__":

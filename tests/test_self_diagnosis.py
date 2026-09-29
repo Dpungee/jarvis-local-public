@@ -3,9 +3,11 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import sqlite3
 import subprocess
 import tempfile
 import unittest
+from contextlib import closing
 from pathlib import Path
 from pathlib import PureWindowsPath
 from types import SimpleNamespace
@@ -287,6 +289,17 @@ class SelfDiagnosisTests(unittest.TestCase):
                 self.assertIsNotNone(reason)
                 self.assertIn("permanently immutable", reason)
 
+    def test_credential_storage_is_immutable_to_self_repair(self):
+        for path in (
+            "jarvis/credential_protection.py",
+            "jarvis/connections.py",
+            "jarvis/openrouter.py",
+        ):
+            with self.subTest(path=path):
+                reason = diagnosis._repair_path_reason(path)
+                self.assertIsNotNone(reason)
+                self.assertIn("permanently immutable", reason)
+
     def test_repair_never_executes_model_authored_candidate_without_os_sandbox(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary) / "source"
@@ -490,8 +503,177 @@ class SelfDiagnosisTests(unittest.TestCase):
 
         self.assertTrue(result["passed"])
         self.assertTrue(all(result["checks"].values()))
+        self.assertEqual(result["backup_sha256"], result["restored_sha256"])
+        self.assertEqual(len(result["backup_sha256"]), 64)
+        self.assertGreater(result["restored_schema_version"], 0)
+        self.assertFalse(result["backup_retained"])
+        self.assertIsNone(result["backup_artifact"])
+        self.assertFalse(result["restored_live_application_state_validated"])
         self.assertEqual(latest["id"], result["attestation_id"])
         self.assertEqual(latest["passed"], 1)
+
+    def test_recovery_test_retains_explicit_backup_and_persists_sanitized_receipt(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            data = root / "data"
+            workspace = root / "workspace"
+            backup = root / "approved-backup"
+            data.mkdir()
+            workspace.mkdir()
+            backup.mkdir()
+            config = SimpleNamespace(data_dir=data, workspace=workspace)
+            with Memory(data / "jarvis.db") as memory:
+                result = diagnosis.run_recovery_test(
+                    config,
+                    memory,
+                    backup_directory=backup,
+                )
+                latest = memory.latest_recovery_attestation()
+
+            self.assertTrue(result["passed"])
+            self.assertTrue(result["backup_retained"])
+            artifact = backup / result["backup_artifact"]
+            self.assertTrue(artifact.is_file())
+            self.assertEqual(
+                diagnosis.hashlib.sha256(artifact.read_bytes()).hexdigest(),
+                result["backup_sha256"],
+            )
+            evidence = json.loads(latest["evidence_json"])
+            self.assertTrue(evidence["backup_receipt"]["artifact_retained"])
+            self.assertRegex(
+                evidence["backup_receipt"]["created_at_utc"],
+                r"^\d{4}-\d{2}-\d{2}T.*\+00:00$",
+            )
+            self.assertEqual(
+                evidence["backup_receipt"]["artifact_name"], artifact.name
+            )
+            self.assertNotIn(str(backup), latest["evidence_json"])
+            self.assertTrue(evidence["application_checks_are_synthetic"])
+            self.assertFalse(
+                evidence["live_application_or_authority_state_mutated"]
+            )
+            self.assertTrue(evidence["live_recovery_attestation_appended"])
+
+    def test_recovery_preserves_all_current_memory_and_authority_tables(self):
+        def snapshot(connection):
+            result = {}
+            names = [row[0] for row in connection.execute("SELECT name FROM sqlite_master WHERE type='table'")]
+            for name in names:
+                if name == "recovery_attestations":
+                    continue
+                quoted = '"' + name.replace('"', '""') + '"'
+                rows = [tuple(row) for row in connection.execute(f"SELECT * FROM {quoted}")]
+                if name == "sqlite_sequence":
+                    rows = [row for row in rows if row[0] != "recovery_attestations"]
+                result[name] = sorted(rows, key=repr)
+            return result
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            data, workspace, retained = root / "data", root / "workspace", root / "retained"
+            for folder in (data, workspace, retained):
+                folder.mkdir()
+            config = SimpleNamespace(data_dir=data, workspace=workspace)
+            with Memory(data / "jarvis.db") as memory:
+                memory.set_control_state("stopped", "synthetic preservation canary")
+                conversation = memory.new_conversation("Synthetic recovery evidence")
+                memory.add_message(conversation, "user", "Synthetic private conversation canary")
+                memory.remember("Synthetic unverified memory canary", source="fixture")
+                _allowed, approval_id = memory.authorize_or_request(
+                    "publish_external", "synthetic-resource", "Synthetic approval", approval_scope=f"conversation:{conversation}")
+                memory.decide_approval(approval_id, True)
+                before = snapshot(memory.db)
+                schema = [tuple(row) for row in memory.db.execute("SELECT name,sql FROM sqlite_master ORDER BY name")]
+                result = diagnosis.run_recovery_test(config, memory, backup_directory=retained)
+                self.assertTrue(result["passed"])
+                self.assertEqual(snapshot(memory.db), before)
+                self.assertEqual([tuple(row) for row in memory.db.execute(
+                    "SELECT name,sql FROM sqlite_master ORDER BY name")], schema)
+                self.assertEqual(memory.db.execute("SELECT count(*) FROM recovery_attestations").fetchone()[0], 1)
+                receipt = memory.latest_recovery_attestation()["evidence_json"]
+                self.assertNotIn("Synthetic private conversation canary", receipt)
+                with closing(sqlite3.connect(retained / result["backup_artifact"])) as backup:
+                    self.assertEqual(snapshot(backup), before)
+                    self.assertEqual(backup.execute("SELECT count(*) FROM recovery_attestations").fetchone()[0], 0)
+
+    def test_unverified_foreign_final_artifact_is_neither_retained_nor_cleaned_up(self):
+        for receipt_fails in (False, True):
+            with self.subTest(receipt_fails=receipt_fails), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                data, workspace, retained = root / "data", root / "workspace", root / "retained"
+                for folder in (data, workspace, retained):
+                    folder.mkdir()
+                config = SimpleNamespace(data_dir=data, workspace=workspace)
+                foreign = []
+
+                def unverified(*args, foreign=foreign, **kwargs):
+                    path = kwargs["backup_path"]
+                    path.write_bytes(b"not-created-by-the-backup-helper")
+                    foreign.append(path)
+                    return SimpleNamespace(passed=False, checks={"source_integrity_check": False},
+                                           backup_sha256="0" * 64, restored_sha256="0" * 64,
+                                           schema_version=diagnosis.SCHEMA_VERSION, created_at_utc="synthetic")
+
+                with Memory(data / "jarvis.db") as memory, \
+                        patch.object(diagnosis, "verify_online_backup_and_restore", side_effect=unverified):
+                    if receipt_fails:
+                        with patch.object(memory, "record_recovery_attestation", side_effect=RuntimeError("injected")), \
+                                self.assertRaises(RuntimeError):
+                            diagnosis.run_recovery_test(config, memory, backup_directory=retained)
+                    else:
+                        result = diagnosis.run_recovery_test(config, memory, backup_directory=retained)
+                        self.assertFalse(result["passed"])
+                        self.assertFalse(result["backup_retained"])
+                        self.assertIsNone(result["backup_artifact"])
+                self.assertEqual(foreign[0].read_bytes(), b"not-created-by-the-backup-helper")
+
+    def test_recovery_test_removes_retained_backup_if_receipt_write_fails(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            data = root / "data"
+            workspace = root / "workspace"
+            backup = root / "approved-backup"
+            data.mkdir()
+            workspace.mkdir()
+            backup.mkdir()
+            config = SimpleNamespace(data_dir=data, workspace=workspace)
+
+            def fail_after_creating_sidecars(**_arguments):
+                artifact = next(backup.glob("*.db"))
+                for suffix in ("-journal", "-shm", "-wal"):
+                    Path(f"{artifact}{suffix}").write_bytes(b"private-sidecar")
+                raise RuntimeError("injected receipt failure")
+
+            with Memory(data / "jarvis.db") as memory:
+                with patch.object(
+                    memory,
+                    "record_recovery_attestation",
+                    side_effect=fail_after_creating_sidecars,
+                ):
+                    with self.assertRaisesRegex(RuntimeError, "injected receipt"):
+                        diagnosis.run_recovery_test(
+                            config,
+                            memory,
+                            backup_directory=backup,
+                        )
+
+            self.assertEqual(list(backup.iterdir()), [])
+
+    def test_recovery_test_rejects_model_workspace_as_backup_directory(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            data = root / "data"
+            workspace = root / "workspace"
+            data.mkdir()
+            workspace.mkdir()
+            config = SimpleNamespace(data_dir=data, workspace=workspace)
+            with Memory(data / "jarvis.db") as memory:
+                with self.assertRaisesRegex(ValueError, "outside source"):
+                    diagnosis.run_recovery_test(
+                        config,
+                        memory,
+                        backup_directory=workspace,
+                    )
 
 
 if __name__ == "__main__":

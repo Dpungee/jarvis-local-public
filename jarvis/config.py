@@ -59,6 +59,7 @@ _DOTENV_KEYS = frozenset({
     "JARVIS_CLOUD_RETRY_BACKOFF",
     "JARVIS_OPENAI_API_ENABLED",
     "JARVIS_OPENAI_IMAGES_ENABLED",
+    "JARVIS_XAI_API_ENABLED",
     "JARVIS_ANTHROPIC_API_ENABLED",
     "JARVIS_CODEX_CLI_ENABLED",
     "JARVIS_CLAUDE_CLI_ENABLED",
@@ -78,6 +79,7 @@ _DOTENV_KEYS = frozenset({
     "JARVIS_COMPUTER_ACCESS",
     "JARVIS_COMPUTER_ROOT",
     "JARVIS_NETWORK_ACCESS",
+    "JARVIS_NETWORK_METADATA",
     "JARVIS_NETWORK_MONITOR_ENABLED",
     "JARVIS_NETWORK_MONITOR_INTERVAL_SECONDS",
     "JARVIS_NETWORK_DEFENSE_MODE",
@@ -449,6 +451,7 @@ class Config:
     computer_access: str = "disabled"
     computer_root: Path | None = None
     network_access: str = "disabled"
+    network_metadata: str = "disabled"
     network_monitor_enabled: bool = False
     network_monitor_interval_seconds: int = 300
     network_defense_mode: str = "disabled"
@@ -487,6 +490,7 @@ class Config:
     cloud_retry_backoff: float = 0.5
     openai_api_enabled: bool = False
     openai_images_enabled: bool = False
+    xai_api_enabled: bool = False
     anthropic_api_enabled: bool = False
     codex_cli_enabled: bool = False
     claude_cli_enabled: bool = False
@@ -624,6 +628,9 @@ class Config:
             computer_access=os.getenv("JARVIS_COMPUTER_ACCESS", "disabled").strip().lower(),
             computer_root=Path(os.getenv("JARVIS_COMPUTER_ROOT", ROOT.parent)).resolve(),
             network_access=os.getenv("JARVIS_NETWORK_ACCESS", "disabled").strip().lower(),
+            network_metadata=os.getenv(
+                "JARVIS_NETWORK_METADATA", "disabled"
+            ).strip().lower(),
             network_monitor_enabled=_env_bool(
                 "JARVIS_NETWORK_MONITOR_ENABLED", False
             ),
@@ -711,6 +718,7 @@ class Config:
             ),
             openai_api_enabled=_env_bool("JARVIS_OPENAI_API_ENABLED", False),
             openai_images_enabled=_env_bool("JARVIS_OPENAI_IMAGES_ENABLED", False),
+            xai_api_enabled=_env_bool("JARVIS_XAI_API_ENABLED", False),
             anthropic_api_enabled=_env_bool("JARVIS_ANTHROPIC_API_ENABLED", False),
             codex_cli_enabled=_env_bool("JARVIS_CODEX_CLI_ENABLED", False),
             claude_cli_enabled=_env_bool("JARVIS_CLAUDE_CLI_ENABLED", False),
@@ -827,6 +835,10 @@ class Config:
         if cfg.network_access not in {"disabled", "private-lan"}:
             raise ValueError(
                 "JARVIS_NETWORK_ACCESS must be 'disabled' or 'private-lan'"
+            )
+        if cfg.network_metadata not in {"disabled", "hostname-oui"}:
+            raise ValueError(
+                "JARVIS_NETWORK_METADATA must be 'disabled' or 'hostname-oui'"
             )
         if cfg.network_defense_mode not in {
             "disabled", "alert-only", "safe-readonly"

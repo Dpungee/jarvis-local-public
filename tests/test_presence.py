@@ -96,6 +96,15 @@ class _FakeRuntime:
             "error": None,
         }
         self.public_presence_controls = []
+        self.customization_profile_saves = []
+        self.customization_profile_activations = []
+        self.customization_state = {
+            "available": True,
+            "active": None,
+            "profiles": [],
+            "runtime_settings": {},
+            "error": None,
+        }
         self.network_status_reads = 0
         self.network_scan_calls = []
         self.network_pair_calls = []
@@ -265,6 +274,48 @@ class _FakeRuntime:
 
     def public_presence_status(self):
         return self.public_presence_state
+
+    def customization_profiles_status(self):
+        return self.customization_state
+
+    def preview_customization_profile(self, profile):
+        return {
+            "profile_id": profile["profile_id"],
+            "revision": profile["revision"],
+            "protected_areas": ["approvals", "policy", "verification"],
+            "profile_checksum_sha256": "b" * 64,
+        }
+
+    def save_customization_profile(
+        self, profile, *, expected_previous_checksum, activate
+    ):
+        self.customization_profile_saves.append(
+            (profile, expected_previous_checksum, activate)
+        )
+        self.customization_state = {
+            **self.customization_state,
+            "active": {
+                "profile_id": profile["profile_id"],
+                "revision": profile["revision"],
+                "profile_checksum_sha256": "b" * 64,
+            } if activate else None,
+        }
+        return {
+            "saved": {"saved": True, "profile_id": profile["profile_id"]},
+            "activated": self.customization_state["active"],
+            "status": self.customization_state,
+        }
+
+    def activate_customization_profile(
+        self, profile_id, revision, *, expected_checksum
+    ):
+        self.customization_profile_activations.append(
+            (profile_id, revision, expected_checksum)
+        )
+        return {
+            "activated": {"profile_id": profile_id, "revision": revision},
+            "status": self.customization_state,
+        }
 
     def network_inventory_status(self):
         self.network_status_reads += 1
@@ -2685,6 +2736,8 @@ class PresenceHTTPTests(unittest.TestCase):
             self.assertIn("function providerLabel", script)
             self.assertIn("OpenAI configured · unverified", script)
             self.assertIn("OpenAI circuit open", script)
+            self.assertIn("xAI Grok configured · unverified", script)
+            self.assertIn("xAI Grok circuit open", script)
             self.assertIn("state.activeJobs = new Map", script)
             global_terminal_clear = script.index(
                 "state.activeJobs.delete(payload.conversation_id);"
@@ -2697,6 +2750,11 @@ class PresenceHTTPTests(unittest.TestCase):
             self.assertIn("function renderPinnedProjects", script)
             self.assertIn("openProjectInChat(projectId).catch(showError)", script)
             self.assertIn("function renderArtifacts", script)
+            self.assertIn("function customizationProfileCard", script)
+            self.assertIn("function applyActiveCustomization", script)
+            self.assertIn('post("/api/customization-profiles/preview"', script)
+            self.assertIn('post("/api/customization-profiles/save"', script)
+            self.assertIn('post("/api/customization-profiles/activate"', script)
             self.assertIn("function renderSchedule", script)
             self.assertIn("function renderNetworkInventory", script)
             self.assertIn("function paintNetworkInventory", script)
@@ -2786,6 +2844,56 @@ class PresenceHTTPTests(unittest.TestCase):
                     rule = stylesheet.split(selector + " {", 1)[1].split("}", 1)[0]
                     self.assertIn(f"grid-row: {row};", rule)
             self.assertIn("overflow: hidden;", stylesheet.split(".workspace {", 1)[1].split("}", 1)[0])
+
+    def test_customization_profile_routes_preview_save_and_revert(self):
+        profile = {
+            "schema_version": 1,
+            "profile_id": "operator-default",
+            "display_name": "Operator Jarvis",
+            "revision": 1,
+            "settings": {
+                "appearance": {"theme": "midnight", "compact": False},
+                "conversation": {"tone": "natural", "detail": "adaptive"},
+                "model_routing": {"priority": "balanced"},
+            },
+        }
+        with self.request("/api/customization-profiles") as response:
+            status = json.load(response)
+        self.assertTrue(status["available"])
+
+        with self.request(
+            "/api/customization-profiles/preview", payload={"profile": profile}
+        ) as response:
+            preview = json.load(response)["preview"]
+        self.assertEqual(preview["profile_id"], "operator-default")
+        self.assertIn("approvals", preview["protected_areas"])
+
+        with self.request(
+            "/api/customization-profiles/save",
+            payload={
+                "profile": profile,
+                "expected_previous_checksum": None,
+                "activate": True,
+            },
+        ) as response:
+            saved = json.load(response)
+        self.assertEqual(saved["activated"]["revision"], 1)
+        self.assertEqual(len(self.runtime.customization_profile_saves), 1)
+
+        with self.request(
+            "/api/customization-profiles/activate",
+            payload={
+                "profile_id": "operator-default",
+                "revision": 1,
+                "expected_checksum": "b" * 64,
+            },
+        ) as response:
+            activated = json.load(response)
+        self.assertEqual(activated["activated"]["revision"], 1)
+        self.assertEqual(
+            self.runtime.customization_profile_activations,
+            [("operator-default", 1, "b" * 64)],
+        )
 
     def test_conversation_and_chat_routes(self):
         with self.request("/api/projects") as response:

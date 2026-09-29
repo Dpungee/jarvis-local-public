@@ -63,6 +63,81 @@ class OperatorStateMemoryMixin:
             )
         return int(cur.lastrowid)
 
+    def record_reliability_case(self, artifact: dict[str, Any]) -> dict[str, Any]:
+        """Persist one prompt-free failure case as an idempotent audit receipt.
+
+        The closed validator rejects conversation text, paths, URLs, tool
+        inputs/results, and secret-shaped data before the transaction begins.
+        Equal sanitized failures share a deterministic case id, so retrying a
+        promotion cannot create duplicate regression fixtures.
+        """
+
+        self._ensure_open()
+        case = _memory().validate_failure_case(artifact)
+        case_id = str(case["case_id"])
+        payload = _memory().json.dumps(
+            case,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        payload = _memory()._bounded_persisted_text(payload, 32_000, "reliability case")
+        with self._immediate_transaction():
+            existing = self.db.execute(
+                """SELECT id, details_json FROM activity_log
+                   WHERE category='reliability_case' AND action=?
+                   ORDER BY id LIMIT 1""",
+                (case_id,),
+            ).fetchone()
+            if existing is not None:
+                if str(existing["details_json"]) != payload:
+                    raise ValueError(
+                        "Reliability case id already exists with different content"
+                    )
+                return {
+                    "activity_id": int(existing["id"]),
+                    "case_id": case_id,
+                    "created": False,
+                    "checksum_sha256": case["checksum_sha256"],
+                }
+            cursor = self.db.execute(
+                """INSERT INTO activity_log(
+                       created_at, category, action, status, task_id, details_json
+                   ) VALUES (?, 'reliability_case', ?, 'frozen', NULL, ?)""",
+                (_memory().now_iso(), case_id, payload),
+            )
+        return {
+            "activity_id": int(cursor.lastrowid),
+            "case_id": case_id,
+            "created": True,
+            "checksum_sha256": case["checksum_sha256"],
+        }
+
+    def list_reliability_cases(self, limit: int = 100) -> list[dict[str, Any]]:
+        """Return integrity-checked reliability artifacts, newest first."""
+
+        self._ensure_open()
+        limit = _memory()._bounded_limit(limit, 10_000)
+        if not limit:
+            return []
+        rows = self.db.execute(
+            """SELECT id, created_at, details_json FROM activity_log
+               WHERE category='reliability_case'
+               ORDER BY id DESC LIMIT ?""",
+            (limit,),
+        ).fetchall()
+        output: list[dict[str, Any]] = []
+        for row in rows:
+            case = _memory().validate_failure_case(
+                _memory().json.loads(str(row["details_json"]))
+            )
+            output.append({
+                "activity_id": int(row["id"]),
+                "created_at": str(row["created_at"]),
+                **case,
+            })
+        return output
+
     def list_activity(self, limit: int = 100) -> list[dict[str, Any]]:
         self._ensure_open()
         limit = _memory()._bounded_limit(limit, 10_000)

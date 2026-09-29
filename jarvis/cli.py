@@ -48,6 +48,7 @@ from .distillation import (
     initialize_pack,
     verify_candidates,
 )
+from .execution import execution_boundary
 from .governed_memory import (
     redact_skill_promotion_command,
     skill_promotion_receipt,
@@ -404,7 +405,7 @@ def _installed_model(wanted: str, installed: list[str]) -> bool:
         provider, provider_model = split_model_reference(wanted)
     except ValueError:
         return False
-    if provider in {"openai", "anthropic", "codex-cli", "claude-cli"}:
+    if provider in {"openai", "xai", "anthropic", "codex-cli", "claude-cli", "openrouter"}:
         return bool(provider_model) and any(
             item.startswith(f"{provider}:") for item in installed
         )
@@ -831,8 +832,12 @@ def doctor(*, deep: bool = False) -> int:
     errors = _local_health_errors(config)
     print(f"  Workspace: {config.workspace}")
     execution_mode = getattr(config, "execution_mode", "disabled")
-    print(f"  Host execution: {execution_mode}")
     execution_backend = str(getattr(config, "execution_backend", "host") or "host")
+    boundary = execution_boundary(execution_backend) if execution_mode == "trusted-host" else None
+    if boundary is None:
+        print("  Process execution: disabled")
+    else:
+        print(f"  Process execution: trusted-host via {execution_backend} ({boundary.id})")
     print(
         "  Execution backend: "
         + _execution_backend_summary(str(execution_mode), execution_backend)
@@ -841,9 +846,15 @@ def doctor(*, deep: bool = False) -> int:
     print(f"  Desktop access: {computer_access}")
     if computer_access == "trusted-desktop":
         print(f"  Desktop boundary: {getattr(config, 'computer_root', config.workspace)}")
-    if execution_mode == "trusted-host":
+    if boundary is not None and boundary.id == "unsandboxed-host":
         print(
-            "  Safety note: trusted-host runs repository code with your Windows account permissions"
+            "  Safety note: unsandboxed host execution runs repository code with "
+            "your current user account authority; process-tree cleanup is not a security boundary"
+        )
+    elif boundary is not None:
+        print(
+            "  Safety note: the restricted Docker container disables network access "
+            "and limits resources, but bind-mounts the workspace read-write"
         )
     print(f"  Local files: {'ready' if not errors else 'needs attention'}")
 
@@ -871,6 +882,11 @@ def doctor(*, deep: bool = False) -> int:
             "  OpenAI: API key configured"
             if provider_status.get("openai_configured")
             else "  OpenAI: not configured"
+        )
+        print(
+            "  xAI Grok: API key configured"
+            if provider_status.get("xai_configured")
+            else "  xAI Grok: not configured"
         )
         images_enabled = bool(
             getattr(config, "cloud_enabled", True)
@@ -1807,7 +1823,9 @@ def _all_routed_models_cloud(config: Any) -> bool:
     )
     configured = [str(model).casefold() for model in models if model]
     return bool(configured) and all(
-        model.startswith(("openai:", "anthropic:", "codex-cli:", "claude-cli:"))
+        model.startswith((
+            "openai:", "xai:", "anthropic:", "codex-cli:", "claude-cli:", "openrouter:"
+        ))
         for model in configured
     )
 
@@ -6218,7 +6236,7 @@ def _run_recovery(args: argparse.Namespace) -> int:
     config = Config.load()
     with Memory(config.data_dir / "jarvis.db") as memory:
         if args.recovery_command == "test":
-            result = run_recovery_test(config, memory)
+            result = run_recovery_test(config, memory, backup_directory=args.backup_dir)
             print(json.dumps(result, ensure_ascii=False, indent=2, default=str))
             return 0 if result["passed"] else 3
         attestation = memory.latest_recovery_attestation()
@@ -6796,7 +6814,7 @@ def _parser() -> argparse.ArgumentParser:
         default=None,
         help=(
             "auto, fast, reasoning, coding, deep, a local Ollama name, or "
-            "openai:<model>/anthropic:<model>"
+            "openai:<model>/xai:<model>/anthropic:<model>"
         ),
     )
     task = sub.add_parser("task", help="queue or list background tasks")
@@ -7234,7 +7252,12 @@ def _parser() -> argparse.ArgumentParser:
     repair_show.add_argument("proposal_id", type=int)
     recovery = sub.add_parser("recovery", help="test and inspect recovery readiness")
     recovery_sub = recovery.add_subparsers(dest="recovery_command", required=True)
-    recovery_sub.add_parser("test")
+    recovery_test = recovery_sub.add_parser("test")
+    recovery_test.add_argument(
+        "--backup-dir", type=Path,
+        help="Retain a uniquely named online backup in this existing operator-approved directory; "
+             "omitted means a disposable recovery drill.",
+    )
     recovery_sub.add_parser("status")
     domain = sub.add_parser("domain", help="manage bounded standing work authorization")
     domain_sub = domain.add_subparsers(dest="domain_command", required=True)

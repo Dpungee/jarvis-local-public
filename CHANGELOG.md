@@ -5,6 +5,24 @@ semantic versioning for tagged releases.
 
 ## [Unreleased]
 
+### Agent Hub and release integration
+
+- Add conversational Hub uploads, image and team workflows, connector support,
+  provider/onboarding updates, and reliability tools while retaining the guided installer.
+- Bind connector tools to fixed actions and current grants, validate schemas and
+  exact approvals at dispatch, refuse credential-bearing redirects, and avoid
+  automatic retries when a remote action's outcome is uncertain.
+- Require explicit grants for capabilities missing from older saved agent settings.
+- Encrypt Hub connector credentials and the OpenRouter key with Windows-account
+  protection, verified atomic migration, and no plaintext fallback. Credential
+  storage enforcement is immutable to automated self-repair.
+- Add verified SQLite backup/isolated restore receipts, actual execution-boundary
+  reporting, sanitized release-baseline evidence, and reproducible source builds.
+- Correct schedule test clocks, bounded browser startup-file recovery, and the
+  serialized promotion-transition result without relaxing verification gates.
+- Retain current dependency locks and newer governed-memory protections; obsolete
+  virtual-environment-only installer changes are not reinstated.
+
 ### Autonomous multi-agent upgrade preparation
 
 - Correct the running-task prerequisite invariant and add schema-2 immutable

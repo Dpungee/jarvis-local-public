@@ -43,6 +43,23 @@ independent; rotate every service whose value or authorization may have been exp
 Credential rotation is an operator action and cannot be inferred from a clean source
 scan.
 
+## Hub credential storage
+
+Hub-managed MCP connection secrets and the OpenRouter API key are encrypted with
+AES-GCM; Windows per-user DPAPI protects their encryption keys. Scratch files
+contain ciphertext only, and replacement requires successful disk readback and
+decryption. A failed legacy-file migration preserves the original and refuses to
+return its credential. Unavailable protection or corrupted ciphertext never falls
+back to plaintext or an alternate environment credential.
+
+This is Windows-only, path- and purpose-bound storage, not a portable secret vault.
+Moving a profile or changing accounts requires reconnecting or re-entering keys.
+Same-account malicious processes, privileged access, whole-file rollback, old
+plaintext backups, and recoverable disk remnants remain outside this protection.
+Existing environment-variable and official CLI credential flows are separate.
+Credential encryption does not authorize publication: real keys, tokens, private
+keys, and runtime credential files must remain outside Git, reports, and prompts.
+
 ## Supported versions
 
 JARVIS Local is currently an alpha public preview. Security fixes target the latest

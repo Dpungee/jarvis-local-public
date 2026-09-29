@@ -84,6 +84,7 @@ from .redaction import (  # noqa: F401 - compatibility facade
     redact_secrets,
     screen_endpoint,
 )
+from .reliability_lab import validate_failure_case  # noqa: F401 - compatibility facade
 from .run_observability import aggregate_run_metrics, sanitize_run_metrics  # noqa: F401 - compatibility facade
 from .specialists import (  # noqa: F401 - compatibility facade
     SPECIALISTS,
@@ -767,7 +768,23 @@ _AMBIGUOUS_LEARNING_REFERENCE = re.compile(
 _ACTION_LEARNING_REQUEST = re.compile(
     r"^\s*(?:(?:ok|okay|now|please|also)\b[, ]*)*"
     r"(?:i\s+(?:want|need)\s+you\s+to\s+|can\s+you\s+|go\s+(?:and\s+)?)?"
-    r"(?:add|install|remove|delete|upload|send|clean|organize|publish|deploy)\b",
+    r"(?:add|build|clean|convert|copy|create|delete|deploy|edit|export|generate|"
+    r"include|install|launch|move|open|organize|publish|remove|rename|render|run|"
+    r"send|test|update|upload|verify|write)\b",
+    re.I,
+)
+_CONTEXTUAL_ACTION_LEARNING_REQUEST = re.compile(
+    r"^\s*(?:(?:inside|within|in|using|with)\b[^.!?\r\n]{0,180}[,:]\s*)"
+    r"(?:add|build|clean|convert|copy|create|delete|deploy|edit|export|generate|"
+    r"include|install|launch|move|open|organize|publish|remove|rename|render|run|"
+    r"send|test|update|upload|verify|write)\b",
+    re.I,
+)
+_FOLLOWUP_ACTION_LEARNING_CLAUSE = re.compile(
+    r"(?:^|[.!?;]\s+)(?:and\s+|then\s+)?(?:do\s+not\s+)?"
+    r"(?:add|build|clean|convert|copy|create|delete|deploy|edit|export|generate|"
+    r"include|install|launch|move|open|organize|publish|remove|rename|render|run|"
+    r"send|test|update|upload|verify|write)\b",
     re.I,
 )
 
@@ -782,6 +799,8 @@ def _validated_learning_topic(topic: Any) -> str:
     if (
         _AMBIGUOUS_LEARNING_REFERENCE.search(normalized)
         or _ACTION_LEARNING_REQUEST.search(normalized)
+        or _CONTEXTUAL_ACTION_LEARNING_REQUEST.search(normalized)
+        or _FOLLOWUP_ACTION_LEARNING_CLAUSE.search(normalized)
     ):
         raise ValueError(
             "Learning topic must be a self-contained subject, not an action or unresolved reference"

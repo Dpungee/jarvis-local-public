@@ -21,6 +21,7 @@ from uuid import uuid4
 from .approvals import SENSITIVE_ACTIONS
 from .config import SOURCE_ROOT, Config
 from .memory import SCHEMA_VERSION, Memory
+from .sqlite_recovery import remove_sqlite_artifacts, verify_online_backup_and_restore
 from .tools import ToolBox, _minimal_environment
 from .trusted_executables import trusted_path_executable
 
@@ -57,6 +58,9 @@ _IMMUTABLE_REPAIR_FILES = frozenset({
     "jarvis/approvals.py",
     "jarvis/constitutional.py",
     "jarvis/config.py",
+    "jarvis/credential_protection.py",
+    "jarvis/connections.py",
+    "jarvis/openrouter.py",
     # After M4, promote_staged_skill is the only function that moves bytes into
     # the live learned-skill root, so self-repair must never be able to draft
     # over the ladder, its staging writers, or the document template.
@@ -96,6 +100,7 @@ _IMMUTABLE_REPAIR_FILES = frozenset({
     "jarvis/moltbook_adapter.py",
     "jarvis/redaction.py",
     "jarvis/self_diagnosis.py",
+    "jarvis/sqlite_recovery.py",
     "jarvis/specialists.py",
     "jarvis/tools.py",
     "jarvis/tools_memory_agent.py",
@@ -779,22 +784,63 @@ def runtime_manifest_sha256(source_root: Path = SOURCE_ROOT) -> str:
     return digest.hexdigest()
 
 
-def run_recovery_test(config: Config, memory: Memory) -> dict[str, Any]:
-    """Attest restart, lease, approval, and SQLite-backup recovery without live mutations."""
-    checks: dict[str, bool] = {}
+def run_recovery_test(
+    config: Config,
+    memory: Memory,
+    *,
+    backup_directory: Path | None = None,
+) -> dict[str, Any]:
+    """Attest synthetic app recovery and a live SQLite backup.
+
+    ``backup_directory`` is an explicit operator-selected retention target. Without
+    it, the command remains a disposable drill and must not be represented as the
+    durable backup required by a release gate. The exercise does not mutate live
+    application or authority state, but it appends its audit attestation to the live
+    recovery ledger.
+    """
+
+    application_checks: dict[str, bool] = {}
+    retained_backup_path: Path | None = None
+    retained_root: Path | None = None
+    if backup_directory is not None:
+        supplied_root = Path(backup_directory)
+        details = supplied_root.lstat()
+        attributes = getattr(details, "st_file_attributes", 0)
+        if (
+            not stat.S_ISDIR(details.st_mode)
+            or stat.S_ISLNK(details.st_mode)
+            or attributes & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+        ):
+            raise ValueError("Recovery backup directory must be an ordinary directory")
+        retained_root = supplied_root.resolve(strict=True)
+        lexical_root = Path(os.path.abspath(supplied_root))
+        if lexical_root != retained_root:
+            raise ValueError("Recovery backup directory must not traverse a link")
+        if retained_root == Path(retained_root.anchor):
+            raise ValueError("Recovery backup directory must not be a filesystem root")
+        excluded_roots = [SOURCE_ROOT.resolve()]
+        configured_workspace = getattr(config, "workspace", None)
+        if configured_workspace is not None:
+            excluded_roots.append(Path(configured_workspace).resolve(strict=False))
+        if any(retained_root.is_relative_to(root) for root in excluded_roots):
+            raise ValueError(
+                "Recovery backup directory must be outside source and model workspaces"
+            )
     with tempfile.TemporaryDirectory(prefix="jarvis-recovery-") as temporary:
         temporary_root = Path(temporary)
         recovery_db = temporary_root / "recovery.db"
         with Memory(recovery_db) as first:
-            checks["schema_current"] = (
+            application_checks["schema_current"] = (
                 int(first.db.execute("PRAGMA user_version").fetchone()[0])
                 == SCHEMA_VERSION
             )
             first.set_control_state("stopped", "recovery canary")
-            checks["stop_persisted"] = first.control_state()["state"] == "stopped"
+            application_checks["stop_persisted"] = (
+                first.control_state()["state"] == "stopped"
+            )
             first.set_control_state("running")
             roster = first.list_specialist_agents()
-            checks["specialist_roster_seeded"] = {
+            application_checks["specialist_roster_seeded"] = {
                 str(item["agent_key"]) for item in roster
             } == {"coding", "research", "cybersecurity", "network", "operations"}
             task_id = first.delegate_specialist_task(
@@ -805,9 +851,11 @@ def run_recovery_test(config: Config, memory: Memory) -> dict[str, Any]:
             )
             base = datetime.now(timezone.utc) + timedelta(milliseconds=10)
             claimed = first.claim_task("recovery-worker", lease_seconds=5, now=base)
-            checks["task_claimed"] = claimed is not None and claimed["id"] == task_id
+            application_checks["task_claimed"] = (
+                claimed is not None and claimed["id"] == task_id
+            )
             active_specialist = first.get_specialist_agent("coding")
-            checks["specialist_claim_bound"] = (
+            application_checks["specialist_claim_bound"] = (
                 active_specialist is not None
                 and active_specialist["status"] == "working"
                 and active_specialist["active_task_id"] == task_id
@@ -817,17 +865,22 @@ def run_recovery_test(config: Config, memory: Memory) -> dict[str, Any]:
                 approval_scope=f"task:{task_id}", task_id=task_id,
             )
         with Memory(recovery_db) as reopened:
-            checks["restart_opened"] = reopened.db.execute("PRAGMA quick_check").fetchone()[0] == "ok"
+            application_checks["restart_opened"] = (
+                reopened.db.execute("PRAGMA quick_check").fetchone()[0] == "ok"
+            )
             persisted_specialist = reopened.get_specialist_agent("coding")
-            checks["specialist_assignment_survived_restart"] = (
+            application_checks["specialist_assignment_survived_restart"] = (
                 persisted_specialist is not None
                 and persisted_specialist["status"] == "working"
                 and persisted_specialist["active_task_id"] == task_id
             )
             recovered = reopened.recover_stale_tasks(now=base + timedelta(seconds=6))
-            checks["expired_lease_requeued"] = recovered == {"requeued": 1, "failed": 0}
+            application_checks["expired_lease_requeued"] = recovered == {
+                "requeued": 1,
+                "failed": 0,
+            }
             recovered_specialist = reopened.get_specialist_agent("coding")
-            checks["specialist_lease_recovered"] = (
+            application_checks["specialist_lease_recovered"] = (
                 recovered_specialist is not None
                 and recovered_specialist["status"] == "ready"
                 and recovered_specialist["active_task_id"] is None
@@ -836,50 +889,91 @@ def run_recovery_test(config: Config, memory: Memory) -> dict[str, Any]:
                 item for item in reopened.list_approvals()
                 if item["status"] == "pending"
             )
-            checks["approval_survived_restart"] = pending["task_id"] == task_id
-            checks["approval_decision_persisted"] = reopened.decide_approval(
+            application_checks["approval_survived_restart"] = pending["task_id"] == task_id
+            application_checks["approval_decision_persisted"] = reopened.decide_approval(
                 int(pending["id"]), True
             )
             claimed_again = reopened.claim_task(
                 "recovery-worker", now=base + timedelta(seconds=6)
             )
-            checks["approved_task_resumed"] = (
+            application_checks["approved_task_resumed"] = (
                 claimed_again is not None and claimed_again["id"] == task_id
             )
             allowed, consumed_id = reopened.authorize_or_request(
                 "publish_external", "recovery-canary-resource", "Recovery canary.",
                 approval_scope=f"task:{task_id}", task_id=task_id,
             )
-            checks["approval_consumed_once"] = allowed and consumed_id == pending["id"]
+            application_checks["approval_consumed_once"] = (
+                allowed and consumed_id == pending["id"]
+            )
             allowed_again, _ = reopened.authorize_or_request(
                 "publish_external", "recovery-canary-resource", "Recovery canary.",
                 approval_scope=f"task:{task_id}", task_id=task_id,
             )
-            checks["second_effect_blocked"] = not allowed_again
-        backup_path = temporary_root / "live-backup.db"
-        import sqlite3
-        backup = sqlite3.connect(backup_path)
-        try:
-            memory.db.backup(backup)
-            checks["live_backup_quick_check"] = backup.execute(
-                "PRAGMA quick_check"
-            ).fetchone()[0] == "ok"
-        finally:
-            backup.close()
-    runtime_hash = runtime_manifest_sha256()
-    passed = all(checks.values())
-    attestation_id = memory.record_recovery_attestation(
-        runtime_sha256=runtime_hash,
-        passed=passed,
-        evidence={
-            "checks": checks,
-            "isolated": True,
-            "live_operational_state_mutated": False,
-        },
+            application_checks["second_effect_blocked"] = not allowed_again
+        if retained_root is not None:
+            stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+            retained_backup_path = retained_root / (
+                f"jarvis-recovery-{stamp}-{uuid4().hex[:12]}.db"
+            )
+        runtime_hash = runtime_manifest_sha256()
+        backup_evidence = verify_online_backup_and_restore(
+            memory.db,
+            temporary_root=temporary_root,
+            expected_schema_version=SCHEMA_VERSION,
+            backup_path=retained_backup_path,
+        )
+    backup_retained = (
+        backup_evidence.passed
+        and retained_backup_path is not None
+        and retained_backup_path.is_file()
     )
+    checks = {
+        **{
+            f"synthetic_application_{name}": passed
+            for name, passed in application_checks.items()
+        },
+        **{
+            f"live_backup_{name}": passed
+            for name, passed in backup_evidence.checks.items()
+        },
+    }
+    passed = all(checks.values())
+    backup_receipt = {
+        "created_at_utc": backup_evidence.created_at_utc,
+        "backup_sha256": backup_evidence.backup_sha256,
+        "restored_sha256": backup_evidence.restored_sha256,
+        "restored_schema_version": backup_evidence.schema_version,
+        "artifact_retained": backup_retained,
+        "artifact_name": retained_backup_path.name if backup_retained else None,
+        "restored_live_application_state_validated": False,
+    }
+    try:
+        attestation_id = memory.record_recovery_attestation(
+            runtime_sha256=runtime_hash,
+            passed=passed,
+            evidence={
+                "synthetic_application_checks": application_checks,
+                "live_backup_restore_checks": backup_evidence.checks,
+                "backup_receipt": backup_receipt,
+                "application_checks_are_synthetic": True,
+                "live_application_or_authority_state_mutated": False,
+                "live_recovery_attestation_appended": True,
+            },
+        )
+    except BaseException:
+        if backup_retained and retained_backup_path is not None:
+            remove_sqlite_artifacts(retained_backup_path)
+        raise
     return {
         "attestation_id": attestation_id,
         "passed": passed,
         "runtime_sha256": runtime_hash,
         "checks": checks,
+        "backup_sha256": backup_evidence.backup_sha256,
+        "restored_sha256": backup_evidence.restored_sha256,
+        "restored_schema_version": backup_evidence.schema_version,
+        "backup_retained": backup_retained,
+        "backup_artifact": retained_backup_path.name if backup_retained else None,
+        "restored_live_application_state_validated": False,
     }

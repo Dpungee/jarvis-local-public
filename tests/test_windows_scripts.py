@@ -733,10 +733,10 @@ class WindowsScriptTests(unittest.TestCase):
         env["JARVIS_TEST_INVENTORY_SEEN"] = str(seen)
         return env
 
-    def _run_setup(self, env: dict[str, str]) -> subprocess.CompletedProcess[str]:
+    def _run_setup(self, env: dict[str, str], *arguments: str) -> subprocess.CompletedProcess[str]:
         shutil.copy2(ROOT / "setup.ps1", self.project / "setup.ps1")
         return subprocess.run(
-            [str(POWERSHELL), "-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", str(self.project / "setup.ps1")],
+            [str(POWERSHELL), "-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", str(self.project / "setup.ps1"), *arguments],
             cwd=self.project,
             env=env,
             capture_output=True,
@@ -1028,6 +1028,85 @@ class WindowsScriptTests(unittest.TestCase):
         self.assertIn("Ready.", completed.stdout)
         self.assertIn("start_jarvis_presence.bat", completed.stdout)
         self.assertIn("does not create a virtual environment", completed.stdout)
+
+    def _stub_agent_hub_installer(self) -> None:
+        (self.project / "install_agent_hub.ps1").write_bytes(
+            ('Add-Content -LiteralPath $env:JARVIS_TEST_TRACE -Value "AGENT_HUB_INSTALL" -Encoding ascii\r\n'
+             "exit 0\r\n").encode("ascii")
+        )
+
+    def test_unattended_setup_skips_the_agent_hub_without_prompting(self):
+        env = self._setup_fakes((), (), ollama_enabled=False)
+        self._stub_agent_hub_installer()
+        completed = self._run_setup(env)
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertIn("[5/5] Agent Hub (optional)", completed.stdout)
+        self.assertIn("Skipped (unattended setup)", completed.stdout)
+        self.assertNotIn("AGENT_HUB_INSTALL", self._trace_lines())
+        self.assertIn("Ready.", completed.stdout)
+
+    def test_setup_agent_hub_yes_runs_the_hub_installer(self):
+        env = self._setup_fakes((), (), ollama_enabled=False)
+        self._stub_agent_hub_installer()
+        completed = self._run_setup(env, "-AgentHub", "yes")
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertEqual(self._trace_lines().count("AGENT_HUB_INSTALL"), 1)
+        # The Hub is set up after JARVIS itself is verified.
+        trace = self._trace_lines()
+        self.assertLess(trace.index("python -X utf8 -m jarvis doctor"), trace.index("AGENT_HUB_INSTALL"))
+        self.assertIn("start_agent_hub.bat", completed.stdout)
+
+    def test_setup_agent_hub_no_skips_it(self):
+        env = self._setup_fakes((), (), ollama_enabled=False)
+        self._stub_agent_hub_installer()
+        completed = self._run_setup(env, "-AgentHub", "no")
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertNotIn("AGENT_HUB_INSTALL", self._trace_lines())
+        self.assertIn("Run install_agent_hub.bat any time", completed.stdout)
+        self.assertNotIn("start_agent_hub.bat or the", completed.stdout)
+
+    def test_setup_rejects_an_unknown_agent_hub_choice(self):
+        env = self._setup_fakes((), (), ollama_enabled=False)
+        completed = self._run_setup(env, "-AgentHub", "maybe")
+        self.assertNotEqual(completed.returncode, 0)
+        self.assertNotIn("Ready.", completed.stdout)
+
+    def test_agent_hub_installer_checks_the_hub_and_adds_a_shortcut(self):
+        self._write_cmd(self.fake_bin / "python.cmd", [
+            "@echo off",
+            '>>"%JARVIS_TEST_TRACE%" echo HUB_CHECK',
+            "exit /b 0",
+        ])
+        shutil.copy2(ROOT / "install_agent_hub.ps1", self.project / "install_agent_hub.ps1")
+        shortcuts = self.temp_path / "shortcuts"
+        env = self._base_env()
+        env["JARVIS_AGENT_HUB_SHORTCUT_DIR"] = str(shortcuts)
+        completed = subprocess.run(
+            [str(POWERSHELL), "-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
+             "-File", str(self.project / "install_agent_hub.ps1")],
+            cwd=self.project, env=env, capture_output=True, text=True, encoding="utf-8",
+            errors="replace", timeout=30, check=False,
+        )
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertEqual(self._trace_lines().count("HUB_CHECK"), 1)
+        self.assertTrue((shortcuts / "JARVIS Agent Hub.lnk").is_file())
+        self.assertTrue((self.project / "data" / "agent-hub").is_dir())
+        self.assertIn("Agent Hub ready", completed.stdout)
+
+    def test_agent_hub_installer_stops_safely_when_the_hub_does_not_load(self):
+        self._write_cmd(self.fake_bin / "python.cmd", ["@echo off", "exit /b 3"])
+        shutil.copy2(ROOT / "install_agent_hub.ps1", self.project / "install_agent_hub.ps1")
+        env = self._base_env()
+        env["JARVIS_AGENT_HUB_SHORTCUT_DIR"] = str(self.temp_path / "shortcuts")
+        completed = subprocess.run(
+            [str(POWERSHELL), "-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
+             "-File", str(self.project / "install_agent_hub.ps1")],
+            cwd=self.project, env=env, capture_output=True, text=True, encoding="utf-8",
+            errors="replace", timeout=30, check=False,
+        )
+        self.assertNotEqual(completed.returncode, 0)
+        self.assertIn("Agent Hub setup stopped safely.", completed.stderr)
+        self.assertFalse((self.temp_path / "shortcuts" / "JARVIS Agent Hub.lnk").exists())
 
     def test_setup_skips_case_insensitive_exact_installs(self):
         required = ("one:1", "two:2", "three:3")
@@ -1389,6 +1468,8 @@ class WindowsScriptTests(unittest.TestCase):
             "install_presence.ps1",
             "uninstall_presence.ps1",
             "presence_lifecycle.ps1",
+            "install_agent_hub.ps1",
+            "start_agent_hub.ps1",
         ):
             script = str(ROOT / script_name).replace("'", "''")
             command = (
@@ -1439,6 +1520,8 @@ class WindowsScriptTests(unittest.TestCase):
             ("setup.bat", "setup.ps1"),
             ("install_worker.bat", "install_worker.ps1"),
             ("uninstall_worker.bat", "uninstall_worker.ps1"),
+            ("install_agent_hub.bat", "install_agent_hub.ps1"),
+            ("start_agent_hub.bat", "start_agent_hub.ps1"),
         ):
             source = (ROOT / batch_name).read_text(encoding="utf-8")
             self.assertIn(target, source)
@@ -1510,7 +1593,9 @@ class WindowsScriptTests(unittest.TestCase):
         self.assertIn("start_jarvis_presence.bat", readme)
         self.assertIn("does not create a", readme)
         self.assertIn("virtual environment", readme)
-        self.assertIn("Manual local-only Ollama path", guide)
+        self.assertIn("Local-only Ollama path", guide)
+        self.assertIn("Grok through xAI", guide)
+        self.assertIn("XAI_API_KEY", guide)
         self.assertIn("An unchanged copy of `.env.example` does not count", guide)
         self.assertIn("tool-free first-turn", guide)
 
@@ -1537,3 +1622,23 @@ class WindowsScriptTests(unittest.TestCase):
 if __name__ == "__main__":
     unittest.main()
 
+
+
+class AgentHubLauncherContractTests(unittest.TestCase):
+    def test_launcher_runs_the_hub_detached_and_never_prints_the_sign_in_link(self):
+        source = (ROOT / "start_agent_hub.ps1").read_text(encoding="utf-8")
+        self.assertIn('"-m", "jarvis.agent_hub"', source)
+        self.assertIn("-WindowStyle Hidden", source)
+        self.assertIn("data\\agent-hub", source)
+        self.assertNotRegex(source, r"Write-Host[^\n]*\$link")
+        self.assertIn("Start-Process $link", source)
+
+    def test_the_hub_check_the_installer_runs_passes_on_this_checkout(self):
+        import re
+        import sys
+
+        source = (ROOT / "install_agent_hub.ps1").read_text(encoding="utf-8")
+        code = re.search(r'-X utf8 -c "([^"]+)"', source).group(1)
+        completed = subprocess.run([sys.executable, "-X", "utf8", "-c", code], cwd=ROOT,
+                                   capture_output=True, text=True, timeout=120, check=False)
+        self.assertEqual(completed.returncode, 0, completed.stderr)

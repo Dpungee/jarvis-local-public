@@ -198,6 +198,24 @@ def task(attempt=1, maximum=4, prompt="do the work"):
 
 
 class CliOfflineTests(unittest.TestCase):
+    def test_recovery_backup_directory_is_an_explicit_optional_operator_argument(self):
+        from contextlib import nullcontext
+
+        for directory in (None, Path("approved-backup")):
+            with self.subTest(directory=directory):
+                arguments = ["recovery", "test"]
+                if directory is not None:
+                    arguments += ["--backup-dir", str(directory)]
+                args = cli._parser().parse_args(arguments)
+                self.assertEqual(args.backup_dir, directory)
+                config, memory = fake_config(), object()
+                with patch.object(cli.Config, "load", return_value=config), \
+                        patch.object(cli, "Memory", return_value=nullcontext(memory)), \
+                        patch.object(cli, "run_recovery_test", return_value={"passed": True}) as run, \
+                        patch("sys.stdout", io.StringIO()):
+                    self.assertEqual(cli._run_recovery(args), 0)
+                run.assert_called_once_with(config, memory, backup_directory=directory)
+
     def setUp(self):
         FakeMemory.instances = []
         FakeMemory.tasks = []
@@ -1188,6 +1206,46 @@ class ValidationAndDoctorTests(unittest.TestCase):
         self.assertIn("Reasoning: reason:1 (missing)", output)
         self.assertIn("Coding: code:1 (missing)", output)
         self.assertIn("Status: not ready", output)
+
+    def test_doctor_labels_disabled_host_and_docker_execution_boundaries(self):
+        client = SimpleNamespace(models=Mock(return_value=[]))
+        cases = (
+            (
+                "disabled",
+                "host",
+                "Process execution: disabled",
+                ("unsandboxed host execution", "restricted Docker container"),
+            ),
+            (
+                "trusted-host",
+                "host",
+                "trusted-host via host (unsandboxed-host)",
+                ("restricted Docker container",),
+            ),
+            (
+                "trusted-host",
+                "docker",
+                "trusted-host via docker (restricted-docker-container)",
+                ("unsandboxed host execution", "current user account authority"),
+            ),
+        )
+        for mode, backend, expected, absent in cases:
+            with self.subTest(mode=mode, backend=backend):
+                config = fake_config()
+                config.execution_mode = mode
+                config.execution_backend = backend
+                stdout = io.StringIO()
+                with (
+                    patch.object(cli.Config, "load", return_value=config),
+                    patch.object(cli, "_local_health_errors", return_value=[]),
+                    patch.object(cli, "_new_client", return_value=client),
+                    patch("sys.stdout", stdout),
+                ):
+                    cli.doctor()
+                output = stdout.getvalue()
+                self.assertIn(expected, output)
+                for phrase in absent:
+                    self.assertNotIn(phrase, output)
 
     def test_doctor_rejects_online_ollama_with_no_models(self):
         client = SimpleNamespace(models=Mock(return_value=[]))

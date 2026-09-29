@@ -4,6 +4,7 @@ import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import patch
 
 from jarvis.agent import Agent
 from jarvis.config import Config
@@ -184,7 +185,12 @@ class HubAgentCapabilityTests(unittest.TestCase):
         self.assertTrue(all(self.service.runtime.agent_settings(agent["agent_id"])["permissions"].values()))
 
     def test_schedules_run_in_their_chat_and_quiet_watches_stay_hidden(self):
-        import time as clock
+        from datetime import datetime
+        # A daily 08:00 job is tomorrow, independent of host timezone or wall clock.
+        base = datetime(2026, 9, 26, 9, 0).timestamp()
+        fixed_clock = patch("jarvis.agent_hub_runtime._now", return_value=base)
+        fixed_clock.start()
+        self.addCleanup(fixed_clock.stop)
         agent = self.service.create_agent({"name": "C", "role": "r", "provider": "claude-cli",
                                            "model": "claude-opus-5-5", "enable": True})
         chat = self.service.create_chat(agent["agent_id"], {"title": "Watch"})["chat_id"]
@@ -201,7 +207,7 @@ class HubAgentCapabilityTests(unittest.TestCase):
             create(name="x", instructions="y", daily_at="25:00")
         daily = create(name="News", instructions="Crypto news.", daily_at="08:00")
         self.assertIn("T08:00", daily["next_run"])
-        queued = self.service.runtime.run_due_schedules(now=clock.time() + 400)
+        queued = self.service.runtime.run_due_schedules(now=base + 400)
         self.assertEqual(len(queued), 1)
         run = self.service.runtime.task(queued[0])
         self.assertIn("Only report if this is true: the price is below $80,000", run["request"])
@@ -210,7 +216,7 @@ class HubAgentCapabilityTests(unittest.TestCase):
         view = self.service.chat(agent["agent_id"], chat)
         self.assertNotIn(queued[0], [t["task_id"] for t in view["agent_turns"]])
         # The same due slot is never queued twice.
-        self.assertEqual(self.service.runtime.run_due_schedules(now=clock.time() + 400), [])
+        self.assertEqual(self.service.runtime.run_due_schedules(now=base + 400), [])
 
 
 class ChatScopedTaintGrantTests(OpenAgentTurnTests):
@@ -248,6 +254,31 @@ class ChatScopedTaintGrantTests(OpenAgentTurnTests):
 
 
 class ScheduleTimingTests(HubAgentCapabilityTests):
+    def test_daily_and_interval_overlap_queue_each_once_at_the_due_boundary(self):
+        from datetime import datetime
+
+        base = datetime(2026, 9, 26, 7, 55).timestamp()
+        with patch("jarvis.agent_hub_runtime._now", return_value=base):
+            tools = self.tools()
+            create = tools["schedule_create"].function
+            interval = create(name="Interval", instructions="interval check", every_minutes=5)
+            daily = create(name="Daily", instructions="daily check", daily_at="08:00")
+            self.assertEqual(interval["next_run"], daily["next_run"])
+            self.assertEqual(self.service.runtime.run_due_schedules(now=base + 299.999), [])
+            queued = self.service.runtime.run_due_schedules(now=base + 300)
+            self.assertEqual(len(queued), 2)
+            self.assertEqual(len(set(queued)), 2)
+            self.assertEqual({self.service.runtime.task(task_id)["request"] for task_id in queued}, {
+                "⏰ Scheduled job “Interval”: interval check",
+                "⏰ Scheduled job “Daily”: daily check",
+            })
+            self.assertEqual(self.service.runtime.run_due_schedules(now=base + 300), [])
+            self.assertEqual(self.service.runtime.run_due_schedules(now=base + 400), [])
+            with self.service.runtime.db() as db:
+                rows = list(db.execute("SELECT last_task_id, next_run_at FROM hub_schedules"))
+            self.assertEqual({row["last_task_id"] for row in rows}, set(queued))
+            self.assertTrue(all(row["next_run_at"] > base + 400 for row in rows))
+
     def tools(self):
         from types import SimpleNamespace as NS
         agent = self.service.create_agent({"name": "S", "role": "r", "provider": "claude-cli",

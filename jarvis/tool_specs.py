@@ -10,6 +10,13 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Sequence
 
+RUN_PROCESS_BOUNDARY_DESCRIPTION = (
+    "Run one allowlisted build/test executable directly without a shell. The result "
+    "labels the effective boundary: either unsandboxed host execution with current-user "
+    "authority or a restricted, networkless Docker container with a read-write workspace "
+    "bind mount."
+)
+
 
 @dataclass(frozen=True, slots=True)
 class ToolSpec:
@@ -257,6 +264,21 @@ def build_tool_specs(
         ToolSpec("list_files", "List files under the workspace boundary.", {
             "type": "object", "properties": {"path": {"type": "string"}, "recursive": {"type": "boolean"}}
         }, 'list_files'),
+        ToolSpec(
+            "code_context_graph",
+            "Build a deterministic, source-free Python module/import/symbol map before broad repository reads. With module omitted it returns a compact inventory; with module set it returns that module and bounded reverse dependencies.",
+            {
+                "type": "object",
+                "additionalProperties": False,
+                "properties": {
+                    "path": {"type": "string"},
+                    "module": {"type": "string", "pattern": "^[A-Za-z0-9_.]+$"},
+                    "max_depth": {"type": "integer", "minimum": 0, "maximum": 6},
+                    "max_files": {"type": "integer", "minimum": 1, "maximum": 2000},
+                },
+            },
+            'code_context_graph',
+        ),
         ToolSpec("read_file", "Read a bounded text range with its file hash and truncation metadata.", {
             "type": "object", "properties": {"path": {"type": "string"}, "start_line": {"type": "integer"}, "end_line": {"type": "integer"}}, "required": ["path"]
         }, 'read_file'),
@@ -342,7 +364,7 @@ def build_tool_specs(
                 "timeout": {"type": "integer", "minimum": 5, "maximum": 600}
             }
         }, 'install_project_dependencies'),
-        ToolSpec("run_process", "Run one allowlisted build/test executable directly without a shell. Trusted-host mode is not a sandbox and repository code runs with the full user account authority.", {
+        ToolSpec("run_process", RUN_PROCESS_BOUNDARY_DESCRIPTION, {
             "type": "object",
             "properties": {
                 "program": {"type": "string"},
@@ -352,7 +374,7 @@ def build_tool_specs(
             },
             "required": ["program"]
         }, 'run_process'),
-        ToolSpec("start_process", "Start one allowlisted long-running workspace process without a shell and capture bounded stdout/stderr logs under JARVIS data.", {
+        ToolSpec("start_process", "Start one allowlisted long-running workspace process without a shell, label its effective host or Docker execution boundary, and capture bounded stdout/stderr logs under JARVIS data.", {
             "type": "object",
             "properties": {
                 "program": {"type": "string"},

@@ -95,6 +95,71 @@ class PresenceRuntimeContractTests(unittest.TestCase):
     def tearDown(self) -> None:
         self.temporary.cleanup()
 
+    @staticmethod
+    def _customization_profile(revision: int = 1) -> dict[str, object]:
+        return {
+            "schema_version": 1,
+            "profile_id": "operator-default",
+            "display_name": "Operator Jarvis",
+            "revision": revision,
+            "settings": {
+                "appearance": {
+                    "theme": "midnight",
+                    "accent": "#22ccff",
+                    "compact": False,
+                },
+                "conversation": {
+                    "tone": "natural",
+                    "detail": "adaptive",
+                    "formatting": "balanced",
+                },
+                "model_routing": {"priority": "quality"},
+                "operator_standards": ["state verified outcomes clearly"],
+            },
+        }
+
+    def test_customization_profile_lifecycle_is_live_versioned_and_durable(self) -> None:
+        runtime = PresenceRuntime(self.config)
+        empty = runtime.customization_profiles_status()
+        self.assertTrue(empty["available"])
+        self.assertIsNone(empty["active"])
+
+        revision_one = self._customization_profile()
+        preview = runtime.preview_customization_profile(revision_one)
+        self.assertIn("approvals", preview["protected_areas"])
+        saved_one = runtime.save_customization_profile(
+            revision_one,
+            expected_previous_checksum=None,
+            activate=True,
+        )
+        self.assertEqual(saved_one["status"]["active"]["revision"], 1)
+        self.assertEqual(
+            saved_one["status"]["runtime_settings"]["model_routing"]["priority"],
+            "quality",
+        )
+
+        revision_two = self._customization_profile(2)
+        revision_two["settings"]["conversation"]["tone"] = "dry-witty"
+        saved_two = runtime.save_customization_profile(
+            revision_two,
+            expected_previous_checksum=preview["profile_checksum_sha256"],
+            activate=True,
+        )
+        revisions = saved_two["status"]["profiles"][0]["revisions"]
+        self.assertEqual([row["revision"] for row in revisions], [1, 2])
+
+        reverted = runtime.activate_customization_profile(
+            "operator-default",
+            1,
+            expected_checksum=preview["profile_checksum_sha256"],
+        )
+        self.assertEqual(reverted["status"]["active"]["revision"], 1)
+        restarted = PresenceRuntime(self.config)
+        self.assertEqual(
+            restarted.customization_profiles_status()["active"]["revision"],
+            1,
+        )
+
     def test_control_status_and_approval_contracts_survive_restart(self) -> None:
         runtime = PresenceRuntime(self.config)
         runtime.set_control("paused", "operator requested a pause")

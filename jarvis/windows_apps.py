@@ -285,8 +285,16 @@ class WindowsAppController:
         if not requested or len(requested) > 200 or any(char in requested for char in "\x00\r\n"):
             raise ValueError("Application name must contain 1-200 plain characters")
         apps = self.catalog()
+        by_id = [app for app in apps if (app.activation_id or "").casefold() == requested]
+        if len(by_id) == 1:
+            return by_id[0]
         exact = [app for app in apps if app.name.casefold() == requested]
         candidates = exact or [app for app in apps if requested in app.name.casefold()]
+        if len(candidates) > 1 and len({app.name.casefold() for app in candidates}) == 1:
+            # One application listed twice (App Paths and the Start menu, for example): the
+            # Start-menu registration is the one Windows itself launches.
+            registered = [app for app in candidates if app.activation_id]
+            candidates = registered[:1] if len(registered) == 1 else candidates[:1]
         if requested in {"photoshop", "adobe photoshop"}:
             stable = [app for app in apps if _PHOTOSHOP_VERSION.fullmatch(app.name)]
             if stable:

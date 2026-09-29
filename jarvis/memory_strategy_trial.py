@@ -1706,13 +1706,14 @@ class StrategyTrialMemoryMixin:
         )
         if artifact["all_exit_criteria"] is not True:
             raise _memory().StrategyTransferTrialError("trial causal attestation failed")
-        inserted = self.record_strategy_transfer_attestation(
+        self.record_strategy_transfer_attestation(
             "applied_ab",
             artifact,
             evaluator_version=str(artifact["evaluator_version"]),
             evaluator_sha256=str(artifact["evaluator_sha256"]),
             config_sha256=str(artifact["config_sha256"]),
         )
+        promoted = False
         with self._immediate_transaction():
             row = self.db.execute(
                 "SELECT * FROM strategy_transfer_trial_manifests WHERE id=?",
@@ -1724,19 +1725,22 @@ class StrategyTrialMemoryMixin:
             if not valid or not isinstance(manifest, dict):
                 raise _memory().StrategyTransferTrialError("trial manifest became invalid")
             if manifest["status"] == "promoted":
-                inserted = False
+                pass
             elif manifest["status"] in {"active", "closed"}:
                 self._strategy_transfer_trial_update_manifest_state(
                     row, status="promoted", status_reason="operator_promoted",
                     stamp=_memory().now_iso(), promoted=True,
                 )
+                # Attestation insertion and promotion can be won by different
+                # callers. Report the durable state-transition winner only.
+                promoted = True
             else:
                 raise _memory().StrategyTransferTrialError("trial cannot be promoted")
         final = self.strategy_transfer_trial_status(normalized_manifest)
         if not isinstance(final, dict) or final.get("causal_attestation_valid") is not True:
             raise _memory().StrategyTransferTrialError("promoted trial attestation is invalid")
         return self._strategy_transfer_trial_promotion_payload(
-            final, artifact, promoted=bool(inserted)
+            final, artifact, promoted=promoted
         )
 
     @staticmethod

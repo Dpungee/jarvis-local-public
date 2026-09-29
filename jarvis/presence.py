@@ -61,6 +61,11 @@ from .demonstration_recorder import (
     validate_extraction,
     validate_skill_draft,
 )
+from .customization_profiles import (
+    CustomizationProfileError,
+    CustomizationProfileStore,
+    runtime_customization_settings,
+)
 from .feature_onboarding import FeatureOnboardingConflict, FeatureOnboardingStore
 from .memory import Memory
 from .memory_embeddings import EmbeddingError, run_memory_index_batch
@@ -610,6 +615,19 @@ class PresenceRuntime:
         self._network_security_registry_scope_key: tuple[str, ...] = ()
         self._network_security_registry_error: str | None = None
         self._network_security_registry_report: dict[str, Any] | None = None
+        self._customization_profiles: CustomizationProfileStore | None = None
+        self._customization_profiles_error: str | None = None
+        try:
+            if configured_data_dir is None:
+                raise ValueError("Customization profile data directory is unavailable")
+            self._customization_profiles = CustomizationProfileStore(
+                Path(configured_data_dir)
+            )
+        except Exception as exc:
+            self._customization_profiles_error = safe_presence_text(
+                f"Customization profiles are unavailable ({type(exc).__name__})",
+                500,
+            )
         self._feature_onboarding: FeatureOnboardingStore | None = None
         self._feature_onboarding_error: str | None = None
         try:
@@ -629,6 +647,9 @@ class PresenceRuntime:
                     raise ValueError("Network inventory data directory is unavailable")
                 self._network_inventory = NetworkInventory(
                     Path(configured_data_dir),
+                    metadata_mode=str(
+                        getattr(config, "network_metadata", "disabled")
+                    ),
                     incidents_enabled=(
                         str(getattr(config, "network_defense_mode", "disabled"))
                         != "disabled"
@@ -2768,6 +2789,102 @@ class PresenceRuntime:
             )
         )
 
+    def _require_customization_profiles(self) -> CustomizationProfileStore:
+        if self._customization_profiles is None:
+            raise RuntimeError(
+                self._customization_profiles_error
+                or "Customization profiles are unavailable"
+            )
+        return self._customization_profiles
+
+    def customization_profiles_status(self) -> dict[str, Any]:
+        store = self._customization_profiles
+        if store is None:
+            return {
+                "available": False,
+                "active": None,
+                "profiles": [],
+                "error": self._customization_profiles_error,
+            }
+        try:
+            active = store.active()
+            return {
+                "available": True,
+                "active": active,
+                "profiles": store.list_profiles(),
+                "runtime_settings": runtime_customization_settings(active),
+                "error": None,
+            }
+        except (CustomizationProfileError, OSError, ValueError) as exc:
+            return {
+                "available": False,
+                "active": None,
+                "profiles": [],
+                "error": safe_presence_text(
+                    f"Customization profile integrity check failed ({type(exc).__name__})",
+                    500,
+                ),
+            }
+
+    def preview_customization_profile(
+        self, profile: dict[str, Any]
+    ) -> dict[str, Any]:
+        return self._require_customization_profiles().preview(profile)
+
+    def save_customization_profile(
+        self,
+        profile: dict[str, Any],
+        *,
+        expected_previous_checksum: str | None,
+        activate: bool,
+    ) -> dict[str, Any]:
+        store = self._require_customization_profiles()
+        saved = store.save(
+            profile,
+            expected_previous_checksum=expected_previous_checksum,
+        )
+        activated = None
+        if activate:
+            activated = store.activate(
+                saved["profile_id"],
+                saved["revision"],
+                expected_checksum=saved["profile_checksum_sha256"],
+            )
+        self.emit(
+            "customization_profile_updated",
+            profile_id=saved["profile_id"],
+            revision=saved["revision"],
+            activated=bool(activated),
+        )
+        return {
+            "saved": saved,
+            "activated": activated,
+            "status": self.customization_profiles_status(),
+        }
+
+    def activate_customization_profile(
+        self,
+        profile_id: str,
+        revision: int,
+        *,
+        expected_checksum: str,
+    ) -> dict[str, Any]:
+        activated = self._require_customization_profiles().activate(
+            profile_id,
+            revision,
+            expected_checksum=expected_checksum,
+        )
+        self.emit(
+            "customization_profile_updated",
+            profile_id=profile_id,
+            revision=revision,
+            activated=True,
+        )
+        return {
+            "activated": activated,
+            "status": self.customization_profiles_status(),
+        }
+
     def status(self) -> dict[str, Any]:
         with Memory(self.config.data_dir / "jarvis.db") as memory:
             control = memory.control_state()
@@ -4617,6 +4734,9 @@ class PresenceRequestHandler(BaseHTTPRequestHandler):
             if path == "/api/feature-onboarding":
                 self._json(self.server.runtime.feature_onboarding_status())
                 return
+            if path == "/api/customization-profiles":
+                self._json(self.server.runtime.customization_profiles_status())
+                return
             if path == "/api/screen-companion":
                 self._json(self.server.runtime.screen_companion_status())
                 return
@@ -5075,6 +5195,63 @@ class PresenceRequestHandler(BaseHTTPRequestHandler):
                     self._error(HTTPStatus.CONFLICT, str(exc))
                 else:
                     self._json(result)
+                return
+            if path == "/api/customization-profiles/preview":
+                profile = payload.get("profile")
+                if not isinstance(profile, dict):
+                    raise ValueError("profile must be an object")
+                self._json({
+                    "preview": self.server.runtime.preview_customization_profile(
+                        profile
+                    )
+                })
+                return
+            if path == "/api/customization-profiles/save":
+                profile = payload.get("profile")
+                if not isinstance(profile, dict):
+                    raise ValueError("profile must be an object")
+                expected_previous_checksum = payload.get(
+                    "expected_previous_checksum"
+                )
+                if expected_previous_checksum is not None and not isinstance(
+                    expected_previous_checksum, str
+                ):
+                    raise ValueError(
+                        "expected_previous_checksum must be text or null"
+                    )
+                activate = payload.get("activate", True)
+                if not isinstance(activate, bool):
+                    raise ValueError("activate must be a boolean")
+                self._json(
+                    self.server.runtime.save_customization_profile(
+                        profile,
+                        expected_previous_checksum=expected_previous_checksum,
+                        activate=activate,
+                    ),
+                    HTTPStatus.CREATED,
+                )
+                return
+            if path == "/api/customization-profiles/activate":
+                profile_id = payload.get("profile_id")
+                revision = payload.get("revision")
+                expected_checksum = payload.get("expected_checksum")
+                if not isinstance(profile_id, str):
+                    raise ValueError("profile_id must be text")
+                if (
+                    isinstance(revision, bool)
+                    or not isinstance(revision, int)
+                    or revision < 1
+                ):
+                    raise ValueError("revision must be a positive integer")
+                if not isinstance(expected_checksum, str):
+                    raise ValueError("expected_checksum must be text")
+                self._json(
+                    self.server.runtime.activate_customization_profile(
+                        profile_id,
+                        revision,
+                        expected_checksum=expected_checksum,
+                    )
+                )
                 return
             if path == "/api/network-inventory/scopes/pair":
                 interface_index = self._positive_id(

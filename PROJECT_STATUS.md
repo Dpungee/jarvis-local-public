@@ -1,5 +1,62 @@
 # JARVIS Development Status
 
+## Clean publication candidate (2026-09-28, not yet published)
+
+- The candidate starts from public `main` commit `0b3efca` and integrates the
+  newest 98-path source snapshot: conversational Hub updates, connectors,
+  uploads/images/team workflows, provider support, onboarding, reliability tools,
+  and their tests. Original development checkouts and the running Hub are retained.
+- Review found connector authorization, ambiguous-retry, redirect, and stored-
+  permission migration defects. Repairs and adversarial regression tests are now
+  implemented; these capabilities are not release-approved yet. No live services,
+  external model calls, or operator desktop control are used by this review.
+- Previously verified promotion-transition and test-synchronization corrections
+  are included. Hosted failures also require a deterministic schedule fixture and
+  bounded browser startup-marker recovery without changing runtime deadlines.
+- The new-feature batch passed 176 tests. Selected Ruff, JavaScript syntax,
+  compilation, high-severity Bandit, and 15 package/lock contract tests passed.
+  A combined Hub/permission/connector/startup run passed 135 tests; the connector
+  review separately passed 35 tests, and the scheduling/preview/clock/startup review
+  passed 87. Source and wheel distributions built successfully. Synthetic example
+  privacy findings were corrected without scanner exemptions; the whole privacy
+  check must run again. These are focused checks, not final-tree full-suite or
+  hosted acceptance. The diagnostic full suite completed 5,747 tests with two
+  permission-expectation failures and eight skips. The outdated expectations now
+  require explicit grants; their 27-test group passed. A final exact-tree run is
+  required after remaining integration finishes.
+- The operator chose to retain the newer guided installer and integrate compatible
+  older improvements. The old virtual-environment-only installer and obsolete lock
+  set will not replace the current setup and dependency policy.
+- Ported archive normalization and sanitized release-baseline tooling. Their
+  package/lock/baseline group passed 33 tests; repeat wheel and source builds were
+  byte-identical. Both artifacts installed outside source and exposed all six
+  expected commands and Hub resources. The staged privacy check and clean-source
+  Gitleaks scan passed before the subsequent recovery port.
+- Ported online SQLite backup/isolated restore checks and sanitized recovery
+  receipts against current memory. A staging-file collision now preserves files
+  not created by the drill; recovery enforcement is immutable to self-repair.
+  Final review passed 36 recovery/diagnosis tests and 63 memory-spine tests, including
+  full-table preservation of existing memory and authority state. CLI retention
+  wiring is complete. Execution-boundary integration passed 98 focused tests with
+  actual-handle/result receipts and honest direct-process training-export labels.
+  The original structural manifest is retained with three narrowly pinned reviewed
+  process-method exceptions. Root CLI/package/baseline checks passed 103 tests.
+- Current locked runtime dependencies have no known vulnerabilities in the audit.
+  The 98 source-snapshot files were rechecked and have not drifted. Older launcher,
+  scheduled-task and runtime-lock files coupled to the rejected venv-only installer
+  remain superseded rather than being copied over the current guided setup.
+- The first assembled coverage run completed 5,792 tests in 1,923.460 seconds:
+  three graph-semantic failures, eight environment-dependent skips, and 77%
+  displayed branch-aware coverage. Two failures explicitly exhausted the query
+  deadline; all 175 graph-module tests passed in isolation under coverage. The
+  three content-contract cases now use a controlled clock, with an additional
+  regression checking completion before 25 ms and refusal at/after 25 ms. Runtime
+  deadlines and real-clock integration measurements are unchanged. Full exact-tree
+  acceptance must be repeated; this failed run is not release approval.
+- Next: run final exact-tree coverage, privacy and package/install checks, then
+  publish through a new protected pull request and verify its hosted checks.
+  Failed PR #30 is not merge-approved. No gates or coverage thresholds are waived.
+
 ## Public integration and release verification (2026-09-26)
 
 - The reviewed 274-path integration was published through protected PR #26 as

@@ -105,15 +105,20 @@ the operator to review, edit, create, or delete the proposed declarative skill.
 - Windows 10 or Windows 11
 - [Python 3.11, 3.12, or 3.13](https://www.python.org/downloads/windows/) on
   `PATH` (select **Add python.exe to PATH** in the Python installer)
-- One model path:
+- One model path selected by setup:
   - an authenticated Codex CLI login for an eligible ChatGPT plan;
-  - an authenticated Claude CLI login for an eligible Claude plan; or
-  - [Ollama](https://ollama.com/) and manually selected local models
+  - an authenticated Claude CLI login for an eligible Claude plan;
+  - a separately billed OpenAI, Anthropic, or xAI API key stored in the Windows
+    user environment; or
+  - [Ollama](https://ollama.com/) for local models
 
 ## Install the public preview
 
 The first-run wizard can keep Jarvis fully local with Ollama or configure a Codex CLI
-or Claude CLI subscription login. It stores provider routing, never credentials.
+or Claude CLI subscription login. The same guided setup also supports OpenAI API,
+Anthropic API, and Grok through the xAI API. It stores provider routing, never
+credentials. You select a provider, not individual models: Jarvis maps its fast,
+reasoning, coding, deep, background, and learning profiles automatically.
 
 1. **Exact release source archive:** for the published `v0.6.3` public preview,
    download that exact tag or its source archive from the
@@ -122,29 +127,48 @@ or Claude CLI subscription login. It stores provider routing, never credentials.
    installation, not the double-click Windows setup described here.
 2. Install a supported Python version if necessary, then open the extracted project
    folder.
-3. Double-click `setup.bat`. The public-preview installer adds Jarvis and its document
-   libraries to the Python environment currently on `PATH`; it does not create a
-   separate virtual environment. Installation and any provider download can take a few
-   minutes.
-4. A new installation offers **Ollama**, **Codex CLI**, **Claude
-   CLI**, or both and stores provider routing—not credentials. It then reviews each
-   optional network, Bluetooth, defensive-monitoring, and security-popup capability;
-   choose **Set up**, **Not now**, or **Keep disabled** for every item.
-5. Double-click `start_jarvis_presence.bat` for the recommended browser interface,
+3. Double-click `setup.bat`. The public-preview installer adds Jarvis plus its document
+   and Drive libraries to the Python environment currently on `PATH`;
+   it does not create a separate virtual environment. Installation and any
+   provider/model download can take a few minutes.
+4. Choose **Recommended**, **Customize everything**, or **Minimal**. A new installation
+   offers **Ollama**, **Codex CLI**, **Claude CLI**, both CLIs, **OpenAI API**,
+   **Anthropic API**, or **Grok through the xAI API**, and stores provider routing—not
+   credentials. Setup then reviews every capability family: Screen Companion, bounded
+   computer and project execution, proactive work, calibrated initiative, self-review
+   drafts, memory quality, external connectors, Drive scope, image generation, and each
+   network, Bluetooth, defensive-monitoring, and security-popup control. Core chat,
+   streaming, specialists, research, coding, artifacts, memory safety, approvals, and
+   recovery are always installed.
+5. Setup validates every selected model route and runs `jarvis doctor`. It then offers
+   the **Agent Hub**, a browser workspace where your agents work, chat and team up.
+   Answer **Y** to add it with a "JARVIS Agent Hub" desktop shortcut. You can add it
+   later with `install_agent_hub.bat`, or choose up front with `setup.ps1 -AgentHub yes`
+   or `-AgentHub no`. An unattended setup skips it.
+6. Finally, setup offers to open Presence now and optionally start Presence and the
+   background worker at Windows sign-in (an unattended setup starts nothing). Open it
+   later with `start_jarvis_presence.bat` for the recommended browser interface,
    `start_jarvis_ui.bat` for the native desktop interface, or `start_jarvis.bat` for
    terminal chat. See the [Presence guide](docs/PRESENCE_UI.md), the
    [Council guide](docs/COUNCIL.md) for the chaired deliberation room, and the
    [Desktop guide](docs/DESKTOP_UI.md) for each interface's views, shortcuts,
    and themes.
+7. If you installed the Agent Hub, double-click `start_agent_hub.bat` (or its shortcut).
+   It starts the Hub in the background on `http://127.0.0.1:8790` and opens it already
+   signed in; closing the window leaves the Hub running. Its state stays in
+   `data/agent-hub/`, and `jarvis-hub` runs it from a terminal.
 
 Read the [Windows first-run guide](docs/WINDOWS_FIRST_RUN.md) before installing if you
 want local-only Ollama operation, have more than one Python installation, or need help
 recovering from a stopped setup.
 
-Every optional-feature choice is reversible later in Presence **Settings** or through
-Jarvis's approval-gated feature-setup tools. Enabling network support never pairs or
-scans a network by itself: ownership-attested pairing remains a separate step in
-**Devices**, and configuration changes take effect after Jarvis restarts.
+Rerunning `setup.bat` is the supported upgrade/customization path. It preserves
+unrecognized settings and existing data, lets you keep or change the provider, and
+reviews features again. Every optional-feature choice is also reversible later in
+Presence **Settings** or through Jarvis's approval-gated feature-setup tools. Enabling
+network support never pairs or scans a network by itself: ownership-attested pairing
+remains a separate step in **Devices**, and configuration changes take effect after
+Jarvis restarts.
 
 Project artifacts stay under `workspace/`. Memory, logs, recoverable trash, project
 environments, and learning state stay under `data/`; both are excluded from Git.
@@ -230,9 +254,10 @@ Claude/ChatGPT route. Jarvis checks the required CLI sign-in before changing a
 subscription route and keeps vendor credentials outside its settings files. A separate
 background worker reads the saved route on its next restart.
 
-## Isolated execution backend
+## Execution boundaries
 
-Jarvis keeps the existing contained host executor by default. To run the same
+Jarvis uses the unsandboxed host executor by default; process-tree cleanup does not
+restrict current-user authority. To run the same
 allowlisted workspace commands in an ephemeral, networkless Docker container instead,
 install and start Docker Desktop, then set `JARVIS_EXECUTION_BACKEND=docker`.
 
@@ -245,7 +270,8 @@ sandbox. Docker mode fails closed if the CLI or daemon is unavailable. It does n
 command policy or approval gate, and it refuses to mount workspaces containing
 credential/configuration paths such as `.env`, `.git`, or symlinks. The initial pinned
 sandbox image supports Python execution; other build runtimes stay unavailable until
-they are deliberately added to the pinned image.
+they are deliberately added to the pinned image. The workspace is bind-mounted
+read-write: container execution does not make workspace changes disposable.
 
 ## Private phone gateway
 
@@ -488,23 +514,30 @@ This is a defensive and explicitly authorized capability. It supports architectu
 
 Inside interactive chat, use `/model` to see the current mode. Use `/model auto`, `/model fast`, `/model reasoning`, `/model coding`, `/model deep`, or `/model <provider:name>` to change it.
 
-## Optional OpenAI, Codex, and Claude models
+## Model providers: Codex, Claude, OpenAI, Grok, Anthropic, and Ollama
 
 Cloud and subscription access is optional. The first-run chooser can configure a cloud-only runtime with Ollama disabled, while manual profile routing can still mix local and remote models. JARVIS accepts explicit model references:
 
 ```text
 ollama:qwen3.5:9b
 openai:gpt-5.6
+xai:grok-4.6
 anthropic:claude-sonnet-5
 codex-cli:gpt-5.6-sol
 claude-cli:sonnet
 ```
 
-OpenAI and direct Anthropic API references use separately billed provider API keys.
+OpenAI, xAI, and direct Anthropic API references use separately billed provider API
+keys. The Grok preset uses xAI's Responses-compatible API and the current
+`grok-4.6` flagship alias; see the official
+[xAI quickstart](https://docs.x.ai/developers/quickstart) and
+[model catalog](https://docs.x.ai/developers/models).
 The `codex-cli:` backend instead reuses an official Codex CLI login made with a
 ChatGPT plan. You choose only the provider: the wizard stores `JARVIS_MODEL=auto`,
 Jarvis classifies each request as fast, reasoning, coding, or deep, then selects the
-corresponding Codex subscription model while setting the appropriate reasoning effort.
+corresponding configured profile (for Codex, the matching subscription model and
+reasoning effort). Provider-specific model names remain an implementation detail unless
+an advanced operator deliberately overrides a profile.
 The persistent App Server is initialized when Presence starts and streams visible text
 deltas, avoiding a fresh CLI process for every conversational turn. OpenAI documents
 [Codex authentication choices](https://learn.chatgpt.com/docs/auth),
@@ -516,34 +549,37 @@ session authority; Jarvis remains the only tool and approval authority. The
 [Claude CLI reference](https://code.claude.com/docs/en/cli-usage) documents print mode
 and structured output.
 
-On first use, run a normal foreground launcher and choose a provider. The same wizard
-can be opened before configuration exists or used later to change an installation. To
-rerun provider login and the chooser on an existing installation, run
+On first use, run `setup.bat` and choose a provider. The same unified wizard can be
+used later to change the provider and review all capability families; a normal
+foreground launcher also opens the provider chooser before configuration exists. To
+rerun only a subscription login on an existing installation, run
 `python -m jarvis.provider_setup --login codex`, `--login claude`, or
 `--login both`. This explicit migration path preserves unrelated `.env` settings while
 refreshing only subscription-provider routing.
 
 ```powershell
+python -m jarvis.installer --summary
 python -m jarvis.provider_setup --interactive
-python -m jarvis.provider_setup --configure codex   # codex, claude, or both
+python -m jarvis.provider_setup --configure grok   # ollama, codex, claude, both, openai-api, anthropic-api, or grok
 ```
 
 The interactive setup uses only the official CLI status/login commands; it never reads
 or copies an authentication file. A background worker or headless Presence launch never
 prompts: it exits with a setup instruction until a foreground operator completes setup.
-An unrelated `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, or inherited model variable does not
+An unrelated `OPENAI_API_KEY`, `XAI_API_KEY`, `ANTHROPIC_API_KEY`, or inherited model variable does not
 count as completed setup, and an unchanged copy of `.env.example` does not silently skip
 the provider review. Before the installer prints **Ready**, it sends a fixed, tool-free,
 non-secret first-turn canary through every unique configured model route. A failed route
 stops setup with retry guidance instead of leaving a broken provider for the first chat.
 No model picker is required during setup or normal use; explicit model overrides remain
 available only for advanced troubleshooting. Subscription choices also disable direct
-OpenAI and Anthropic API adapters, so an ambient API key cannot become a separately billed
-fallback after a CLI outage.
+OpenAI, xAI, and Anthropic API adapters, so an ambient API key cannot become a separately
+billed fallback after a CLI outage. An API choice enables only its own adapter, and
+`--configure` refuses it until the matching key is present in the user environment.
 
 Cloud keys are deliberately not accepted from this repository's `.env` file. To use a
 direct API, open **Edit environment variables for your account** from the Windows Start
-menu and create only the user variable you need: `OPENAI_API_KEY` or
+menu and create only the user variable you need: `OPENAI_API_KEY`, `XAI_API_KEY`, or
 `ANTHROPIC_API_KEY`. Paste the value into the Windows variable editor, not a PowerShell
 or Command Prompt command where shell history may retain it, then open a new terminal or
 restart JARVIS. Environment variables remain readable by other processes running as
@@ -563,6 +599,9 @@ Select providers per profile in `.env` without placing the keys there:
 JARVIS_FAST_MODEL=qwen3.5:9b
 JARVIS_REASONING_MODEL=openai:gpt-5.6
 JARVIS_CODING_MODEL=anthropic:claude-sonnet-5
+# Or use Grok for a profile after setting XAI_API_KEY in the user environment:
+JARVIS_XAI_API_ENABLED=true
+JARVIS_CODING_MODEL=xai:grok-4.6
 # Or, after `claude auth login`:
 JARVIS_CLAUDE_CLI_ENABLED=true
 JARVIS_CODING_MODEL=claude-cli:sonnet
@@ -575,13 +614,14 @@ You can also select one provider for one foreground task:
 
 ```powershell
 python -m jarvis ask --model openai:gpt-5.6 "Analyze this architecture"
+python -m jarvis ask --model xai:grok-4.6 "Analyze this architecture"
 python -m jarvis ask --model anthropic:claude-sonnet-5 "Review this implementation"
 python -m jarvis ask --model codex-cli:gpt-5.6-sol "Implement and verify this feature"
 python -m jarvis ask --model claude-cli:sonnet "Review this implementation"
 python -m jarvis doctor
 ```
 
-Prompts, selected conversation context, offered tool schemas, and tool results are sent to whichever cloud provider you select. Tools still execute only inside JARVIS, through its existing capability filters and exact approval gate; a cloud or subscription model does not receive additional operating-system authority. OpenAI API requests use the Responses API with storage disabled at the request level, while subscription calls use their installed official CLI. Responses, retries, and errors are bounded, and provider error bodies or API keys are never printed.
+Prompts, selected conversation context, offered tool schemas, and tool results are sent to whichever cloud provider you select. Tools still execute only inside JARVIS, through its existing capability filters and exact approval gate; a cloud or subscription model does not receive additional operating-system authority. OpenAI and xAI requests use Responses-compatible APIs with storage disabled at the request level, while subscription calls use their installed official CLI. Responses, retries, and errors are bounded, and provider error bodies or API keys are never printed.
 
 ## Production coding loop
 
@@ -610,7 +650,7 @@ Workspace mutation tools are restricted to `workspace/`. Existing file content r
 
 Dedicated research tasks are isolated from local files and processes. Requests combining research and coding first run an isolated web phase and pass only a bounded untrusted brief and verified URLs into the build; during the local loop, only `research_question` remains available, not the broad research pair. Web fetching blocks private/local addresses, validates the connected peer, limits redirects and response sizes, and refuses likely credentials.
 
-Host process execution is disabled by default. With `JARVIS_EXECUTION_MODE=trusted-host`, allowlisted build, test, dependency, and managed-application programs run with the full permissions of your Windows account. This is not an OS sandbox. Mutation, execution, and durable-memory tools are exposed only when task intent authorizes that capability.
+Process execution is disabled by default. `JARVIS_EXECUTION_MODE=trusted-host` enables allowlisted process tools; `JARVIS_EXECUTION_BACKEND` selects the effective boundary. The default `host` backend runs with current-user authority and is not an OS sandbox. The `docker` backend uses a restricted, networkless container with a read-write workspace bind mount. Process results report the boundary attached to the actual execution handle. Mutation, execution, and durable-memory tools still require task authorization.
 
 With `JARVIS_COMPUTER_ACCESS=trusted-desktop`, JARVIS can inspect and edit ordinary files under `JARVIS_COMPUTER_ROOT`, inspect live system health, build projects inside its workspace, and launch `.exe`, `.py`, `.pyw`, or `.html` artifacts it created there. Existing text files require a fresh hash and receive a backup. Credential stores, link escapes, permanent deletion, and system-wide writes stay blocked.
 
@@ -704,7 +744,7 @@ Copy `.env.example` to `.env` to override defaults:
 
 | Setting | Default | Meaning |
 |---|---:|---|
-| `JARVIS_MODEL` | `auto` | Routing mode, profile, local model, or explicit `openai:<model>` / `anthropic:<model>` |
+| `JARVIS_MODEL` | `auto` | Routing mode, profile, local model, or explicit `openai:<model>` / `xai:<model>` / `anthropic:<model>` |
 | `JARVIS_FAST_MODEL` | `qwen3.5:9b` | Fast profile model |
 | `JARVIS_REASONING_MODEL` | `gpt-oss:20b` | Research/reasoning and independent code-review model |
 | `JARVIS_CODING_MODEL` | `qwen3-coder:30b` | Coding profile model |
@@ -730,8 +770,9 @@ Copy `.env.example` to `.env` to override defaults:
 | `JARVIS_OLLAMA_NUM_THREAD` | unset | Optional CPU inference-thread ceiling; measure before setting |
 | `JARVIS_OLLAMA_PRELOAD` | `false` | Load the selected local model during Agent startup so the first task is warm |
 | `JARVIS_REASONING_THINKING` | `true` | Allow extended thinking on the reasoning profile; disable for direct-answer models that exhaust the output budget in hidden reasoning |
-| `JARVIS_CLOUD_ENABLED` | `true` | Allow configured OpenAI/Anthropic providers; set `false` to keep routing and failover strictly local |
+| `JARVIS_CLOUD_ENABLED` | `true` | Allow configured OpenAI/xAI/Anthropic providers; set `false` to keep routing and failover strictly local |
 | `JARVIS_OPENAI_API_ENABLED` | `false` | Permit the separately billed OpenAI API adapter; enable it explicitly after configuring the provider |
+| `JARVIS_XAI_API_ENABLED` | `false` | Permit the separately billed xAI/Grok API adapter; enable it explicitly after setting `XAI_API_KEY` in the user environment |
 | `JARVIS_ANTHROPIC_API_ENABLED` | `false` | Permit the separately billed Anthropic API adapter; enable it explicitly after configuring the provider |
 | `JARVIS_CODEX_CLI_ENABLED` | `false` | Allow `codex-cli:` profiles after the official Codex CLI reports a ChatGPT subscription login |
 | `JARVIS_CLAUDE_CLI_ENABLED` | `false` | Allow `claude-cli:` profiles after Claude CLI authentication |
@@ -752,7 +793,8 @@ Copy `.env.example` to `.env` to override defaults:
 | `JARVIS_DEEP_CONTEXT_LENGTH` | `4096` | Deep-profile context, bounded to control large-model resource use |
 | `JARVIS_COMMAND_TIMEOUT` | `120` | Command timeout in seconds |
 | `JARVIS_AUTONOMY` | `autonomous` | `autonomous` or `readonly` |
-| `JARVIS_EXECUTION_MODE` | `disabled` | `disabled` or unsandboxed `trusted-host` |
+| `JARVIS_EXECUTION_MODE` | `disabled` | `disabled` or `trusted-host`; explicit process-capability gate |
+| `JARVIS_EXECUTION_BACKEND` | `host` | Unsandboxed current-user `host`, or restricted networkless `docker` with a read-write workspace bind |
 | `JARVIS_COMPUTER_ACCESS` | `disabled` | `disabled` or `trusted-desktop` |
 | `JARVIS_COMPUTER_ROOT` | current user profile | Boundary for trusted desktop file access and app-adapter inputs/outputs |
 | `JARVIS_EXTERNAL_ACCESS` | `disabled` | `disabled` or `trusted-external`; consequential calls still need approval |

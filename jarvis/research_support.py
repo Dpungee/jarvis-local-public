@@ -37,6 +37,30 @@ _RESEARCH_FUNCTION_STOPWORDS = frozenset({
     "they", "this", "through", "to", "use", "want", "we", "what", "when",
     "where", "which", "would", "you", "your",
 })
+# Counts and answer-format words describe the reply, not the subject: "compare three
+# open-source vector databases ... with a sourced summary table" must search for the
+# databases, not for "three" (a telecom brand) or "summary table".
+_RESEARCH_QUERY_NOISE = frozenset({
+    "one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten",
+    "couple", "few", "several", "sourced", "summary", "table", "tables",
+})
+_COUNT_WORD = re.compile(r"\b(?:one|two|three|four|five|six|seven|eight|nine|ten)\b", re.I)
+
+
+def _named_count_words(text: str) -> set[str]:
+    """Count words used as names ("the Three UK network", "compare Three and Vodafone").
+
+    A count word capitalised mid-sentence is a name and stays a search term; at the start
+    of a sentence or in lower case it is a quantity.
+    """
+    names: set[str] = set()
+    for match in _COUNT_WORD.finditer(str(text)):
+        before = str(text)[: match.start()].rstrip()
+        if match.group(0)[0].isupper() and before and before[-1] not in ".!?:;":
+            names.add(match.group(0).casefold())
+    return names
+
+
 _RESEARCH_BRAND_TERMS = frozenset({
     "acm", "anthropic", "ietf", "ieee", "nist", "ollama", "openai", "owasp",
     "pytorch", "qwen", "sqlite",
@@ -166,11 +190,14 @@ def compact_research_query(subject: str) -> str:
     """Reduce conversational research prose to ordered, meaningful search terms."""
     terms: list[str] = []
     seen: set[str] = set()
-    for raw_term in re.findall(r"[a-z][a-z0-9]+", str(subject).casefold()):
+    names = _named_count_words(subject)
+    # Hyphenated compounds ("open-source", "end-to-end") stay one search term.
+    for raw_term in re.findall(r"[a-z][a-z0-9]*(?:-[a-z0-9]+)+|[a-z][a-z0-9]+", str(subject).casefold()):
         if (
             len(raw_term) < 2
             or raw_term in _RESEARCH_TOPIC_STOPWORDS
             or raw_term in _RESEARCH_FUNCTION_STOPWORDS
+            or (raw_term in _RESEARCH_QUERY_NOISE and raw_term not in names)
         ):
             continue
         key = canonical_topic_term(raw_term)
@@ -216,6 +243,7 @@ def research_terms_matching(topic_terms: set[str], page_terms: set[str]) -> set[
 def research_topic_terms(prompt: str) -> set[str]:
     match = re.search(r"(?is)\btopic\s*:\s*([^.;]+)", prompt)
     topic = match.group(1) if match else prompt
+    names = _named_count_words(topic)
     return {
         canonical_topic_term(term)
         for term in re.findall(r"[a-z][a-z0-9]+", topic.casefold())
@@ -223,6 +251,7 @@ def research_topic_terms(prompt: str) -> set[str]:
             len(term) >= 2
             and term not in _RESEARCH_TOPIC_STOPWORDS
             and term not in _RESEARCH_FUNCTION_STOPWORDS
+            and (term not in _RESEARCH_QUERY_NOISE or term in names)
         )
     }
 

@@ -28,6 +28,7 @@ from jarvis.tools import ToolBox
 
 EXPECTED_FEATURE_IDS = (
     "private-lan-inventory",
+    "network-device-metadata",
     "private-lan-monitoring",
     "network-defense-alerts",
     "network-defense-safe-readonly",
@@ -39,6 +40,7 @@ EXPECTED_FEATURE_IDS = (
 ALLOWED_MANAGED_ENV_KEYS = frozenset(
     {
         "JARVIS_NETWORK_ACCESS",
+        "JARVIS_NETWORK_METADATA",
         "JARVIS_NETWORK_MONITOR_ENABLED",
         "JARVIS_NETWORK_DEFENSE_MODE",
         "JARVIS_BLUETOOTH_ACCESS",
@@ -106,7 +108,7 @@ class FeatureOnboardingTests(unittest.TestCase):
 
     def test_interactive_first_run_reviews_every_pending_feature_once(self) -> None:
         answers = Mock(
-            side_effect=["setup", "skip", "disable", "s", "n", "d", ""]
+            side_effect=["setup", "skip", "skip", "disable", "s", "n", "d", ""]
         )
         output = io.StringIO()
 
@@ -168,13 +170,16 @@ class FeatureOnboardingTests(unittest.TestCase):
         self.assertIn("Set up also enables: Home-network inventory", rendered)
         self.assertIn("Enabled prerequisite: Home-network inventory", rendered)
 
-    def test_windows_installer_runs_optional_review_after_provider_setup(self) -> None:
+    def test_windows_installer_uses_unified_provider_and_feature_review(self) -> None:
         setup = (Path(__file__).resolve().parents[1] / "setup.ps1").read_text(
             encoding="utf-8"
         )
-        provider = setup.index('"jarvis.provider_setup", "--interactive"')
-        features = setup.index('"jarvis.feature_onboarding", "--interactive"')
-        self.assertLess(provider, features)
+        self.assertIn('"jarvis.installer", "--interactive"', setup)
+        installer = (Path(__file__).resolve().parents[1] / "jarvis" / "installer.py").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("select_provider_interactive", installer)
+        self.assertIn("run_interactive(store", installer)
 
     def test_skip_is_durable_and_can_be_changed_to_setup_or_disable_later(self) -> None:
         first = self.store.decide("private-lan-inventory", "skip")
@@ -281,6 +286,7 @@ class FeatureOnboardingTests(unittest.TestCase):
         self.assertEqual(
             disabled["also_changed"],
             [
+                "network-device-metadata",
                 "private-lan-monitoring",
                 "network-defense-alerts",
                 "network-defense-safe-readonly",
@@ -288,11 +294,13 @@ class FeatureOnboardingTests(unittest.TestCase):
         )
         values = dict(_env_assignments(self.root / ".env"))
         self.assertEqual(values["JARVIS_NETWORK_ACCESS"], "disabled")
+        self.assertEqual(values["JARVIS_NETWORK_METADATA"], "disabled")
         self.assertEqual(values["JARVIS_NETWORK_MONITOR_ENABLED"], "0")
         self.assertEqual(values["JARVIS_NETWORK_DEFENSE_MODE"], "disabled")
         status = _by_id(_features(self.store.list_status()))
         for capability_id in (
             "private-lan-inventory",
+            "network-device-metadata",
             "private-lan-monitoring",
             "network-defense-alerts",
             "network-defense-safe-readonly",

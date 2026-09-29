@@ -19,10 +19,12 @@ class RecordingChat:
     label, simulated, status, reason = 'Test text transport', False, 'UNTESTED', 'Test only'
     def __init__(self):
         self.calls = []
+        self.entered = threading.Event()
         self.gate = threading.Event()
         self.gate.set()
     def chat(self, model, messages, cancel, progress):
         self.calls.append((model, messages))
+        self.entered.set()
         progress('Partial synthetic response')
         while not self.gate.wait(.01):
             if cancel.is_set():
@@ -155,6 +157,9 @@ class LiveConversationTests(unittest.TestCase):
 
     def test_steering_waits_for_target_then_replays_its_answer(self):
         self.adapter.gate.clear();message=self.send(kind='work');self.await_state('RUNNING')
+        # RUNNING is committed before transport dispatch; observe the actual
+        # fixture call before asserting that steering has not dispatched again.
+        self.assertTrue(self.adapter.entered.wait(4), 'Target transport did not start')
         self.send('Make it shorter',kind='steer',run_id=message['run_id'])
         self.assertEqual(len(self.adapter.calls),1)
         self.adapter.gate.set();self.await_state()

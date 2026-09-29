@@ -72,9 +72,9 @@ class DocumentGenerationTests(unittest.TestCase):
         self.assertIn("exact workspace path", skill["content"])
         self.assertIn("sheet_name", skill["content"])
 
-    def test_fresh_setup_installs_only_the_declared_document_extra(self) -> None:
+    def test_fresh_setup_installs_only_the_declared_guided_setup_extras(self) -> None:
         setup = ROOT.joinpath("setup.ps1").read_text(encoding="utf-8")
-        self.assertIn('"--no-input", "--editable", ".[documents]"', setup)
+        self.assertIn('"--no-input", "--editable", ".[documents,drive]"', setup)
         self.assertNotIn("pip install <name>", setup)
 
     @unittest.skipUnless(

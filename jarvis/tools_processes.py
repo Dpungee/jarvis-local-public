@@ -53,7 +53,8 @@ class ProcessToolsMixin:
             "stdout": _tools()._trim(execution.stdout),
             "stderr": _tools()._trim(execution.stderr),
             "duration": round(execution.duration, 3),
-            "execution_backend": self._execution_backend.name,
+            "execution_backend": execution.backend,
+            "execution_boundary": execution.boundary.as_dict(),
         }
         if execution.timed_out:
             result["error"] = "Process exceeded its wall-clock limit and its process tree was terminated"
@@ -125,6 +126,7 @@ class ProcessToolsMixin:
             "arguments": list(record.arguments),
             "cwd": record.cwd,
             "execution_backend": record.backend,
+            "execution_boundary": record.boundary.as_dict(),
             "started_at": record.started_at,
             "ended_at": record.ended_at,
             "uptime_seconds": round(max(0.0, elapsed_end - record.started_at), 3),
@@ -224,7 +226,8 @@ class ProcessToolsMixin:
                 process=process,
                 job=job,
                 execution_handle=execution_handle,
-                backend=self._execution_backend.name,
+                backend=execution_handle.backend,
+                boundary=execution_handle.boundary,
                 stdout_path=stdout_path,
                 stderr_path=stderr_path,
                 stdout_collector=stdout_collector,

@@ -26,6 +26,19 @@ class HubPackagingTests(unittest.TestCase):
                     "agent_hub_static/" + name, pattern
                 ) for pattern in patterns))
 
+    def test_the_hub_has_its_own_command(self):
+        root = Path(__file__).resolve().parents[1]
+        config = tomllib.loads((root / "pyproject.toml").read_text(encoding="utf-8"))
+        self.assertEqual(config["project"]["scripts"]["jarvis-hub"], "jarvis.agent_hub:main")
+
+    def test_ci_exercises_the_installed_hub_command_outside_source(self):
+        root = Path(__file__).resolve().parents[1]
+        workflow = (root / ".github/workflows/ci.yml").read_text(encoding="utf-8")
+        smoke = workflow.split("Push-Location $outside", 1)[1].split("Pop-Location", 1)[0]
+        self.assertIn("'jarvis-hub'", smoke)
+        self.assertIn('"jarvis-hub.exe") --help', smoke)
+        self.assertIn('throw "jarvis-hub --help failed', smoke)
+
 
 if __name__ == "__main__":
     unittest.main()

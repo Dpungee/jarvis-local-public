@@ -13,7 +13,9 @@ from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 from typing import Any, Callable, Iterable
 
+from .execution import execution_boundary
 from .ollama_client import OllamaClient
+from .tool_specs import RUN_PROCESS_BOUNDARY_DESCRIPTION
 
 
 DISTILLATION_FORMAT_VERSION = 1
@@ -621,7 +623,7 @@ _RUN_TOOL = {
     "type": "function",
     "function": {
         "name": "run_process",
-        "description": "Run one allowlisted build/test executable directly without a shell. Trusted-host mode is not a sandbox and repository code runs with the full user account authority.",
+        "description": RUN_PROCESS_BOUNDARY_DESCRIPTION,
         "parameters": {
             "type": "object",
             "properties": {
@@ -766,6 +768,13 @@ def _sft_record(record: dict[str, Any]) -> dict[str, Any]:
                     "timed_out": False,
                     "stdout": result.get("stdout", ""),
                     "stderr": result.get("stderr", ""),
+                    "execution_backend": "host",
+                    "execution_boundary": {
+                        **execution_boundary("host").as_dict(),
+                        # This trace comes from _run_verifier's direct subprocess,
+                        # not a managed HostBackend process-tree containment job.
+                        "lifecycle_containment": "direct-process",
+                    },
                 },
             }),
         })

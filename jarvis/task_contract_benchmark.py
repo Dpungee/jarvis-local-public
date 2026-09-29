@@ -29,7 +29,9 @@ from .task_contract_eval import (
 )
 
 
-_SERVED_MODEL_ATTESTATION_PROVIDERS = frozenset({"openai", "anthropic", "ollama"})
+_SERVED_MODEL_ATTESTATION_PROVIDERS = frozenset({
+    "openai", "xai", "anthropic", "ollama"
+})
 
 DEFAULT_BENCHMARK_OLLAMA_BASE_URL = "http://127.0.0.1:11434"
 
@@ -279,7 +281,7 @@ def build_exact_model_benchmark_client(
     receipt full of ``model_unattested`` rows.
 
     Ollama is the only provider this function constructs, matching the Phase 2
-    provider ruling.  ``openai`` and ``anthropic`` are structurally supported -
+    provider ruling.  ``openai``, ``xai`` and ``anthropic`` are structurally supported -
     they clear the attestation gate and work through ``client_factory`` - but
     this function never reads an API key, an environment credential, or a
     dotenv file to build one; a caller that wants a cloud client supplies it.

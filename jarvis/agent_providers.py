@@ -30,20 +30,26 @@ from typing import Any
 from . import model_client as mc
 from .provider_setup import detect_provider
 
-PROVIDERS = ("claude-cli", "codex-cli")
-PROVIDER_LABELS = {"claude-cli": "Claude CLI subscription", "codex-cli": "Codex CLI subscription"}
+PROVIDERS = ("claude-cli", "codex-cli", "openrouter")
+PROVIDER_LABELS = {"claude-cli": "Claude CLI subscription", "codex-cli": "Codex CLI subscription",
+                   "openrouter": "OpenRouter (API key)"}
 # The operator's requested default for new agents. It is only *applied* once verified.
 REQUESTED_DEFAULT = ("claude-cli", "claude-opus-5-5")
 KNOWN_MODELS = {
     "claude-cli": ("claude-opus-5-5", "claude-sonnet-5", "opus", "sonnet"),
     "codex-cli": ("gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna", "gpt-5.5"),
+    "openrouter": ("stealth/space-bunny-alpha",),
 }
 _MODEL_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._\-]{0,79}$")
 _VERSION_RE = re.compile(r"(\d+)\.(\d+)\.(\d+)")
 
 
-def valid_model_name(value: str) -> bool:
-    return bool(_MODEL_RE.match(value or ""))
+def valid_model_name(value: str, provider: str | None = None) -> bool:
+    from .openrouter import valid_model_id
+
+    if provider == "openrouter":
+        return valid_model_id(value)
+    return bool(_MODEL_RE.match(value or "")) or (provider is None and valid_model_id(value))
 
 
 def _version_tuple(text: str) -> tuple[int, int, int]:
@@ -161,7 +167,10 @@ class ProviderState:
     verified_models: dict[str, dict[str, Any]] = field(default_factory=dict)
 
     def public(self) -> dict[str, Any]:
-        if not self.installed:
+        if self.provider == "openrouter":
+            state, reason = (("READY", "OpenRouter key accepted.") if self.authenticated else
+                             ("LOGIN_REQUIRED", "Add your OpenRouter API key in the Hub's settings."))
+        elif not self.installed:
             state, reason = "UNAVAILABLE", "CLI is not installed on the backend host."
         elif not self.authenticated:
             state, reason = "LOGIN_REQUIRED", (
@@ -203,6 +212,16 @@ class ProviderRegistry:
                 state = self._states[name]
                 if not force and now - state.checked_at < self.refresh_seconds:
                     continue
+            if name == "openrouter":
+                from .openrouter import KeyStore, check_key
+
+                key = KeyStore(self.profile_dir).get()
+                outcome = check_key(key) if key else {"ok": False, "error": ""}
+                with self._lock:
+                    state.installed, state.authenticated = True, bool(outcome.get("ok"))
+                    state.version, state.checked_at = "", now
+                    state.detail = str(outcome.get("error") or "")
+                continue
             probe_name = "claude" if name == "claude-cli" else "codex"
             installed = authenticated = False
             version, detail = "", ""
@@ -243,13 +262,13 @@ class ProviderRegistry:
 
     def verify_model(self, provider: str, model: str) -> dict[str, Any]:
         """One tiny tool-less call; report the model identifier the provider says it ran."""
-        if provider not in PROVIDERS or not valid_model_name(model):
+        if provider not in PROVIDERS or not valid_model_name(model, provider):
             raise ValueError("Unsupported provider or model identifier.")
         started = time.time()
         if provider == "claude-cli":
             outcome = self._verify_claude(model)
         else:
-            outcome = self._verify_codex(model)
+            outcome = self._verify_codex(model, provider)
         outcome.update(requested=model, checked_at=started, seconds=round(time.time() - started, 1))
         self.record_verification(provider, model, outcome)
         return outcome
@@ -279,12 +298,12 @@ class ProviderRegistry:
                 "resolved": used[0] if len(used) == 1 else None, "executable_version":
                 _run([str(exe), "--version"], timeout=20).stdout.strip()}
 
-    def _verify_codex(self, model: str) -> dict[str, Any]:
+    def _verify_codex(self, model: str, provider: str = "codex-cli") -> dict[str, Any]:
         client = None
         try:
-            client = build_agent_client(self.profile_dir, "codex-cli", model)
+            client = build_agent_client(self.profile_dir, provider, model)
             response = client.chat([{"role": "user", "content": "Reply with exactly the word OK."}],
-                                   [], f"codex-cli:{model}")
+                                   [], f"{provider}:{model}")
         except mc.ModelProviderError as exc:
             return {"ok": False, "error": _bounded(str(exc))}
         except Exception as exc:
@@ -294,7 +313,8 @@ class ProviderRegistry:
                 client.close()
         # The Codex CLI binds the requested model exactly; JARVIS rejects unsupported ones.
         return {"ok": True, "resolved": model, "models_reported": [model],
-                "reply": _bounded(str((response.get("message") or {}).get("content", "")), 40)}
+                "reply": _bounded(str((response.get("message") if isinstance(response.get("message"), dict)
+                                       else response).get("content", "")), 40)}
 
 
 def _bounded(text: str, limit: int = 300) -> str:
@@ -322,6 +342,19 @@ def build_agent_client(profile_dir: Path, provider: str, model: str,
     # No provider is enabled here, so this starts no subprocess; the one provider is
     # attached below from the cached, validated executable.
     client = mc.build_model_client(profile)
+    if provider == "openrouter":
+        from .openrouter import KeyStore, OpenRouterClient
+
+        key = KeyStore(profile_dir).get()
+        if key is None:
+            raise mc.ModelProviderError("OpenRouter", "is not configured; add an OpenRouter API key",
+                                        status_code=401, provider_unavailable=True)
+        client.openrouter = OpenRouterClient(
+            key, generation_timeout=profile.cloud_generation_timeout,
+            max_output_tokens=32768, max_response_bytes=profile.cloud_max_response_bytes,
+            max_retries=profile.cloud_max_retries, retry_backoff=profile.cloud_retry_backoff)
+        client.openrouter.set_fixed_effort(effort)
+        return client
     if provider == "claude-cli":
         executable = newest_claude_executable()
         if executable is not None:

@@ -845,6 +845,9 @@ class OverflowTests(GraphTestCase):
             result["walk"]["overflow"][0]["cap"], graph.FANOUT_CAP
         )
 
+    # These are graph-content contracts; elapsed-time enforcement is exercised
+    # separately in BudgetTests and real-clock integration measurements.
+    @patch.object(graph.time, "monotonic", new=lambda: 100.0)
     def test_a_hub_inside_the_filtered_cap_still_answers(self) -> None:
         # Seventeen in-edges: over the inner cap of 16, inside the filtered cap
         # of 32, and every one of them carries the asked predicate.
@@ -872,6 +875,7 @@ class OverflowTests(GraphTestCase):
         self.assertEqual(result["rows"], [])
         self.assertEqual(result["overflow"][0]["hop"], 1)
 
+    @patch.object(graph.time, "monotonic", new=lambda: 100.0)
     def test_a_terminal_hub_of_forty_answers_with_the_strongest_eight(self) -> None:
         self.create_graph()
         self.add("Kestrel relay", "deployed on host", "Harrier box")
@@ -929,6 +933,7 @@ class RedTeamRegressionTests(GraphTestCase):
         notes = [entry["note"] for entry in result["overflow"]]
         self.assertTrue(any("found and not shown" in note for note in notes))
 
+    @patch.object(graph.time, "monotonic", new=lambda: 100.0)
     def test_two_named_starts_do_not_merge_into_one_chain(self) -> None:
         # The correctness review: hop-1 edges from different starts share the
         # empty path prefix, so they were grouped as siblings — eight rows
@@ -2257,6 +2262,32 @@ class DesignTenSevenTests(GraphTestCase):
 
 
 class BudgetTests(GraphTestCase):
+    def test_default_deadline_stops_at_twenty_five_milliseconds(self) -> None:
+        self.seed_bridge_store()
+        self.assertEqual(graph.TIME_BUDGET_MS, 25.0)
+        for elapsed, expected in (
+            (0.024, "complete"),
+            (0.025, "budget-exceeded"),
+            (0.026, "budget-exceeded"),
+        ):
+            with self.subTest(elapsed=elapsed):
+                ticks = iter([100.0])
+                with patch.object(
+                    graph.time, "monotonic",
+                    side_effect=lambda ticks=ticks, elapsed=elapsed: next(
+                        ticks, 100.0 + elapsed
+                    ),
+                ):
+                    result = self.ask(
+                        "Which region is the Kestrel relay in?", ["Kestrel relay"]
+                    )
+                self.assertEqual(result["report"]["mode"], expected)
+                if expected == "complete":
+                    self.assertTrue(result["rows"])
+                else:
+                    self.assertEqual(result["report"]["budget"], "time")
+                    self.assertEqual(result["rows"], [])
+
     def test_an_expired_deadline_stops_the_traversal_and_says_so(self) -> None:
         self.seed_bridge_store()
         result = self.ask(

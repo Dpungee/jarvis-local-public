@@ -32,6 +32,8 @@ const state = {
   accessModes: {},
   featureOnboarding: null,
   featureDecisionPending: new Set(),
+  customizationProfiles: null,
+  appliedCustomizationChecksum: null,
   onboardingDismissedForSession: false,
   networkInventory: null,
   networkScanPending: false,
@@ -1223,6 +1225,13 @@ function providerLabel(provider = {}) {
       : provider.openai_healthy === false
         ? "OpenAI circuit open"
         : "OpenAI configured · unverified");
+  }
+  if (provider.xai_configured) {
+    labels.push(provider.xai_healthy === true
+      ? "xAI Grok healthy"
+      : provider.xai_healthy === false
+        ? "xAI Grok circuit open"
+        : "xAI Grok configured · unverified");
   }
   if (provider.anthropic_configured) {
     labels.push(provider.anthropic_healthy === true
@@ -5434,6 +5443,243 @@ async function refreshFeatureOnboarding() {
   return state.featureOnboarding;
 }
 
+function applyActiveCustomization(status) {
+  const active = status?.active || null;
+  const checksum = active?.profile_checksum_sha256 || "none";
+  if (state.appliedCustomizationChecksum === checksum) return;
+  const settings = status?.runtime_settings || active?.runtime_settings || {};
+  const appearance = settings?.appearance || {};
+  const theme = typeof appearance.theme === "string" ? appearance.theme : "dark";
+  // Profile palettes are dark variants layered under the browser-local
+  // light/dark/system theme; presence.css applies them only while the
+  // resolved theme is dark, so light mode keeps its own readable palette.
+  document.body.dataset.jarvisTheme = theme;
+  if (/^#[0-9a-f]{6}$/i.test(appearance.accent || "")) {
+    document.documentElement.style.setProperty("--profile-accent", appearance.accent);
+    document.body.dataset.profileAccent = "on";
+  } else {
+    document.documentElement.style.removeProperty("--profile-accent");
+    delete document.body.dataset.profileAccent;
+  }
+  if (
+    appearance.compact === true
+    || (appearance.compact === false && !window.matchMedia("(max-width: 760px)").matches)
+  ) {
+    setRailCollapsed(appearance.compact);
+  }
+  state.appliedCustomizationChecksum = checksum;
+}
+
+async function refreshCustomizationProfiles() {
+  state.customizationProfiles = await api("/api/customization-profiles");
+  applyActiveCustomization(state.customizationProfiles);
+  return state.customizationProfiles;
+}
+
+function customizationSelect(values, selected) {
+  const control = document.createElement("select");
+  for (const [value, label] of values) {
+    const option = document.createElement("option");
+    option.value = value;
+    option.textContent = label;
+    control.append(option);
+  }
+  control.value = selected;
+  return control;
+}
+
+function latestCustomizationRevision(status, profileId) {
+  const profile = (status?.profiles || []).find((item) => item.profile_id === profileId);
+  if (!profile?.revisions?.length) return null;
+  return [...profile.revisions].sort((a, b) => b.revision - a.revision)[0];
+}
+
+function customizationProfileCard(status) {
+  const card = document.createElement("section");
+  card.className = "utility-card customization-profile-card";
+  const active = status?.active || null;
+  const current = active?.runtime_settings || status?.runtime_settings || {};
+  const appearance = current.appearance || {};
+  const conversation = current.conversation || {};
+  const routing = current.model_routing || {};
+
+  const head = document.createElement("div");
+  head.className = "utility-card-head";
+  const title = document.createElement("h3");
+  title.textContent = "Jarvis profile";
+  head.append(title, makePill(active ? `revision ${active.revision} active` : "not configured"));
+  const boundary = document.createElement("p");
+  boundary.textContent = "Appearance, response style, and ordinary-chat routing apply on the next turn. Profiles cannot alter approvals, access control, policy, redaction, verification, tools, or safety.";
+
+  const profileId = document.createElement("input");
+  profileId.type = "text";
+  profileId.maxLength = 64;
+  profileId.pattern = "[a-z][a-z0-9-]{0,63}";
+  profileId.value = active?.profile_id || "operator-default";
+  const displayName = document.createElement("input");
+  displayName.type = "text";
+  displayName.maxLength = 120;
+  displayName.value = active?.display_name || "My Jarvis";
+  const theme = customizationSelect([
+    ["dark", "Dark"],
+    ["midnight", "Midnight"],
+    ["holographic-dark", "Holographic dark"],
+    ["high-contrast", "High contrast"],
+  ], appearance.theme || "dark");
+  const accent = document.createElement("input");
+  accent.type = "color";
+  accent.value = /^#[0-9a-f]{6}$/i.test(appearance.accent || "")
+    ? appearance.accent
+    : "#74d8ff";
+  const compact = document.createElement("input");
+  compact.type = "checkbox";
+  compact.checked = appearance.compact === true;
+  const tone = customizationSelect([
+    ["natural", "Natural"],
+    ["straightforward", "Straightforward"],
+    ["direct", "Direct"],
+    ["professional", "Professional"],
+    ["friendly", "Friendly"],
+    ["dry-witty", "Dry + witty"],
+  ], conversation.tone || "natural");
+  const detail = customizationSelect([
+    ["concise", "Concise"],
+    ["adaptive", "Adaptive"],
+    ["thorough", "Thorough"],
+  ], conversation.detail || "adaptive");
+  const formatting = customizationSelect([
+    ["plain", "Mostly plain"],
+    ["balanced", "Balanced"],
+    ["structured", "Structured"],
+  ], conversation.formatting || "balanced");
+  const priority = customizationSelect([
+    ["balanced", "Balanced auto-routing"],
+    ["speed", "Prefer speed for chat"],
+    ["quality", "Prefer quality for chat"],
+  ], routing.priority || "balanced");
+  const standards = document.createElement("textarea");
+  standards.rows = 3;
+  standards.maxLength = 1200;
+  standards.placeholder = "One presentation standard per line";
+  standards.value = Array.isArray(current.operator_standards)
+    ? current.operator_standards.join("\n")
+    : "";
+
+  const form = document.createElement("div");
+  form.className = "customization-profile-form";
+  form.append(
+    settingRow("Profile ID", "Change this ID to create a separate profile.", profileId),
+    settingRow("Display name", "A human-readable name for this versioned profile.", displayName),
+    settingRow("Profile palette", "Dark palette variant; applies while Presence uses a dark theme.", theme),
+    settingRow("Accent", "Choose the interface highlight color for dark themes.", accent),
+    settingRow("Compact sidebar", "Apply compact navigation whenever this profile activates.", compact),
+    settingRow("Conversation tone", "Controls style, never facts or authority.", tone),
+    settingRow("Response detail", "Choose concise, adaptive, or thorough answers.", detail),
+    settingRow("Formatting", "Choose how heavily Jarvis structures ordinary answers.", formatting),
+    settingRow("Chat optimization", "Only affects ordinary dialogue; specialist routes remain automatic.", priority),
+    settingRow("Operator standards", "Optional bounded presentation preferences, one per line.", standards),
+  );
+
+  const feedback = document.createElement("p");
+  feedback.className = "customization-feedback";
+  feedback.textContent = "Preview a revision before saving it.";
+
+  function draftProfile() {
+    const id = profileId.value.trim().toLowerCase();
+    const latest = latestCustomizationRevision(status, id);
+    const retainedSettings = latest?.profile?.settings
+      ? JSON.parse(JSON.stringify(latest.profile.settings))
+      : {};
+    const operatorStandards = standards.value.split(/\r?\n/)
+      .map((item) => item.trim()).filter(Boolean).slice(0, 6);
+    return {
+      profile: {
+        schema_version: 1,
+        profile_id: id,
+        display_name: displayName.value.trim(),
+        revision: latest ? latest.revision + 1 : 1,
+        settings: {
+          ...retainedSettings,
+          appearance: {theme: theme.value, accent: accent.value, compact: compact.checked},
+          conversation: {tone: tone.value, detail: detail.value, formatting: formatting.value},
+          model_routing: {priority: priority.value},
+          operator_standards: operatorStandards,
+        },
+      },
+      expected_previous_checksum: latest?.profile_checksum_sha256 || null,
+    };
+  }
+
+  const actions = document.createElement("div");
+  actions.className = "customization-actions";
+  const preview = document.createElement("button");
+  preview.type = "button";
+  preview.className = "ghost";
+  preview.textContent = "Preview revision";
+  preview.addEventListener("click", () => {
+    (async () => {
+      const draft = draftProfile();
+      const result = await post("/api/customization-profiles/preview", {profile: draft.profile});
+      feedback.textContent = `Preview ready · revision ${result.preview.revision} · checksum ${result.preview.profile_checksum_sha256.slice(0, 12)}… · protected controls unchanged.`;
+    })().catch(showError);
+  });
+  const save = document.createElement("button");
+  save.type = "button";
+  save.className = "primary";
+  save.textContent = "Save & activate";
+  save.addEventListener("click", () => {
+    (async () => {
+      const draft = draftProfile();
+      await post("/api/customization-profiles/preview", {profile: draft.profile});
+      const result = await post("/api/customization-profiles/save", {...draft, activate: true});
+      state.customizationProfiles = result.status;
+      state.appliedCustomizationChecksum = null;
+      applyActiveCustomization(result.status);
+      toast(`Activated ${draft.profile.display_name} revision ${draft.profile.revision}.`);
+      await renderCustomize();
+    })().catch(showError);
+  });
+  actions.append(preview, save);
+
+  const revisions = document.createElement("div");
+  revisions.className = "customization-revisions";
+  const selectedRevision = document.createElement("select");
+  const selectedProfile = (status?.profiles || []).find(
+    (item) => item.profile_id === active?.profile_id,
+  );
+  for (const revision of [...(selectedProfile?.revisions || [])].sort((a, b) => b.revision - a.revision)) {
+    const option = document.createElement("option");
+    option.value = String(revision.revision);
+    option.textContent = `Revision ${revision.revision}${revision.active ? " · active" : ""}`;
+    option.dataset.checksum = revision.profile_checksum_sha256;
+    selectedRevision.append(option);
+  }
+  const activateRevision = document.createElement("button");
+  activateRevision.type = "button";
+  activateRevision.className = "ghost";
+  activateRevision.textContent = "Activate selected revision";
+  activateRevision.disabled = !selectedRevision.options.length;
+  activateRevision.addEventListener("click", () => {
+    (async () => {
+      const option = selectedRevision.selectedOptions[0];
+      const result = await post("/api/customization-profiles/activate", {
+        profile_id: active.profile_id,
+        revision: Number(option.value),
+        expected_checksum: option.dataset.checksum,
+      });
+      state.customizationProfiles = result.status;
+      state.appliedCustomizationChecksum = null;
+      applyActiveCustomization(result.status);
+      toast(`Activated revision ${option.value}.`);
+      await renderCustomize();
+    })().catch(showError);
+  });
+  revisions.append(selectedRevision, activateRevision);
+
+  card.append(head, boundary, form, feedback, actions, revisions);
+  return card;
+}
+
 function renderFeatureOnboardingDialog() {
   const dialog = $("feature-onboarding-dialog");
   const list = $("feature-onboarding-list");
@@ -5534,6 +5780,16 @@ async function renderCustomize(generation = null) {
     settingRow("Pinned projects", "Remove every project shortcut from this browser.", clearPins),
   );
   content.append(card);
+
+  const customizationStatus = await refreshCustomizationProfiles().catch((error) => ({
+    error: error?.message || "Customization profiles are unavailable",
+  }));
+  if (!isUtilityRenderCurrent(render)) return;
+  if (customizationStatus.error) {
+    content.append(emptyUtility(customizationStatus.error));
+  } else {
+    content.append(customizationProfileCard(customizationStatus));
+  }
 
   const preferences = document.createElement("section");
   preferences.className = "utility-card";
@@ -5851,6 +6107,15 @@ async function pollEvents() {
         setConversationActivity(payload.conversation_id, "Ready when you are.");
       }
       if (event.kind === "approval_decided") refreshApprovals().catch(() => {});
+      if (event.kind === "customization_profile_updated") {
+        state.appliedCustomizationChecksum = null;
+        refreshCustomizationProfiles()
+          .then(() => {
+            if (state.activeView === "customize") return renderCustomize();
+            return null;
+          })
+          .catch(showError);
+      }
       if (event.kind === "conversation_renamed") {
         if (payload.conversation_id === state.conversationId && payload.title) {
           $("chat-title").textContent = payload.title;
@@ -6431,6 +6696,7 @@ async function boot() {
   await refreshProjects();
   await ensureConversation();
   await refreshStatus();
+  await refreshCustomizationProfiles().catch(() => {});
   await refreshFeatureOnboarding().catch(() => {});
   await refreshBluetoothInventory().catch(() => {});
   await refreshConversations();

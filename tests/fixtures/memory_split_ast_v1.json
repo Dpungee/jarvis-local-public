@@ -2033,6 +2033,14 @@
     "operational_summary": {
       "module": "memory_operator_state",
       "sha256": "7a45d4d453053c671aa1b3a259bb908a269645c4da87fd267440927c4a660430"
+    },
+    "record_reliability_case": {
+      "module": "memory_operator_state",
+      "sha256": "e9d20cfb45cdc480c5c1793cda76f58e5ea3e731ea2ff4fea0ff2f0d190ed6a4"
+    },
+    "list_reliability_cases": {
+      "module": "memory_operator_state",
+      "sha256": "a60c04d5c6035a8a47da1e0bd51251d198e844939cb13bd4d62e0d2fec06885a"
     }
   },
   "domains": {

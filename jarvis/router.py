@@ -127,7 +127,7 @@ class Route:
         object.__setattr__(self, "coding_intent", coding_intent)
         prefix, separator, _remainder = value.partition(":")
         if separator and prefix.casefold() in {
-            "openai", "anthropic", "codex-cli", "claude-cli"
+            "openai", "xai", "anthropic", "codex-cli", "claude-cli"
         }:
             return
         object.__setattr__(
@@ -157,7 +157,7 @@ class ModelRouter:
             return wanted
         prefix, separator, provider_model = wanted.partition(":")
         if separator and prefix.casefold() in {
-            "openai", "anthropic", "codex-cli", "claude-cli"
+            "openai", "xai", "anthropic", "codex-cli", "claude-cli", "openrouter"
         } and provider_model:
             if any(
                 item.startswith(f"{prefix.casefold()}:")
@@ -178,7 +178,8 @@ class ModelRouter:
         def canonical(value: str) -> tuple[str, str]:
             prefix, separator, remainder = value.partition(":")
             if separator and prefix.casefold() in {
-                "openai", "anthropic", "codex-cli", "claude-cli", "ollama"
+                "openai", "xai", "anthropic", "codex-cli", "claude-cli", "openrouter",
+                "ollama",
             }:
                 return prefix.casefold(), remainder
             return "ollama", value
@@ -206,8 +207,16 @@ class ModelRouter:
             return bool(value)
         if provider == "openai":
             return bool(re.match(r"(?:gpt-5(?:\.|-|$)|gpt-4o(?:-|$)|gpt-4\.1(?:-|$))", value))
-        if provider == "anthropic":
+        if provider == "xai":
+            return value.startswith("grok-")
+        if provider in {"anthropic", "claude-cli"}:
             return value.startswith("claude-")
+        if provider == "openrouter":
+            # OpenRouter's catalogue says per model whether it accepts images.
+            from .openrouter import model_info
+
+            info = model_info(provider_model)
+            return bool(info and info.get("vision"))
         return False
 
     def is_vision_capable(self, model: str) -> bool:

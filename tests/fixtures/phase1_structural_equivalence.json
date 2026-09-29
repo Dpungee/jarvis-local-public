@@ -2,7 +2,7 @@
   "tool_methods": [
     {
       "method": "__init__",
-      "sha256": "d2d444585162eb21c91ffb9fb046f66fec95641a1f8111cbde2150c920a64dda"
+      "sha256": "b6be16f532e0bab768c1e77b11c6d5dea3556db92b93dff0e5ff989dc7a6561a"
     },
     {
       "method": "schemas",
@@ -607,6 +607,10 @@
     {
       "method": "schedule_delete",
       "sha256": "e5abf33454c0d0f599c39604eb149a08aadb241a49633a7a37f46f8ba8bf77f4"
+    },
+    {
+      "method": "code_context_graph",
+      "sha256": "5bfd8eeb023e942b487f361edcf7a0f481a3822fa2aba5ffd0b818d3dd7f8b51"
     }
   ],
   "tool_domains": {
@@ -761,7 +765,8 @@
       "copy_path",
       "move_path",
       "trash_path",
-      "search_files"
+      "search_files",
+      "code_context_graph"
     ]
   },
   "agent_stages": [
@@ -1262,7 +1267,7 @@
   "agent_unchanged_methods": [
     {
       "method": "__init__",
-      "sha256": "35890cc26b17124dfac69dae096b9bd202d61986d5294064632c93ecd9220bb6"
+      "sha256": "2d982db86c4596f29f86d13cfd488a181f580eb0a215afa3e26333d8566d8f8e"
     },
     {
       "method": "set_specialist",
@@ -1334,11 +1339,11 @@
     },
     {
       "method": "system_prompt",
-      "sha256": "18818ff72bc09d59e2a985308bea93faff098bbd1f5e2d01741b1fa99ec8ba7d"
+      "sha256": "5a97ec8669f9e20bdfb014b5ede8a2bc672c44b74cd2feeacb216e19ec67c367"
     },
     {
       "method": "casual_system_prompt",
-      "sha256": "60f61201c69c25d244a110a26434f03e2877e6f817d6a4e1082d7f328835eb37"
+      "sha256": "7c0cd2720b684db57f8099681be67c8929d17cc2478853fcd6af40ed0422daf5"
     },
     {
       "method": "_result_payload",
@@ -1370,7 +1375,7 @@
     },
     {
       "method": "_phase_tool_budgets",
-      "sha256": "220e3d193eca3e7fdd42de52d31ae359dee5e24fd54804ffc297773dd83c89b0"
+      "sha256": "633cffbd880b8cfd3bfbefde77c45bf019b38150507fa3f2160453d7d5745fb9"
     },
     {
       "method": "_is_learning_task",
@@ -1378,7 +1383,7 @@
     },
     {
       "method": "_is_deep_research_task",
-      "sha256": "9451599ac89b23deeb53309afda6ee9169185339fcc2e5fdd3bd191a89a37921"
+      "sha256": "6c2913f99c378665cc7071a9d9356c0b599765539c943d71f235f2a20ad7f843"
     },
     {
       "method": "_report_write_allowed",
@@ -1402,11 +1407,11 @@
     },
     {
       "method": "_open_agent_turn",
-      "sha256": "2d98eeeed0f36e99182993145ff5436dc6dff06091abb44959f37a9ac5ab742d"
+      "sha256": "d69028cfe8375a0474816b8e1959dd7a19863c87bf4083396c39ce21771a9de2"
     },
     {
       "method": "_describe_step",
-      "sha256": "3119cca5f00f89f3ad9ff6f23118eb48a94f0811653cbdefe9982265605733e5"
+      "sha256": "a852279a2160fbf4b94db6fc3763338c7ab0b7eced9e8aeedd28fcb730725a1e"
     },
     {
       "method": "_open_taint_gate",
@@ -1514,7 +1519,7 @@
     },
     {
       "method": "_model_failure_diagnosis",
-      "sha256": "61645ba6034ba0180d144f69743efad0336f724f7669a7596bc493363ad04e59"
+      "sha256": "0b7728fc9767025023ee4a387088ec2d8a4d49e98134b783f95d92b09ddc7580"
     },
     {
       "method": "_record_active_goal_outcome",
@@ -1538,7 +1543,7 @@
     },
     {
       "method": "_acceptance_failure",
-      "sha256": "60ca8a6add6b2c32963fe2a0126ad1d5e198efa5459558ac1ac97de0d7f3414f"
+      "sha256": "0cb94172bcae8c297f32da922741f48ee314adac6b0a9c8bc033d5c2cd2db400"
     },
     {
       "method": "_eligible_completion_receipt_ids",
@@ -1574,7 +1579,7 @@
     },
     {
       "method": "_unstored_fact_proposal",
-      "sha256": "36103adcd15aecc2b3e662e83caf5519f98f44b4f4f20dee52330ac822226857"
+      "sha256": "935cfd471054747846b7f9471fa405ced01188a92bb91514597911b223848a5d"
     },
     {
       "method": "_assisted_fact_proposal",
@@ -1638,7 +1643,7 @@
     },
     {
       "method": "_unstored_fact_note",
-      "sha256": "c2d78ce4590b37273f8b16fc55b8131a82314e7ffc2523d84a4d379165d09fcd"
+      "sha256": "85663c71c3260647a3f095fbb9d7895dc7b3e3fc3ec51af15701a4ec7944ba08"
     },
     {
       "method": "_finish",
@@ -1646,7 +1651,7 @@
     },
     {
       "method": "_synthesize",
-      "sha256": "ff14b555ba04e44990490dd7c91c13adbeb5c2d7d17ae089f78834e66619d504"
+      "sha256": "b492c48c9c4110d2e08f32aea7aaddf3858b34a0c161060eb1c292d321421a61"
     },
     {
       "method": "_research_queries",
@@ -1678,7 +1683,7 @@
     },
     {
       "method": "_collect_quick_news_evidence",
-      "sha256": "70838f30a21af322ea8198b173c4c8b0cdd3ac1c645967847afcdeb34b0da30a"
+      "sha256": "b5f2c7929adc307ac5661308a654d89c745e5f278cecb972ebd5ca4987f955d0"
     },
     {
       "method": "_collect_quick_release_evidence",
@@ -1738,11 +1743,11 @@
     },
     {
       "method": "_finalize_with_synthesis",
-      "sha256": "d184e71ba10df90fc13f7935c9598fdc5a4979729de0fe2170c4ebdb8b142397"
+      "sha256": "3715232e26b07ae0034bb78cbe93244edd746e5c37bfec2dbdfee80a77007b8c"
     },
     {
       "method": "run",
-      "sha256": "00e33b809a559e5684a8e03b5012f2aca7dfd06f2572951ebeffc94953a239eb"
+      "sha256": "36c4d8f53f5569f885f49527f307e60d932f3fa00ac017590b4dde4570c90d78"
     }
   ],
   "agent_closure_bodies": [
@@ -1802,7 +1807,7 @@
     },
     {
       "method": "_run_resolve_routing",
-      "sha256": "63f5675867e75f1dff9d7cd8b8cf94639d0b9fdffeaba17f83bd0694dc1d7f3d"
+      "sha256": "9a4479b496312a9184b07e6f1f4b098cbf456dec86197d0508933d3105e8ee02"
     },
     {
       "method": "_run_deterministic_replies",
@@ -1818,7 +1823,7 @@
     },
     {
       "method": "_run_preloop_tools",
-      "sha256": "509de363fab6a3bc363dddb87b2524d80897eb0eb28c77488838341a2de8a592"
+      "sha256": "79a59ac574d2b5335d113e205a36eb2fd15294a0543441ba50e29389a82512c7"
     },
     {
       "method": "_run_coding_preflight",
@@ -1826,7 +1831,7 @@
     },
     {
       "method": "_run_step_model_turn",
-      "sha256": "e186e766fde7684a80135f4da36e33ff2b2859c166d740df584f957bef2c4819"
+      "sha256": "44fc900d6aa7c2cc0e00b912622edce208c7447de495fd0638d79f1a9ec7458c"
     },
     {
       "method": "_run_step_no_tool_reply",
@@ -1834,7 +1839,7 @@
     },
     {
       "method": "_run_tool_calls",
-      "sha256": "ba03abbe537a61ed142e45aed4a8771cdfc058871060e525ff0f9178981b3ab4"
+      "sha256": "9ffb68c16cf73317611f7eedb964bdb9cbca8f51ba2f72b2c2b6737b579847c1"
     },
     {
       "method": "_run_step_verification_checkpoint",

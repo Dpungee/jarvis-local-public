@@ -12,5 +12,6 @@ include SECURITY.md
 include SOUL.md
 include TRAINING.md
 recursive-include docs *.md
+recursive-include requirements *.txt *.md
 recursive-include scripts *.py
 recursive-include tests/fixtures *.json

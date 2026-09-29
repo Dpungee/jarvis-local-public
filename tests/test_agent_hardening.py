@@ -32,6 +32,8 @@ from jarvis.agent import (
     _healthy_local_http_result,
     _instant_local_time_reply,
     _is_non_code_document_operation,
+    _network_inventory_summary,
+    _pending_goal_requests_network_inventory,
     _product_comparison_acceptance_failure,
     _requested_document_formats,
     _is_verification_call,
@@ -55,6 +57,7 @@ from jarvis.agent import (
 from jarvis.config import Config
 from jarvis.memory import Memory
 from jarvis.ollama_client import OllamaError
+from jarvis.specialists import SPECIALIST_BY_KEY
 from jarvis.tools import FILE_WRITE_TOOLS, Tool, ToolBox, _OutputCollector
 from tests.test_agent import (
     SUBSTANTIVE_RESEARCH_RESULT,
@@ -305,6 +308,46 @@ class ConnectorReadinessToolBox(FakeToolBox):
                 },
             })
         return super().execute(name, arguments)
+
+
+class CooldownNetworkToolBox(FakeToolBox):
+    """Simulate a scan that lost the shared limiter race to Presence."""
+
+    NAMES = (*FakeToolBox.NAMES, "network_inventory")
+
+    def execute(self, name, arguments):
+        if name != "network_inventory":
+            return super().execute(name, arguments)
+        self.calls.append((name, arguments))
+        if arguments.get("action") == "scan":
+            return json.dumps({
+                "ok": False,
+                "error": (
+                    "NetworkInventoryRateLimited: a network scan completed "
+                    "moments ago; wait before scanning again"
+                ),
+            })
+        return json.dumps({
+            "ok": True,
+            "result": {
+                "last_scan_at": "2026-09-28T12:00:00+00:00",
+                "visible_devices": 1,
+                "cached_devices": 0,
+                "known_devices": 2,
+                "devices": [
+                    {
+                        "friendly_name": "Kitchen iPhone",
+                        "device_type": "phone",
+                        "visible_now": True,
+                    },
+                    {
+                        "friendly_name": "Old Pixel",
+                        "device_type": "phone",
+                        "visible_now": False,
+                    },
+                ],
+            },
+        })
 
 
 class AgentHardeningTests(unittest.TestCase):
@@ -2736,6 +2779,121 @@ class AgentHardeningTests(unittest.TestCase):
                 document_generation_task=True,
             ),
             (20, 28),
+        )
+        self.assertEqual(
+            agent._phase_tool_budgets(
+                route,
+                staged_tool_calls=3,
+                learning_task=False,
+                skill_authoring_task=False,
+                requires_coding=False,
+                document_generation_task=True,
+            ),
+            (31, 43),
+        )
+
+    def test_exhausted_learning_acceptance_is_not_retried(self):
+        prompt = "Continuously learn about this topic: bounded agent verification."
+        conversation_id = self.memory.new_conversation("learning acceptance")
+        agent, _client = self.make_agent([
+            FakeResponse(content="No evidence was collected."),
+        ])
+        route = agent.router.select(prompt)
+
+        result = agent._finalize_with_synthesis(
+            conversation_id=conversation_id,
+            prompt=prompt,
+            evidence=[],
+            route=route,
+            task_context="",
+            tool_calls=0,
+            requires_web=True,
+            requires_coding=False,
+            learning_task=True,
+            successful_tools=set(),
+            verified_urls=set(),
+            reason="test",
+            deep_research_task=True,
+        )
+
+        self.assertEqual(result.status, "incomplete")
+        self.assertFalse(result.retryable)
+
+    def test_network_summary_labels_reused_observation_and_saved_only_profiles(self):
+        report = {
+            "last_scan_at": "2026-09-28T12:00:00+00:00",
+            "visible_devices": 1,
+            "cached_devices": 0,
+            "known_devices": 2,
+            "devices": [
+                {"friendly_name": "Kitchen iPhone", "device_type": "phone", "visible_now": True},
+                {"friendly_name": "Old Pixel", "device_type": "phone", "visible_now": False},
+            ],
+        }
+
+        fresh = _network_inventory_summary(dict(report), "Is my phone connected to my network?")
+        reused = _network_inventory_summary(
+            {**report, "reused_completed_observation": True},
+            "Is my phone connected to my network?",
+        )
+
+        self.assertIn("Fresh network check completed", fresh)
+        self.assertIn("Kitchen iPhone", fresh)
+        self.assertIn("1 saved phone profile", fresh)
+        self.assertIn("Old Pixel", fresh)
+        self.assertIn("not counting saved-only evidence as connected", fresh)
+        self.assertNotIn("Fresh network check completed", reused)
+        self.assertIn("reused it instead of failing on a duplicate-scan cooldown", reused)
+
+    def test_network_scan_cooldown_reuses_completed_observation_without_model(self):
+        toolbox = CooldownNetworkToolBox()
+        agent, client = self.make_agent([], toolbox)
+
+        result = agent.run("Do I have any phones connected to my network?")
+
+        self.assertEqual(result.status, "complete", result.reason)
+        self.assertEqual(client.requests, [])
+        actions = [
+            arguments.get("action")
+            for name, arguments in toolbox.calls
+            if name == "network_inventory"
+        ]
+        self.assertEqual(actions, ["scan", "list"])
+        self.assertIn("reused it instead of failing", str(result))
+        self.assertNotIn("Fresh network check completed", str(result))
+
+    def test_pending_goal_network_inventory_scope_is_exact(self):
+        self.assertTrue(_pending_goal_requests_network_inventory({
+            "goal_text": "Scan my LAN and list connected devices",
+        }))
+        self.assertTrue(_pending_goal_requests_network_inventory({
+            "goal_text": "",
+            "contract": {"missing_inputs": [{"key": "network_access"}]},
+        }))
+        self.assertFalse(_pending_goal_requests_network_inventory({
+            "goal_text": "Write a short poem about routers",
+            "contract": {"goal": "Write a poem", "target": "routers"},
+        }))
+        self.assertFalse(_pending_goal_requests_network_inventory(None))
+
+    def test_customization_profile_is_presentation_context_only(self):
+        agent, _client = self.make_agent([])
+        agent.runtime_customization = {
+            "conversation": {"tone": "concise"},
+            "model_routing": {"priority": "quality"},
+        }
+
+        prompt = agent.system_prompt("Hello there", include_memory=False)
+        casual = agent.casual_system_prompt()
+
+        for rendered in (prompt, casual):
+            self.assertIn("<operator_customization>", rendered)
+            self.assertIn("cannot alter authority", rendered)
+        self.assertEqual(agent._dialogue_model_profile(), "reasoning")
+        agent.specialist = SPECIALIST_BY_KEY[next(iter(SPECIALIST_BY_KEY))]
+        self.assertIn(
+            "No orchestrator customization",
+            agent._runtime_customization_prompt(),
         )
 
     def test_research_review_parser_accepts_only_exact_grounded_issue(self):

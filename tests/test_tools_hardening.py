@@ -304,7 +304,7 @@ class ToolCapabilityHardeningTests(unittest.TestCase):
 
     def test_tool_availability_matrix_matches_capability_modes(self):
         all_tools = {
-            "tool_catalog", "tool_create", "web_search", "web_fetch", "research_question", "list_files", "read_file", "read_files",
+            "tool_catalog", "tool_create", "web_search", "web_fetch", "research_question", "list_files", "code_context_graph", "read_file", "read_files",
             "write_file", "edit_file", "make_directory", "copy_path", "move_path",
             "trash_path", "build_document", "search_files", "detect_project", "run_process",
             "build_document_preview", "image_visual_qa", "image_generation_status",
@@ -320,7 +320,7 @@ class ToolCapabilityHardeningTests(unittest.TestCase):
             "feature_setup_status", "feature_setup_plan", "feature_setup_decide",
         }
         readonly_tools = {
-            "tool_catalog", "web_search", "web_fetch", "research_question", "list_files", "read_file", "read_files",
+            "tool_catalog", "web_search", "web_fetch", "research_question", "list_files", "code_context_graph", "read_file", "read_files",
             "search_files", "detect_project", "process_status", "process_logs",
             "http_health", "recall", "session_search", "skill_list", "skill_read",
             "screen_companion_status", "screen_companion_control",

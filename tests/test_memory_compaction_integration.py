@@ -2192,12 +2192,20 @@ class NoCollateralDeletionTests(CompactionStoreCase):
                 "SELECT id FROM messages WHERE conversation_id=?", (neighbour,)
             )
         }
-        result = self.memory.conversation_milestones(target, project_id=1)
+        # This assertion checks conversation isolation, not host scheduling.
+        # Keep deadline enforcement independently exercised below.
+        with patch('jarvis.memory.time.monotonic', return_value=100.0):
+            result = self.memory.conversation_milestones(target, project_id=1)
         self.assertEqual(result["report"]["mode"], "complete", result["report"])
         self.assertIn(result["report"]["mode"], DOCUMENTED_READ_MODES)
+        self.assertTrue(result["rows"], 'Boundary assertions require returned rows')
         for row in result["rows"]:
             self.assertNotIn(row["message_ids"]["first"], neighbour_ids)
             self.assertNotIn(row["message_ids"]["last"], neighbour_ids)
+        with patch('jarvis.memory.time.monotonic', side_effect=[100.0, 101.0]):
+            expired = self.memory.conversation_milestones(target, project_id=1)
+        self.assertEqual(expired['report']['mode'], 'budget-exceeded')
+        self.assertEqual(expired['rows'], [])
 
 
 class CrashSafetyTests(CompactionStoreCase):

@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
-<meta name="color-scheme" content="dark">
+<meta name="color-scheme" content="dark light">
 <title>JARVIS · Agent Hub</title>
 <link rel="stylesheet" href="/hub.css">
 </head>
@@ -11,56 +11,95 @@
 <div class="app">
   <!-- Sidebar: everything here belongs to the agent chosen in the picker. -->
   <aside id="hub-sidebar" class="sidebar" aria-label="Agent workspace">
-    <div class="picker">
-      <button id="agent-picker" type="button" aria-haspopup="menu" aria-expanded="false"></button>
-      <div id="agent-menu" class="menu picker-menu" role="menu" hidden></div>
+    <div class="side-top">
+      <div class="picker">
+        <button id="agent-picker" type="button" aria-haspopup="menu" aria-expanded="false"></button>
+        <div id="agent-menu" class="menu picker-menu" role="menu" hidden></div>
+      </div>
+      <a id="side-new-chat" class="icon-btn" href="#/" aria-label="New chat" title="New chat (Ctrl+Shift+O)"><svg viewBox="0 0 24 24"><path d="M11.5 4.5H7A2.5 2.5 0 0 0 4.5 7v10A2.5 2.5 0 0 0 7 19.5h10a2.5 2.5 0 0 0 2.5-2.5v-4.5"/><path d="M17.3 3.9a1.9 1.9 0 0 1 2.7 2.7l-7.6 7.6-3.4.7.7-3.4z"/></svg></a>
+      <button id="sidebar-collapse" type="button" class="icon-btn" aria-label="Close sidebar" title="Close sidebar"><svg viewBox="0 0 24 24"><rect x="3.5" y="4.5" width="17" height="15" rx="3"/><path d="M9.5 4.5v15"/></svg></button>
     </div>
-    <label class="side-search"><span class="sr-only">Filter conversations</span><input id="chat-filter" type="search" placeholder="Search conversations" autocomplete="off"></label>
-    <div class="side-heading">Workspace</div>
-    <div id="space-links" class="space-links"></div>
-    <div class="side-heading">Folder</div>
-    <div id="project-tree"></div>
-    <div class="side-heading">Conversations</div>
-    <div id="conversation-tree"><p class="note">Choose an agent to see its conversations.</p></div>
+    <div class="side-scroll">
+      <nav id="space-links" class="space-links" aria-label="Agent spaces"></nav>
+      <div id="conversation-tree" class="chats"><p class="note side-note">Choose an agent to see its conversations.</p></div>
+    </div>
     <div class="side-foot">
-      <a href="#/overview">All agents</a>
-      <a href="#/settings">Settings</a>
-      <span class="spacer"></span>
-      <span id="connection" class="connection" role="status" aria-live="polite" title="Connecting…"><i></i><span class="sr-only">Connecting…</span></span>
+      <button id="profile-button" type="button" aria-haspopup="menu" aria-expanded="false">
+        <span class="avatar sm you" aria-hidden="true">Y</span>
+        <span class="profile-text"><b>You</b><small>Settings &amp; personalization</small></span>
+        <span id="connection" class="connection" role="status" aria-live="polite" title="Connecting…"><i></i><span class="sr-only">Connecting…</span></span>
+      </button>
     </div>
   </aside>
 
   <main class="main">
     <header class="main-head">
-      <button id="sidebar-toggle" type="button" aria-label="Toggle sidebar" aria-expanded="false" aria-controls="hub-sidebar">☰</button>
+      <button id="sidebar-toggle" type="button" class="icon-btn" aria-label="Open sidebar" aria-expanded="false" aria-controls="hub-sidebar" title="Open sidebar"><svg viewBox="0 0 24 24"><rect x="3.5" y="4.5" width="17" height="15" rx="3"/><path d="M9.5 4.5v15"/></svg></button>
       <div id="main-title" class="main-title"></div>
+      <div id="crumbs" class="crumbs"></div>
       <span class="spacer"></span>
       <span id="provider-chips" class="provider-chips"></span>
-      <button id="details-toggle" type="button" class="ghost" aria-controls="details" aria-expanded="true" title="Agent details">◧</button>
+      <button id="share-button" type="button" class="head-btn" aria-haspopup="menu" aria-expanded="false" aria-label="Share or export this chat" hidden><svg viewBox="0 0 24 24"><path d="M12 14.5V4M8 7.5l4-4 4 4"/><path d="M5 12v4.5A2.5 2.5 0 0 0 7.5 19h9a2.5 2.5 0 0 0 2.5-2.5V12"/></svg><span>Share</span></button>
+      <button id="details-toggle" type="button" class="icon-btn" aria-controls="details" aria-expanded="false" aria-label="Workspace panel" title="Workspace panel"><svg viewBox="0 0 24 24"><rect x="3.5" y="4.5" width="17" height="15" rx="3"/><path d="M14.5 4.5v15"/></svg></button>
+      <a id="head-new-chat" class="icon-btn" href="#/" aria-label="New chat" title="New chat (Ctrl+Shift+O)"><svg viewBox="0 0 24 24"><path d="M11.5 4.5H7A2.5 2.5 0 0 0 4.5 7v10A2.5 2.5 0 0 0 7 19.5h10a2.5 2.5 0 0 0 2.5-2.5v-4.5"/><path d="M17.3 3.9a1.9 1.9 0 0 1 2.7 2.7l-7.6 7.6-3.4.7.7-3.4z"/></svg></a>
     </header>
-    <div id="view" class="view" tabindex="-1" aria-live="polite"></div>
+    <div id="view" class="view" tabindex="-1"></div>
   </main>
 
-  <!-- Agent profile, tasks, access and schedules (the Muse-style right panel). -->
-  <aside id="details" class="details" aria-label="Agent details"></aside>
+  <!-- The agent's workspace: progress, changed files, a live preview, the project folder and the
+       agent's profile, access and schedules. -->
+  <aside id="details" class="details" aria-label="Agent workspace panel">
+    <div id="rp-resizer" class="rp-resizer" role="separator" aria-orientation="vertical" aria-label="Resize panel (arrow keys)" tabindex="0"></div>
+    <div class="rp-head">
+      <div id="rp-tabs" class="rp-tabs" role="tablist" aria-label="Workspace"></div>
+      <button id="rp-close" type="button" class="icon-btn" aria-label="Close panel" title="Close panel"><svg viewBox="0 0 24 24"><path d="M6.5 6.5l11 11M17.5 6.5l-11 11"/></svg></button>
+    </div>
+    <div id="rp-body" class="rp-body"></div>
+    <!-- A running app the agent built and verified. It is framed from its own loopback address,
+         outside the chat view, so it is isolated from this page and never reloaded by polling. -->
+    <section id="rp-preview" class="rp-preview" hidden>
+      <div id="rp-preview-bar" class="rp-preview-bar"></div>
+      <div id="app-panel" class="app-panel" hidden aria-labelledby="app-panel-title">
+        <div class="app-panel-head">
+          <strong id="app-panel-title">App preview</strong><span id="app-panel-state" class="tag"></span>
+          <span class="spacer"></span>
+          <a id="app-panel-newtab" target="_blank" rel="noopener noreferrer">New tab ↗</a>
+          <button id="app-panel-reload" type="button" class="small">Reload</button>
+          <button id="app-panel-power" type="button" class="small">Stop</button>
+          <button id="app-panel-close" type="button" class="icon" aria-label="Close app preview">×</button>
+        </div>
+        <div id="app-panel-frame" class="app-panel-frame dev-desktop"></div>
+        <p id="app-panel-note" class="note"></p>
+      </div>
+      <div id="rp-preview-content" class="rp-preview-content"></div>
+    </section>
+  </aside>
 </div>
 
-<!-- A running app the agent built and verified. It is framed from its own loopback address,
-     outside the chat view, so it is isolated from this page and never reloaded by polling. -->
-<aside id="app-panel" class="app-panel" hidden aria-labelledby="app-panel-title">
-  <div class="app-panel-head">
-    <strong id="app-panel-title">App preview</strong><span id="app-panel-state" class="tag"></span>
-    <span class="spacer"></span>
-    <a id="app-panel-newtab" target="_blank" rel="noopener noreferrer">Open in new tab ↗</a>
-    <button id="app-panel-reload" type="button">Reload</button>
-    <button id="app-panel-power" type="button">Stop</button>
-    <button id="app-panel-close" type="button" class="icon" aria-label="Close preview panel">×</button>
-  </div>
-  <div id="app-panel-frame" class="app-panel-frame"></div>
-  <p id="app-panel-note" class="note"></p>
-</aside>
-
 <div id="item-menu" class="menu" role="menu" hidden></div>
+<!-- The file picker lives outside the repainted view, so a poll during the OS dialog cannot drop the selection. -->
+<input type="file" id="attach-input" multiple hidden aria-hidden="true" tabindex="-1">
+
+<dialog id="search-dialog" class="search-dialog" aria-label="Search chats">
+  <div class="search-head">
+    <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="6.5"/><path d="m16 16 4.5 4.5"/></svg>
+    <input id="search-chats-input" type="search" placeholder="Search chats…" autocomplete="off" aria-label="Search chats" aria-controls="search-chats-results">
+    <button type="button" class="icon-btn" data-close aria-label="Close search"><svg viewBox="0 0 24 24"><path d="M6.5 6.5l11 11M17.5 6.5l-11 11"/></svg></button>
+  </div>
+  <div id="search-chats-results" class="search-results"></div>
+</dialog>
+
+<dialog id="room-dialog" aria-labelledby="room-dialog-title">
+  <form id="room-new-form" method="dialog" class="dialog-body" novalidate>
+    <div class="dialog-head"><h2 id="room-dialog-title">New team room</h2><button type="button" class="icon" data-close aria-label="Close">×</button></div>
+    <fieldset class="room-members"><legend>Agents in the room (two or more)</legend><div id="room-member-list" class="member-picks"></div></fieldset>
+    <label class="gap-top">Topic<textarea name="topic" rows="3" maxlength="4000" placeholder="What should they discuss?"></textarea></label>
+    <div class="form-grid gap-top"><label>Title (optional)<input name="title" maxlength="120" autocomplete="off" placeholder="e.g. Pricing review"></label><label>Chair<select name="chair_id" id="room-chair"></select></label></div>
+    <p id="room-error" class="note bad-text" role="alert" hidden></p>
+    <p class="note">The chair speaks last in each round and closes with a summary. Every agent uses only its own abilities.</p>
+    <div class="dialog-actions"><button type="button" data-close>Cancel</button><button class="primary" type="submit">Start room</button></div>
+  </form>
+</dialog>
 
 <dialog id="agent-dialog" aria-labelledby="agent-dialog-title">
   <form id="agent-form" method="dialog" class="dialog-body">

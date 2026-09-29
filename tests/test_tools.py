@@ -1325,6 +1325,11 @@ class ToolTests(unittest.TestCase):
         with patch.dict(os.environ, {"JARVIS_SENTINEL_SECRET": "must-not-leak"}):
             result = self.toolbox.run_process("python", ["show_env.py"], timeout=10)
         self.assertEqual(result["exit_code"], 0)
+        self.assertEqual(result["execution_backend"], "host")
+        self.assertEqual(result["execution_boundary"]["id"], "unsandboxed-host")
+        self.assertEqual(
+            result["execution_boundary"]["process_authority"], "current-user"
+        )
         self.assertNotIn("must-not-leak", result["stdout"])
         self.assertIn(str(self.config.data_dir / "runtime" / "home"), result["stdout"])
         blocked = json.loads(self.toolbox.execute("run_process", {

@@ -62,6 +62,18 @@ FEATURE_SPECS: tuple[FeatureSpec, ...] = (
         (("JARVIS_NETWORK_ACCESS", "disabled"),),
     ),
     FeatureSpec(
+        "network-device-metadata",
+        "Private device-type metadata",
+        "Classify broad device types from local hostnames and the public IEEE vendor registry.",
+        "The complete registry is cached from one fixed official URL; observed MAC addresses, hostnames, and IPs are never uploaded, and confidence labels never prove identity.",
+        (
+            ("JARVIS_NETWORK_ACCESS", "private-lan"),
+            ("JARVIS_NETWORK_METADATA", "hostname-oui"),
+        ),
+        (("JARVIS_NETWORK_METADATA", "disabled"),),
+        ("private-lan-inventory",),
+    ),
+    FeatureSpec(
         "private-lan-monitoring",
         "Automatic home-network checks",
         "Recheck the paired private network on a bounded schedule and report changes.",

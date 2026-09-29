@@ -82,6 +82,40 @@ repository root:
 python -m jarvis recovery test
 ```
 
+Without `--backup-dir`, this is a disposable drill and does not retain a backup. To
+create a durable private backup, first create and review a restricted destination,
+then pass that existing directory explicitly:
+
+```powershell
+python -m jarvis recovery test --backup-dir D:\JarvisBackups
+```
+
+The destination must be outside the source and configured model workspace. Links,
+reparse points, filesystem roots, and existing database/SQLite-sidecar names are
+refused. Restrict its OS permissions before use; the command does not grant or
+repair folder permissions and does not isolate against a process with the same
+OS-user authority.
+
+The command creates a unique timestamped database without overwriting an existing
+artifact, returns its filename and digest, and stores a sanitized receipt in the
+private recovery-attestation ledger. If that receipt cannot be recorded, its own
+verified retained artifact and exact SQLite sidecars are removed before an ordinary
+command failure is reported. Abrupt process or machine termination still requires
+orphan inspection; preserve unrecognized artifacts rather than deleting them.
+
+Application restart/lease/one-shot approval checks are synthetic and reported
+separately from the live database's integrity, foreign-key, schema, online-backup,
+and isolated-restore checks. The only live database mutation is the audit attestation
+itself; operational and authority state is not changed. The retained snapshot is
+taken before that new attestation, so its receipt is in the source ledger, not
+retroactively inserted into the backup. A source with a pending transaction is
+refused; the caller must resolve it explicitly. No automatic restore, schema repair,
+provider connection, or permission reset occurs.
+
+Do not mark the release gate complete until a reviewer also validates the restored
+live state required below. Matching backup/restore digests are not evidence of an
+application-level restoration or independent disaster-recovery acceptance.
+
 This is evidence for Private JARVIS only. The future public database must have an
 independent backup receipt and restore proof. Never place either database or a
 backup into the public workspace, source control, a model prompt, or a platform

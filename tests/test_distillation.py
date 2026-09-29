@@ -172,6 +172,18 @@ class DistillationTests(unittest.TestCase):
                 set(tool_schemas["write_file"]["properties"]),
                 {"path", "content", "expected_sha256"},
             )
+            run_tool = next(
+                tool for tool in split_record["tools"]
+                if tool["function"]["name"] == "run_process"
+            )
+            self.assertIn(
+                "unsandboxed host execution",
+                run_tool["function"]["description"],
+            )
+            self.assertIn(
+                "networkless Docker container",
+                run_tool["function"]["description"],
+            )
 
             calls = [
                 message["tool_calls"][0]
@@ -183,6 +195,22 @@ class DistillationTests(unittest.TestCase):
                 ["read_file", "write_file", "run_process"],
             )
             self.assertNotIn("run_command", json.dumps(split_record))
+            run_result = json.loads(next(
+                message["content"]
+                for message in split_record["messages"]
+                if message.get("name") == "run_process"
+            ))["result"]
+            self.assertEqual(run_result["execution_backend"], "host")
+            self.assertEqual(
+                run_result["execution_boundary"],
+                {
+                    "id": "unsandboxed-host",
+                    "process_authority": "current-user",
+                    "network_access": "inherited",
+                    "filesystem_access": "current-user",
+                    "lifecycle_containment": "direct-process",
+                },
+            )
 
             initial_content = task["initial_files"]["solution.py"]
             expected_hash = hashlib.sha256(initial_content.encode("utf-8")).hexdigest()

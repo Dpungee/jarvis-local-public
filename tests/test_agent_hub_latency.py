@@ -162,6 +162,33 @@ class ClaudeEffortAndStreamingTests(unittest.TestCase):
                 client.chat_stream([{"role": "user", "content": "hi"}], [], "claude-opus-5-5", lambda text: None)
         self.assertEqual(len(attempts), 1)
 
+    def test_images_go_as_real_image_blocks_not_conversation_text(self):
+        import base64
+        png = base64.b64encode(b"\x89PNG\r\n\x1a\n" + b"\x00" * 32).decode("ascii")
+        client = mc.ClaudeCLIClient("claude.exe", working_directory=".")
+        seen = {}
+
+        def fake_stream(args, *, prompt, timeout, flags, cancellation_guard, on_text):
+            seen["args"], seen["prompt"] = args, prompt
+            return subprocess.CompletedProcess(args, 0, json.dumps(
+                {"type": "result", "is_error": False, "structured_output": {"content": "ok", "tool_calls": []},
+                 "usage": {}}), "")
+        messages = [{"role": "user", "content": [{"type": "text", "text": "what is this?"},
+                                                 {"type": "image", "mime": "image/png", "data": png}]}]
+        with patch.object(client, "_run_cli_streaming", side_effect=fake_stream):
+            response = client.chat(messages, [], "claude-sonnet-5", response_format={"type": "object"})
+        self.assertEqual(response["content"], "ok")
+        args = seen["args"]
+        self.assertEqual(args[args.index("--input-format") + 1], "stream-json")
+        self.assertEqual(args[args.index("--output-format") + 1], "stream-json")
+        record = json.loads(seen["prompt"])
+        text, image = record["message"]["content"]
+        self.assertNotIn(png, text["text"])
+        self.assertIn("image 1, sent with this request", text["text"])
+        self.assertEqual(image["source"], {"type": "base64", "media_type": "image/png", "data": png})
+        from jarvis.router import ModelRouter
+        self.assertTrue(ModelRouter._vision_capable("claude-cli:claude-sonnet-5"))
+
     def test_model_client_routes_claude_streaming(self):
         cli = mc.ClaudeCLIClient("claude.exe", working_directory=".")
         client = mc.ModelClient(None, claude_cli=cli)

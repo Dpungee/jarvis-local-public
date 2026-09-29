@@ -101,6 +101,8 @@ class ProcessLifecycleTests(unittest.TestCase):
         self.assertRegex(process_id, r"^[0-9a-f]{12}$")
         self.assertEqual(started["name"], "test-health-server")
         self.assertTrue(started["running"])
+        self.assertEqual(started["execution_backend"], "host")
+        self.assertEqual(started["execution_boundary"]["id"], "unsandboxed-host")
 
         health = self.toolbox.http_health(
             f"http://127.0.0.1:{port}/health", timeout=2, retries=10, interval_ms=100
@@ -123,10 +125,17 @@ class ProcessLifecycleTests(unittest.TestCase):
         listed = self.toolbox.process_status()
         self.assertEqual(listed["count"], 1)
         self.assertEqual(listed["active"], 1)
+        self.assertEqual(
+            listed["processes"][0]["execution_boundary"],
+            started["execution_boundary"],
+        )
         followup_toolbox = ToolBox(self.config, self.memory)
         followup_status = followup_toolbox.process_status(process_id)
         self.assertTrue(followup_status["running"])
         self.assertEqual(followup_status["name"], "test-health-server")
+        self.assertEqual(
+            followup_status["execution_boundary"], started["execution_boundary"]
+        )
         self.assertIn("READY", followup_toolbox.process_logs(process_id)["stdout"]["content"])
         stopped = self.toolbox.stop_process(process_id)
         self.assertEqual(stopped["state"], "stopped")

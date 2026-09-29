@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import io
 import shutil
 import tempfile
 import unittest
@@ -15,10 +16,12 @@ from jarvis.execution import (
     DOCKER_IMAGE,
     DockerBackend,
     ExecutionHandle,
+    ExecutionResult,
     HostBackend,
     build_execution_backend,
     docker_available,
     docker_executable,
+    execution_boundary,
 )
 from jarvis.memory import Memory
 from jarvis.tools import ToolBox
@@ -55,6 +58,88 @@ class ExecutionBackendTests(unittest.TestCase):
         executable.parent.mkdir()
         executable.write_bytes(b"synthetic trusted docker")
         return install_root, executable
+
+    def test_execution_boundary_schema_is_closed_and_rejects_unknown_backends(self) -> None:
+        self.assertEqual(
+            execution_boundary("host").as_dict(),
+            {
+                "id": "unsandboxed-host",
+                "process_authority": "current-user",
+                "network_access": "inherited",
+                "filesystem_access": "current-user",
+                "lifecycle_containment": "process-tree",
+            },
+        )
+        self.assertEqual(
+            execution_boundary("docker").as_dict(),
+            {
+                "id": "restricted-docker-container",
+                "process_authority": "container-user",
+                "network_access": "disabled",
+                "filesystem_access": "workspace-read-write-bind",
+                "lifecycle_containment": "ephemeral-container",
+            },
+        )
+        with self.assertRaisesRegex(ValueError, "Unknown execution backend boundary"):
+            execution_boundary("custom")
+
+    def test_run_receipt_uses_actual_handle_even_when_backend_label_differs(self) -> None:
+        for timed_out in (False, True):
+            with self.subTest(timed_out=timed_out):
+                backend = execution.ExecutionBackend()
+                backend.name = "docker"
+                process = Mock(stdout=io.BytesIO(b"output"), stderr=io.BytesIO(b""), returncode=0)
+                if timed_out:
+                    process.wait.side_effect = [execution.subprocess.TimeoutExpired("synthetic", 1), None]
+                handle = Mock(process=process, backend="host", boundary=execution_boundary("host"))
+                with patch.object(backend, "start", return_value=handle):
+                    result = backend.run("python", ["probe.py"], cwd=self.workspace, timeout=1, env={})
+                self.assertEqual(result.backend, "host")
+                self.assertEqual(result.boundary, execution_boundary("host"))
+                self.assertEqual(result.timed_out, timed_out)
+                self.assertEqual(result.stdout, "output")
+                handle.close.assert_called_once_with()
+                self.assertEqual(handle.terminate.call_count, int(timed_out))
+
+    def test_tool_receipts_use_actual_result_and_managed_handle_not_backend_label(self) -> None:
+        config = replace(Config.load(), workspace=self.workspace, data_dir=self.data_dir,
+                         execution_mode="trusted-host", execution_backend="host", autonomy="autonomous")
+        (self.workspace / "probe.py").write_text("print('synthetic')\n", encoding="utf-8")
+        with Memory(self.data_dir / "jarvis.db") as memory:
+            toolbox = ToolBox(config, memory)
+            backend = Mock()
+            backend.name = "docker"
+            boundary = execution_boundary("host")
+            backend.run.return_value = ExecutionResult("ok", "", 0, False, 0.01, "host", boundary)
+            process = Mock(stdout=io.BytesIO(b""), stderr=io.BytesIO(b""), pid=123)
+            process.poll.return_value = 0
+            handle = Mock(process=process, job=Mock(), backend="host", boundary=boundary)
+            backend.start.return_value = handle
+            toolbox._execution_backend = backend
+            result = toolbox.run_process("python", ["probe.py"])
+            started = toolbox.start_process("python", ["probe.py"])
+            toolbox._execution_backend = Mock(name="changed-after-launch")
+            status = toolbox.process_status(started["process_id"])
+            listed = toolbox.process_status()["processes"]
+            for receipt in (result, started, status, *listed):
+                self.assertEqual(receipt["execution_backend"], "host")
+                self.assertEqual(receipt["execution_boundary"], boundary.as_dict())
+            self.assertEqual(len(listed), 1)
+            handle.close.assert_called_once_with()
+
+    def test_host_and_docker_launchers_bind_their_effective_boundary(self) -> None:
+        with patch.object(HostBackend, "_start_contained") as start:
+            HostBackend().start("python", [], cwd=self.workspace, env={}, host_command=["synthetic-python"])
+        self.assertEqual(start.call_args.kwargs["backend"], "host")
+        self.assertEqual(start.call_args.kwargs["boundary"], execution_boundary("host"))
+        trusted_root, trusted = self._trusted_docker()
+        with patch("jarvis.trusted_executables._trusted_install_roots", return_value=(trusted_root.resolve(),)):
+            backend = DockerBackend(self.workspace, executable=str(trusted), verify=False)
+        with patch.object(backend, "_prepare_windows_bind_mount"), \
+             patch.object(backend, "_start_contained") as start:
+            backend.start("python", ["probe.py"], cwd=self.workspace, env={})
+        self.assertEqual(start.call_args.kwargs["backend"], "docker")
+        self.assertEqual(start.call_args.kwargs["boundary"], execution_boundary("docker"))
 
     def test_docker_resolution_ignores_poisoned_cwd_path_and_environment(self) -> None:
         poison = self.root / "poison"
@@ -168,6 +253,7 @@ class ExecutionBackendTests(unittest.TestCase):
             process=Mock(),
             job=Mock(),
             backend="docker",
+            boundary=execution_boundary("docker"),
             container_name="jarvis-unit-test",
             docker=str(trusted),
         )
@@ -323,4 +409,7 @@ class LiveDockerBackendTests(unittest.TestCase):
             )
         self.assertEqual(result["exit_code"], 0, result)
         self.assertEqual(result["execution_backend"], "docker")
+        self.assertEqual(
+            result["execution_boundary"], execution_boundary("docker").as_dict()
+        )
         self.assertIn("TOOLBOX_DOCKER_OK", result["stdout"])

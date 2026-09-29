@@ -186,6 +186,25 @@ jobs:
           $env:SOURCE_DATE_EPOCH = $sourceEpoch
           python -m build --no-isolation
           if ($LASTEXITCODE -ne 0) { throw "Distribution build failed with exit code $LASTEXITCODE" }
+          $sdist = (Get-ChildItem -LiteralPath dist -Filter *.tar.gz | Select-Object -First 1).FullName
+          if (-not $sdist) { throw "Built source distribution was not found" }
+          python scripts/normalize_sdist.py --source-epoch $sourceEpoch $sdist
+          if ($LASTEXITCODE -ne 0) { throw "Source-distribution normalization failed with exit code $LASTEXITCODE" }
+          $repro = Join-Path $env:RUNNER_TEMP "jarvis-reproducible-build"
+          New-Item -ItemType Directory -Force -Path $repro | Out-Null
+          python -m build --no-isolation --outdir $repro
+          if ($LASTEXITCODE -ne 0) { throw "Repeat distribution build failed with exit code $LASTEXITCODE" }
+          $reproSdist = (Get-ChildItem -LiteralPath $repro -Filter *.tar.gz | Select-Object -First 1).FullName
+          if (-not $reproSdist) { throw "Repeated source distribution was not found" }
+          python scripts/normalize_sdist.py --source-epoch $sourceEpoch $reproSdist
+          if ($LASTEXITCODE -ne 0) { throw "Repeated source-distribution normalization failed with exit code $LASTEXITCODE" }
+          foreach ($artifact in Get-ChildItem -LiteralPath dist -File) {
+            $repeated = Join-Path $repro $artifact.Name
+            if (-not (Test-Path -LiteralPath $repeated -PathType Leaf)) { throw "Repeat build omitted $($artifact.Name)" }
+            if ((Get-FileHash -Algorithm SHA256 -LiteralPath $artifact.FullName).Hash -ne (Get-FileHash -Algorithm SHA256 -LiteralPath $repeated).Hash) {
+              throw "Distribution is not reproducible: $($artifact.Name)"
+            }
+          }
 
       - name: Smoke-test the built wheel outside the source tree
         shell: pwsh
@@ -207,7 +226,7 @@ jobs:
           Push-Location $outside
           try {
             $env:JARVIS_DATA = $data
-            & $python -c "import importlib.metadata as m; eps={e.name:e for e in m.entry_points(group='console_scripts') if e.dist and e.dist.name=='jarvis-local'}; expected={'jarvis','jarvis-ui','jarvis-presence','jarvis-public-presence','jarvis-command-center'}; assert expected <= set(eps); [eps[name].load() for name in sorted(expected)]"
+            & $python -c "import importlib.metadata as m; eps={e.name:e for e in m.entry_points(group='console_scripts') if e.dist and e.dist.name=='jarvis-local'}; expected={'jarvis','jarvis-ui','jarvis-presence','jarvis-public-presence','jarvis-command-center','jarvis-hub'}; assert expected <= set(eps); [eps[name].load() for name in sorted(expected)]"
             if ($LASTEXITCODE -ne 0) { throw "Installed entry-point import smoke test failed with exit code $LASTEXITCODE" }
             & $python -c "import importlib.metadata as m; from importlib.resources import files; from jarvis.long_horizon import LongHorizonStore; reqs=m.requires('jarvis-local') or []; assert any(r.lower().startswith('cryptography') for r in reqs); fixture=files('jarvis').joinpath('evaluation_fixtures/long_horizon_restart_holdout_v1.json'); assert fixture.is_file(); assert LongHorizonStore is not None"
             if ($LASTEXITCODE -ne 0) { throw "Installed Phase 5 runtime/fixture smoke test failed with exit code $LASTEXITCODE" }
@@ -215,10 +234,44 @@ jobs:
             if ($LASTEXITCODE -ne 0) { throw "Installed Agent Hub asset smoke test failed with exit code $LASTEXITCODE" }
             & (Join-Path $scripts "jarvis.exe") --help | Out-Null
             if ($LASTEXITCODE -ne 0) { throw "jarvis --help failed with exit code $LASTEXITCODE" }
+            & (Join-Path $scripts "jarvis-hub.exe") --help | Out-Null
+            if ($LASTEXITCODE -ne 0) { throw "jarvis-hub --help failed with exit code $LASTEXITCODE" }
             & (Join-Path $scripts "jarvis.exe") workflow --help | Out-Null
             if ($LASTEXITCODE -ne 0) { throw "jarvis workflow --help failed with exit code $LASTEXITCODE" }
             & (Join-Path $scripts "jarvis-public-presence.exe") health | Out-Null
             if ($LASTEXITCODE -ne 0) { throw "jarvis-public-presence health failed with exit code $LASTEXITCODE" }
+          } finally {
+            Pop-Location
+          }
+
+      - name: Smoke-test the normalized source distribution outside the source tree
+        shell: pwsh
+        run: |
+          $sdist = (Get-ChildItem -LiteralPath dist -Filter *.tar.gz | Select-Object -First 1).FullName
+          if (-not $sdist) { throw "Normalized source distribution was not found" }
+          $smoke = Join-Path $env:RUNNER_TEMP "jarvis-sdist-smoke"
+          $outside = Join-Path $env:RUNNER_TEMP "jarvis-sdist-outside"
+          $data = Join-Path $env:RUNNER_TEMP "jarvis-sdist-data"
+          python -m venv $smoke
+          if ($LASTEXITCODE -ne 0) { throw "Source-distribution smoke virtual environment creation failed" }
+          $python = Join-Path $smoke "Scripts\python.exe"
+          $scripts = Join-Path $smoke "Scripts"
+          & $python -m pip install --disable-pip-version-check --require-hashes -r requirements/build-backend.txt
+          if ($LASTEXITCODE -ne 0) { throw "Source-distribution smoke build dependency installation failed" }
+          & $python -m pip install --disable-pip-version-check --require-hashes -r requirements/runtime-documents.txt
+          if ($LASTEXITCODE -ne 0) { throw "Source-distribution smoke dependency installation failed" }
+          & $python -m pip install --disable-pip-version-check --no-index --no-deps --no-build-isolation $sdist
+          if ($LASTEXITCODE -ne 0) { throw "Normalized source distribution installation failed" }
+          New-Item -ItemType Directory -Force -Path $outside, $data | Out-Null
+          Push-Location $outside
+          try {
+            $env:JARVIS_DATA = $data
+            & $python -c "import importlib.metadata as m; eps={e.name:e for e in m.entry_points(group='console_scripts') if e.dist and e.dist.name=='jarvis-local'}; expected={'jarvis','jarvis-ui','jarvis-presence','jarvis-public-presence','jarvis-command-center','jarvis-hub'}; assert expected <= set(eps); [eps[name].load() for name in sorted(expected)]"
+            if ($LASTEXITCODE -ne 0) { throw "Installed source-distribution entry-point import smoke test failed" }
+            & (Join-Path $scripts "jarvis-hub.exe") --help | Out-Null
+            if ($LASTEXITCODE -ne 0) { throw "Source-distribution jarvis-hub --help failed" }
+            & (Join-Path $scripts "jarvis-public-presence.exe") health | Out-Null
+            if ($LASTEXITCODE -ne 0) { throw "Source-distribution public-presence health failed" }
           } finally {
             Pop-Location
           }

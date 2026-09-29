@@ -19,6 +19,24 @@ MANIFEST = json.loads((ROOT / 'tests/fixtures/phase1_structural_equivalence.json
 # Explicit digest records keep method names separate from credential-shaped values.
 MANIFEST['tool_methods'] = {item['method']: item['sha256'] for item in MANIFEST['tool_methods']}
 
+# Reviewed boundary-receipt correction only; preserve the original extraction manifest.
+# Regression: ExecutionBackendTests.test_tool_receipts_use_actual_result_and_managed_handle_not_backend_label
+# and ProcessLifecycleTests cover the live synthetic host process/status lifecycle.
+REVIEWED_BOUNDARY_RECEIPTS = {
+    'run_process': (
+        'b9b38c9faeb006acfd0feea0960ecf7d9042fa550e195edef967e6e08bdab9b7',
+        'a85d1c6e0fe6f15610cd0a3c6bc65f4e1f153058df5c49234db0c10111aa5903',
+    ),
+    '_managed_status': (
+        'd784ceaedefe8abdbc63c1bfcb62ec7e8838d6bac4caf4d84980e4e8dd77c72e',
+        '1c4f27b317c07ee6e01e28eee0adf9f8ba2bbfd5bbcb6fa9421474bb83210236',
+    ),
+    'start_process': (
+        '768b8d28e0ee12bd66c9f8a03768217dead4746a396a647a8c53f26c6189366e',
+        '6fa514a0b14f72fc5a3f470bf252bda5861f550db3f63d8a5b8cd1d4097b4ba4',
+    ),
+}
+
 
 def fingerprint(node):
     return hashlib.sha256(structural_dump(node).encode()).hexdigest()
@@ -63,7 +81,11 @@ class ToolRegistrySplitTests(unittest.TestCase):
                         if isinstance(method, ast.FunctionDef):
                             self.assertNotIn(method.name, actual)
                             actual[method.name] = fingerprint(OriginalToolGlobals().visit(copy.deepcopy(method)))
-        self.assertEqual(actual, MANIFEST['tool_methods'])
+        expected = dict(MANIFEST['tool_methods'])
+        for name, (before, after) in REVIEWED_BOUNDARY_RECEIPTS.items():
+            self.assertEqual(expected[name], before)
+            expected[name] = after
+        self.assertEqual(actual, expected)
 
     def test_new_concurrency_authorization_and_receipts_remain_in_core(self):
         for name in ('execute', '_authorize_tool_call', '_dispatch_tool_call', '_finish_tool_call'):

@@ -14,92 +14,106 @@ administrator, desktop, account, network-scanning, or publishing authority.
    or clone that exact tag. A clone of `main` may contain newer unreleased work.
    The wheel and source distribution are intended for Python package workflows; they
    are not the double-click installer.
-4. Choose a model-provider path before running setup:
+4. Decide which provider account you want Jarvis to use. Setup presents all supported
+   choices and automatically assigns task profiles:
 
-   - **Codex CLI:** uses an eligible ChatGPT subscription through the official Codex
-     sign-in. See the [official Codex CLI guide](https://learn.chatgpt.com/docs/codex/cli).
-   - **Claude CLI:** uses an eligible Claude subscription through the official Claude
-     sign-in.
-   - **Both:** uses Claude for fast/reasoning work and Codex for coding/deep work.
-   - **Ollama:** local-only operation is supported, but v0.6.3 does not yet expose an
-     Ollama preset in the first-run chooser. Follow the manual local path below.
+   - **Codex CLI:** an eligible ChatGPT subscription through the official Codex sign-in.
+     See the [official Codex CLI guide](https://learn.chatgpt.com/docs/codex/cli).
+   - **Claude CLI:** an eligible Claude subscription through the official Claude sign-in.
+   - **Both subscriptions:** Claude for fast/reasoning and Codex for coding/deep work.
+   - **OpenAI API, Anthropic API, or Grok through xAI:** separately billed API access.
+     Add the matching key to the Windows user environment before setup; never put it in
+     this project.
+   - **Ollama:** local inference on this computer; setup downloads selected preset models.
 
 Account eligibility and usage limits come from the selected provider. Jarvis verifies
 the official CLI login; it does not read, copy, print, or store the provider's login
 file.
 
-## Recommended subscription-provider setup
+## Guided setup
 
 1. Double-click `setup.bat` in the extracted project folder.
 2. Confirm the Python version and path shown at the beginning. Setup installs Jarvis and
-   its document-generation libraries into that Python environment. It does not create a
-   virtual environment in v0.6.3.
-3. Choose Codex CLI, Claude CLI, or both. If the selected CLI is missing, setup can offer
-   to install its exact Windows Package Manager package. If it is not signed in, setup
-   can start the provider's official sign-in flow.
-4. Review the optional features. **Not now** is the safe default. Choosing **Set up** in
-   this review only saves local settings; the installer performs no scan, pairing,
-   download, or containment action. When a feature requires another feature, the prompt
-   names the prerequisite before saving the choice.
-5. Setup sends a fixed, tool-free first-turn check through every unique configured model
+   its document-generation and Google Drive libraries into that Python environment. It
+   does not create a virtual environment in v0.6.3.
+3. Choose **Recommended**, **Customize everything**, or **Minimal**. Recommended enables
+   helpful low-risk behavior while keeping private, external, and host-control access
+   off. Customize reviews every capability family. Minimal installs core chat and
+   workspace functionality.
+4. Choose Codex CLI, Claude CLI, both, Ollama, OpenAI API, Anthropic API, or Grok through
+   xAI. If a selected subscription CLI is missing, setup can install its exact Windows
+   Package Manager package and start the official sign-in flow. Jarvis chooses models
+   automatically after you choose the provider.
+5. Review optional capability modes: Screen Companion, project/desktop execution,
+   proactive work, signal-driven initiative, self-review drafts, memory quality,
+   external connectors, Drive scope, image generation, and all granular network,
+   Bluetooth, defensive-monitoring, and security-popup controls. **Not now** is the safe
+   default for network features. Choosing **Set up** only saves local settings; the
+   installer performs no scan, pairing, download, or containment action. Setup
+   describes each safety boundary and names any prerequisite before saving it.
+6. Setup sends a fixed, tool-free first-turn check through every unique configured model
    route, then runs `jarvis doctor`. The check contains no files, credentials, or personal
    prompt. Do not treat the installation as complete unless the window ends with **Ready**.
-6. Double-click `start_jarvis_presence.bat` to open the recommended interface.
+7. Setup offers the optional **Agent Hub**, a browser workspace for your agents. You can
+   add it later with `install_agent_hub.bat`.
+8. Choose whether to open Presence immediately, install Presence at Windows sign-in,
+   install Presence plus the background worker at sign-in, or finish without starting.
+   An unattended setup starts nothing; open Presence later with
+   `start_jarvis_presence.bat`.
 
-Rerunning `setup.bat` is safe after a stopped installation. Already reviewed provider
-and optional-feature choices are preserved.
+Rerunning `setup.bat` is the supported update/customization path, and it is safe after a
+stopped installation. Existing data, unrecognized settings, provider login state, and
+reviewed choices are preserved. The wizard lets you keep or change the provider and
+review features again.
 
-## Manual local-only Ollama path
+## Local-only Ollama path
 
-Use this path only if you want local inference and are comfortable editing a text file.
-Local models need substantial disk space, memory, and download time; performance depends
-on the computer.
+Install [Ollama for Windows](https://ollama.com/download), run `setup.bat`, and choose
+**Ollama**. Setup stores the bounded local profile preset, downloads models that are
+missing, and verifies a real first response from every unique route. Local models can
+require substantial disk space, memory, and download time; performance depends on the
+computer. Advanced operators can edit profile names in `.env` later, then rerun setup to
+download and verify the new selection.
 
-1. Install [Ollama for Windows](https://ollama.com/download).
-2. Copy `.env.example` to a new file named `.env` in the project folder.
-3. Keep `JARVIS_OLLAMA_ENABLED=true` and both subscription CLI flags set to `false`.
-4. Choose models that fit the computer. For a bounded starting point, use the same
-   smaller model for every profile instead of the larger defaults:
+An unchanged copy of `.env.example` does not count as completed provider setup. This
+keeps an accidental copy—or unrelated API keys inherited from Windows—from skipping
+the review.
 
-   ```text
-   JARVIS_MODEL=auto
-   JARVIS_FAST_MODEL=qwen3.5:9b
-   JARVIS_REASONING_MODEL=qwen3.5:9b
-   JARVIS_CODING_MODEL=qwen3.5:9b
-   JARVIS_DEEP_MODEL=qwen3.5:9b
-   JARVIS_BACKGROUND_MODEL=qwen3.5:9b
-   JARVIS_LEARNING_MODEL=qwen3.5:9b
-   JARVIS_OLLAMA_ENABLED=true
-   JARVIS_CODEX_CLI_ENABLED=false
-   JARVIS_CLAUDE_CLI_ENABLED=false
-   ```
+## Direct API keys
 
-5. Run `setup.bat`. Because the model profiles differ from the untouched template, setup
-   recognizes this as an intentional local configuration and preserves it. Setup will ask
-   Ollama to download any selected model that is not installed, then verify a real first
-   response from each unique model.
+For OpenAI API, Anthropic API, or Grok through xAI, open **Edit environment variables
+for your account** from the Windows Start menu and create exactly one matching user
+variable: `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, or `XAI_API_KEY`. Paste the key in
+the Windows editor, open a new terminal, and rerun `setup.bat`. The installer enables
+only the provider you choose, refuses an API choice whose key is missing, and never
+writes the key to `.env`, logs, or setup state.
 
-An unchanged copy of `.env.example` does not count as completed provider setup. This keeps
-an accidental copy—or unrelated API keys inherited from Windows—from skipping the review.
-Customize the local profiles as shown above when Ollama is the deliberate choice.
+xAI documents `XAI_API_KEY`, its OpenAI-compatible API, and current Grok aliases in the
+[official quickstart](https://docs.x.ai/developers/quickstart) and
+[model catalog](https://docs.x.ai/developers/models).
 
 ## What setup changes
 
 Setup may:
 
-- install the editable `jarvis-local` Python package and the declared document libraries
-  into the Python environment shown on screen;
+- install the editable `jarvis-local` Python package and the declared document and
+  Google Drive libraries into the Python environment shown on screen;
 - install a selected provider CLI through Windows Package Manager after you answer yes;
 - start the selected provider's official sign-in flow after you answer yes;
 - save non-secret provider routing and optional-feature switches in `.env`;
 - create local onboarding state under `data/`;
 - download configured Ollama models when local inference is selected;
-- send a fixed, tool-free first-turn canary to each unique configured model; and
-- run Jarvis's local doctor check.
+- send a fixed, tool-free first-turn canary to each unique configured model;
+- run Jarvis's local doctor check;
+- set up the optional Agent Hub when you answer yes;
+- install the selected Presence/worker scheduled tasks when requested; and
+- open Presence when requested.
 
 Setup does not place provider passwords, session files, or API keys in the repository.
 Optional-feature review does not scan a network, enumerate Bluetooth devices, pair a
 network, control the desktop, contact an external account, or start background services.
+Account connectors, Home Assistant, gateways, remote access, and other credentialed
+integrations require a separate pairing step after first boot.
 
 ## Common failures
 
@@ -125,6 +139,17 @@ python -m jarvis.provider_setup --login codex
 python -m jarvis.provider_setup --login claude
 python -m jarvis.provider_setup --login both
 ```
+
+To switch to an API or local provider, rerun `setup.bat` or use one of:
+
+```powershell
+python -m jarvis.provider_setup --configure openai-api
+python -m jarvis.provider_setup --configure anthropic-api
+python -m jarvis.provider_setup --configure grok
+python -m jarvis.provider_setup --configure ollama
+```
+
+An API choice is refused until its key is present in the Windows user environment.
 
 If sign-in succeeds but the first-turn check fails, confirm the selected model is
 available and rerun `setup.bat`, or retry only the bounded check with:

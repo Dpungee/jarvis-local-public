@@ -24,6 +24,8 @@ keywords = [
     "personal-assistant",
     "tool-use",
     "windows",
+    "xai",
+    "grok",
 ]
 classifiers = [
     "Development Status :: 3 - Alpha",
@@ -71,6 +73,7 @@ jarvis-ui = "jarvis.ui:main"
 jarvis-presence = "jarvis.presence:main"
 jarvis-public-presence = "jarvis.public_presence_service:main"
 jarvis-command-center = "jarvis.command_center:main"
+jarvis-hub = "jarvis.agent_hub:main"
 
 [tool.setuptools]
 packages = ["jarvis", "jarvis.gateway"]

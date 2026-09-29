@@ -152,7 +152,9 @@ def _output_path(
     if path.suffix.casefold() != f".{document_type}":
         raise ValueError(f"Output extension must be .{document_type}")
     if not path.parent.exists():
-        raise FileNotFoundError("Document output directory does not exist")
+        # A report asked for in "reports/" should not fail on a missing folder. The path is
+        # already inside the workspace with no link components, so creating it is contained.
+        path.parent.mkdir(parents=True, exist_ok=True)
     _ordinary_directory(path.parent, "Document output directory")
     return path
 

@@ -3104,6 +3104,11 @@ class MemoryTests(unittest.TestCase):
                 "install the referenced capabilities in the local skill library",
                 "install them",
                 "please upload those",
+                (
+                    "Inside this isolated diagnostic project, create a source Markdown "
+                    "brief and generate DOCX, PDF, and PPTX artifacts."
+                ),
+                "Document generation systems. Create a report and verify it.",
             ):
                 with self.subTest(topic=bad), self.assertRaisesRegex(
                     ValueError, "self-contained subject"
@@ -3119,7 +3124,12 @@ class MemoryTests(unittest.TestCase):
             memory.db.execute(
                 "INSERT INTO learning_topics(created_at, topic, interval_hours, next_run) "
                 "VALUES (?, ?, 12, ?)",
-                (stamp, "install the referenced capabilities", stamp),
+                (
+                    stamp,
+                    "Inside this isolated diagnostic project, create a source Markdown "
+                    "brief and generate DOCX, PDF, and PPTX artifacts.",
+                    stamp,
+                ),
             )
             self.assertEqual(memory.queue_due_learning(), 0)
             self.assertEqual(memory.list_learning_topics()[0]["enabled"], 0)

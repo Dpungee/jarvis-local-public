@@ -1,3 +1,14 @@
+param(
+    # Also set up the JARVIS Agent Hub (a browser workspace for your agents). "ask" prompts in an
+    # interactive window and means "no" when setup runs unattended.
+    [ValidateSet("ask", "yes", "no")]
+    [string]$AgentHub = "ask",
+    # How Jarvis starts after setup. setup.bat passes "ask"; unattended runs treat "ask" as
+    # "manual" so nothing is registered or launched without a person answering.
+    [ValidateSet("manual", "ask", "presence", "full")]
+    [string]$StartupMode = "manual"
+)
+
 Set-StrictMode -Version 2.0
 $ErrorActionPreference = "Stop"
 Set-Location -LiteralPath $PSScriptRoot
@@ -59,7 +70,7 @@ from jarvis.ollama_client import OllamaClient
 config = Config.load()
 selected_model = config.model.casefold()
 profiles = {'auto', 'fast', 'reasoning', 'coding', 'deep'}
-cloud_prefixes = ('openai:', 'anthropic:', 'claude-cli:', 'codex-cli:', 'ollama:')
+cloud_prefixes = ('openai:', 'xai:', 'anthropic:', 'claude-cli:', 'codex-cli:', 'ollama:')
 
 def local_model(value):
     model = str(value).strip()
@@ -170,9 +181,9 @@ function Test-JarvisModelInstalled {
     return $false
 }
 
-Write-Host "JARVIS Local setup"
+Write-Host "JARVIS Local - guided installation"
 Write-Host ""
-Write-Host "[1/4] Checking Python..."
+Write-Host "[1/5] Checking this computer..."
 $pythonCommand = Get-Command -Name "python" -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
 if (-not $pythonCommand) {
     throw "Python was not found. Install Python 3.11, 3.12, or 3.13 from https://www.python.org/downloads/windows/ and select 'Add python.exe to PATH', then rerun setup."
@@ -192,22 +203,19 @@ if ($pythonVersion -lt [version]"3.11" -or $pythonVersion -ge [version]"3.14") {
 }
 
 Write-Host "Using Python $pythonVersion at $python"
-Write-Host "[2/4] Installing JARVIS and its document-generation libraries..."
+Write-Host "[2/5] Installing JARVIS, documents, and Google Drive support..."
 Write-Host "This public-preview installer uses the Python environment shown above; it does not create a virtual environment."
 Invoke-NativeCommand -FilePath $python -ArgumentList @(
     "-X", "utf8", "-m", "pip", "install", "--disable-pip-version-check",
-    "--no-input", "--editable", ".[documents]"
+    "--no-input", "--editable", ".[documents,drive]"
 )
 
-Write-Host "[3/4] Reviewing model-provider and optional-feature choices..."
+Write-Host "[3/5] Running the guided provider and capability review..."
 Invoke-NativeCommand -FilePath $python -ArgumentList @(
-    "-X", "utf8", "-m", "jarvis.provider_setup", "--interactive"
+    "-X", "utf8", "-m", "jarvis.installer", "--interactive"
 )
 
-Invoke-NativeCommand -FilePath $python -ArgumentList @(
-    "-X", "utf8", "-m", "jarvis.feature_onboarding", "--interactive"
-)
-
+Write-Host "Preparing selected local models..."
 $inventory = Get-JarvisModelInventory -PythonPath $python
 $ollamaCommand = $null
 if ($inventory.Enabled -and $inventory.Required.Count -gt 0) {
@@ -234,12 +242,71 @@ if ($missingModels.Count -gt 0) {
     }
 }
 
-Write-Host "[4/4] Verifying the installation..."
+Write-Host "[4/5] Verifying configuration, models, storage, and safety gates..."
 Write-Host "Checking that every configured model route can answer a first turn..."
 Invoke-NativeCommand -FilePath $python -ArgumentList @(
     "-X", "utf8", "-m", "jarvis.provider_setup", "--canary"
 )
 Invoke-NativeCommand -FilePath $python -ArgumentList @("-X", "utf8", "-m", "jarvis", "doctor")
+
+Write-Host "[5/5] Agent Hub (optional)..."
+$interactive = [Environment]::UserInteractive -and -not [Console]::IsInputRedirected -and
+    -not ([Environment]::GetCommandLineArgs() -contains "-NonInteractive")
+$installHub = $AgentHub -eq "yes"
+if ($AgentHub -eq "ask") {
+    if ($interactive) {
+        $answer = Read-Host "Also install the JARVIS Agent Hub, a browser workspace where your agents work, chat and team up? [Y/n]"
+        $installHub = -not ("$answer".Trim() -match "^(n|no)$")
+    } else {
+        Write-Host "Skipped (unattended setup). Run install_agent_hub.bat any time to add it."
+    }
+}
+if ($installHub) {
+    Invoke-NativeCommand -FilePath "powershell.exe" -ArgumentList @(
+        "-NoLogo", "-NoProfile", "-ExecutionPolicy", "Bypass",
+        "-File", (Join-Path $PSScriptRoot "install_agent_hub.ps1")
+    )
+} elseif ($AgentHub -eq "no") {
+    Write-Host "Skipped. Run install_agent_hub.bat any time to add it."
+}
+
 Write-Host ""
-Write-Host "Ready. Double-click start_jarvis_presence.bat to open the recommended browser interface."
-Write-Host "Terminal alternative: double-click start_jarvis.bat or run python -m jarvis"
+
+$openManualPresence = $false
+if ($StartupMode -eq "ask") {
+    if ($interactive) {
+        Write-Host "How should Jarvis start?"
+        Write-Host "  1. Open Presence now; start it manually later"
+        Write-Host "  2. Start Presence now and automatically at Windows sign-in"
+        Write-Host "  3. Start Presence and the background worker now and at sign-in"
+        Write-Host "  4. Finish without starting Jarvis"
+        $startupAnswer = "$(Read-Host "Startup choice [2]")".Trim()
+        $StartupMode = switch ($startupAnswer) {
+            "1" { "manual" }
+            "3" { "full" }
+            "4" { "manual" }
+            default { "presence" }
+        }
+        $openManualPresence = $startupAnswer -eq "1"
+    } else {
+        Write-Host "Startup: manual (unattended setup). Start Jarvis with start_jarvis_presence.bat."
+        $StartupMode = "manual"
+    }
+}
+
+if ($StartupMode -in @("presence", "full")) {
+    & (Join-Path $PSScriptRoot "install_presence.ps1")
+}
+if ($StartupMode -eq "full") {
+    & (Join-Path $PSScriptRoot "install_worker.ps1")
+}
+if ($openManualPresence -or $StartupMode -in @("presence", "full")) {
+    & (Join-Path $PSScriptRoot "start_jarvis_presence.ps1") -Action start
+}
+
+Write-Host "Ready. Jarvis setup completed successfully."
+Write-Host "Open later with start_jarvis_presence.bat; rerun setup.bat anytime to review providers and features."
+Write-Host "Terminal alternative: start_jarvis.bat or python -m jarvis"
+if ($installHub) {
+    Write-Host "Agent Hub: double-click start_agent_hub.bat or the 'JARVIS Agent Hub' desktop shortcut."
+}

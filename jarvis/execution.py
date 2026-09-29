@@ -274,12 +274,53 @@ def docker_available(
 
 
 @dataclass(frozen=True)
+class ExecutionBoundary:
+    id: str
+    process_authority: str
+    network_access: str
+    filesystem_access: str
+    lifecycle_containment: str
+
+    def as_dict(self) -> dict[str, str]:
+        return {
+            "id": self.id,
+            "process_authority": self.process_authority,
+            "network_access": self.network_access,
+            "filesystem_access": self.filesystem_access,
+            "lifecycle_containment": self.lifecycle_containment,
+        }
+
+
+def execution_boundary(backend: str) -> ExecutionBoundary:
+    """Return the closed, operator-visible boundary for an actual backend."""
+    if backend == "host":
+        return ExecutionBoundary(
+            id="unsandboxed-host",
+            process_authority="current-user",
+            network_access="inherited",
+            filesystem_access="current-user",
+            lifecycle_containment="process-tree",
+        )
+    if backend == "docker":
+        return ExecutionBoundary(
+            id="restricted-docker-container",
+            process_authority="container-user",
+            network_access="disabled",
+            filesystem_access="workspace-read-write-bind",
+            lifecycle_containment="ephemeral-container",
+        )
+    raise ValueError(f"Unknown execution backend boundary: {backend}")
+
+
+@dataclass(frozen=True)
 class ExecutionResult:
     stdout: str
     stderr: str
     exit_code: int | None
     timed_out: bool
     duration: float
+    backend: str
+    boundary: ExecutionBoundary
 
 
 @dataclass
@@ -287,6 +328,7 @@ class ExecutionHandle:
     process: subprocess.Popen[bytes]
     job: WindowsJob
     backend: str
+    boundary: ExecutionBoundary
     container_name: str | None = None
     docker: str | None = None
 
@@ -369,6 +411,8 @@ class ExecutionBackend:
             exit_code=process.returncode,
             timed_out=timed_out,
             duration=max(0.0, time.monotonic() - started),
+            backend=handle.backend,
+            boundary=handle.boundary,
         )
 
     @staticmethod
@@ -378,6 +422,7 @@ class ExecutionBackend:
         cwd: Path,
         env: dict[str, str],
         backend: str,
+        boundary: ExecutionBoundary,
         container_name: str | None = None,
         docker: str | None = None,
     ) -> ExecutionHandle:
@@ -414,6 +459,7 @@ class ExecutionBackend:
             process=process,
             job=job,
             backend=backend,
+            boundary=boundary,
             container_name=container_name,
             docker=docker,
         )
@@ -436,7 +482,11 @@ class HostBackend(ExecutionBackend):
         if not host_command:
             raise ValueError("Host execution requires a prevalidated resolved command")
         return self._start_contained(
-            list(host_command), cwd=cwd, env=env, backend=self.name
+            list(host_command),
+            cwd=cwd,
+            env=env,
+            backend=self.name,
+            boundary=execution_boundary(self.name),
         )
 
 
@@ -555,7 +605,7 @@ class DockerBackend(ExecutionBackend):
         no longer authorizes the Windows process that launched the run. Add an
         idempotent, inheritable Modify entry for that existing process identity
         before the container can create output. This grants no new identity and
-        changes neither the mounted scope nor the container sandbox.
+        changes neither the mounted scope nor the Docker container boundary.
         """
         if os.name != "nt" or self._windows_mount_prepared:
             return
@@ -587,12 +637,12 @@ class DockerBackend(ExecutionBackend):
                 )
             except (OSError, subprocess.SubprocessError) as exc:
                 raise PermissionError(
-                    "Could not prepare the Windows workspace for isolated execution"
+                    "Could not prepare the Windows workspace for Docker execution"
                 ) from exc
             if result.returncode != 0:
                 detail = (result.stderr or result.stdout).strip()
                 raise PermissionError(
-                    "Could not prepare the Windows workspace for isolated execution"
+                    "Could not prepare the Windows workspace for Docker execution"
                     + (f": {detail}" if detail else "")
                 )
             self._windows_mount_prepared = True
@@ -727,6 +777,7 @@ class DockerBackend(ExecutionBackend):
             cwd=Path(docker_directory),
             env=docker_environment,
             backend=self.name,
+            boundary=execution_boundary(self.name),
             container_name=container_name,
             docker=self.docker,
         )

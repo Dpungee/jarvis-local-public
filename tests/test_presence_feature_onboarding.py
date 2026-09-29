@@ -9,7 +9,7 @@ import urllib.request
 from pathlib import Path
 from types import SimpleNamespace
 
-from jarvis.feature_onboarding import FeatureOnboardingStore
+from jarvis.feature_onboarding import FEATURE_SPECS, FeatureOnboardingStore
 from jarvis.presence import PresenceHTTPServer, PresenceRuntime
 
 
@@ -87,7 +87,7 @@ class PresenceFeatureOnboardingHTTPTests(unittest.TestCase):
         with self.request("/api/feature-onboarding") as response:
             before = json.load(response)
         self.assertTrue(before["available"])
-        self.assertEqual(before["pending_count"], 7)
+        self.assertEqual(before["pending_count"], len(FEATURE_SPECS))
         self.assertFalse(before["downloads_performed"])
         self.assertFalse(before["active_probes_performed"])
         self.assertFalse(before["containment_authorized"])

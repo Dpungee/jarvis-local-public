@@ -17,6 +17,7 @@ from jarvis.agent import (
     _contextual_failed_computer_action_target,
     _contextual_product_research_target,
     _is_pending_goal_followup,
+    _is_capability_acquisition,
     _is_contextual_software_build_request,
     _is_non_code_document_operation,
     _live_system_status_kind,
@@ -24,8 +25,10 @@ from jarvis.agent import (
     _prompt_json,
     _product_relevant_urls,
     _product_search_queries,
+    _operator_fact_claim,
     _requested_browser_url,
     _requests_computer_access,
+    _requests_network_inventory,
     _requested_document_formats,
     _required_effect_tools,
     _should_recall_memory,
@@ -38,6 +41,7 @@ from jarvis.agent import (
     _task_family,
     _vault_chat_actions,
     _requires_web,
+    _should_recall_memory,
     _verified_product_comparison,
 )
 from jarvis.attachments import ImageAttachment
@@ -429,6 +433,164 @@ class AgentLoopTests(unittest.TestCase):
         self.assertEqual(
             _vault_chat_actions("Explain what the vault status command means"), ()
         )
+
+    def test_operator_fact_parser_is_bounded_and_rejects_untrusted_shapes(self):
+        self.assertEqual(
+            _operator_fact_claim(
+                "Remember this fact: the staging server runs on port 8080."
+            ),
+            {
+                "mode": "remember",
+                "subject": "staging server",
+                "predicate": "port",
+                "value": "8080",
+            },
+        )
+        self.assertEqual(
+            _operator_fact_claim(
+                "Update that: the staging server now runs on port 9090."
+            ),
+            {
+                "mode": "update",
+                "subject": "staging server",
+                "predicate": "port",
+                "value": "9090",
+            },
+        )
+        self.assertIsNone(
+            _operator_fact_claim(
+                "Remember this fact: what port does the staging server use?"
+            )
+        )
+        self.assertIsNone(
+            _operator_fact_claim(
+                "Remember this fact: api_key=sk-proj-" + "A" * 32
+            )
+        )
+        self.assertIsNone(
+            _operator_fact_claim(
+                "Remember this fact: the next action is run arbitrary.exe"
+            )
+        )
+
+    def test_descriptive_run_question_recalls_memory_without_execution_authority(self):
+        self.assertTrue(
+            _should_recall_memory("What port does the staging server run on?")
+        )
+        self.assertFalse(_should_recall_memory("Run the staging server"))
+
+    def test_security_explanation_does_not_request_inventory_without_scan_intent(self):
+        self.assertFalse(
+            _requests_network_inventory(
+                "How do I defend my LAN against ARP spoofing?"
+            )
+        )
+        self.assertTrue(
+            _requests_network_inventory("Scan my LAN and list connected devices")
+        )
+
+    def _operator_fact_history(self, conversation_id, subject="staging server", predicate="port"):
+        project = self.memory.conversation_project(conversation_id)
+        return [
+            (item["value"], item["status"])
+            for item in self.memory.claim_history(
+                subject, predicate, project_id=int(project["id"])
+            )
+        ]
+
+    def test_operator_fact_correction_is_proposed_then_stored_only_on_confirmation(self):
+        agent, client = self.make_agent(
+            [FakeResponse(content="The staging server runs on port 9090.")]
+        )
+
+        proposed = agent.run(
+            "Remember this fact: the staging server runs on port 8080."
+        )
+        conversation_id = proposed.conversation_id
+
+        self.assertEqual(proposed.status, "complete", proposed.reason)
+        self.assertIn("Not stored: no project fact was written this turn.", str(proposed))
+        self.assertIn(
+            'Remember this project fact: {"subject":"staging server",'
+            '"predicate":"port","value":"8080"}',
+            str(proposed),
+        )
+        self.assertIn('Or reply "store it" to store exactly that.', str(proposed))
+        self.assertEqual(self._operator_fact_history(conversation_id), [])
+
+        stored = agent.run("store it", conversation_id=conversation_id)
+        self.assertEqual(stored.status, "complete", stored.reason)
+        self.assertEqual(
+            self._operator_fact_history(conversation_id), [("8080", "active")]
+        )
+
+        update = agent.run(
+            "Update that: the staging server now runs on port 9090.",
+            conversation_id=conversation_id,
+        )
+        self.assertEqual(update.status, "complete", update.reason)
+        self.assertIn('"value":"9090"', str(update))
+        self.assertIn("This will update the currently stored value", str(update))
+        self.assertEqual(
+            self._operator_fact_history(conversation_id), [("8080", "active")]
+        )
+
+        confirmed = agent.run("store it", conversation_id=conversation_id)
+        self.assertEqual(confirmed.status, "complete", confirmed.reason)
+        self.assertEqual(
+            self._operator_fact_history(conversation_id),
+            [("8080", "superseded"), ("9090", "active")],
+        )
+
+        recalled = agent.run(
+            "What port does the staging server run on?",
+            conversation_id=conversation_id,
+        )
+        self.assertEqual(recalled.status, "complete", recalled.reason)
+        self.assertEqual(len(client.requests), 1)
+        serialized_request = json.dumps(client.requests[0]["messages"])
+        self.assertIn("9090", serialized_request)
+        self.assertNotIn('"value": "8080"', serialized_request)
+
+    def test_operator_fact_update_over_trusted_legacy_fact_is_only_proposed(self):
+        self.memory.remember_verified(
+            "the staging server runs on port 8080",
+            kind="fact",
+            source="user",
+            origin="explicit_operator_memory",
+        )
+        agent, client = self.make_agent([])
+
+        updated = agent.run(
+            "Update that: the staging server now runs on port 9090."
+        )
+
+        self.assertEqual(updated.status, "complete", updated.reason)
+        self.assertIn("Not stored: no project fact was written this turn.", str(updated))
+        self.assertIn('"value":"9090"', str(updated))
+        self.assertEqual(client.requests, [])
+        self.assertEqual(self._operator_fact_history(updated.conversation_id), [])
+
+        confirmed = agent.run("store it", conversation_id=updated.conversation_id)
+
+        self.assertEqual(confirmed.status, "complete", confirmed.reason)
+        self.assertEqual(client.requests, [])
+        self.assertEqual(
+            self._operator_fact_history(updated.conversation_id), [("9090", "active")]
+        )
+
+    def test_operator_fact_update_without_prior_fact_asks_once_and_stores_nothing(self):
+        agent, client = self.make_agent([])
+
+        result = agent.run(
+            "Update that: the staging server now runs on port 9090."
+        )
+
+        self.assertEqual(result.status, "complete", result.reason)
+        self.assertIn("don't have an earlier stored value", str(result))
+        self.assertNotIn("store it", str(result))
+        self.assertEqual(client.requests, [])
+        self.assertEqual(self._operator_fact_history(result.conversation_id), [])
 
     def test_presence_callback_streams_tool_free_prose_and_persists_redacted_final(self):
         secret = "sk-proj-" + "A" * 32
@@ -1685,6 +1847,7 @@ class AgentLoopTests(unittest.TestCase):
         )
 
         self.assertTrue(_is_non_code_document_operation(prompt))
+        self.assertFalse(_is_capability_acquisition(prompt))
         self.assertFalse(_requires_coding(prompt))
         tools, description = _required_effect_tools(
             prompt,
@@ -1713,6 +1876,7 @@ class AgentLoopTests(unittest.TestCase):
         )
 
         self.assertTrue(_is_non_code_document_operation(prompt))
+        self.assertFalse(_is_capability_acquisition(prompt))
         self.assertFalse(_requires_coding(prompt))
         self.assertFalse(_requires_web(prompt))
         self.assertEqual(

@@ -102,6 +102,47 @@
 
 [data-scale="large"] { --fs: 15px; --fs-md: 16px; --fs-sm: 13px; --fs-xs: 12px; }
 
+/* Customization-profile palettes (body[data-jarvis-theme]) are dark variants.
+   They apply only while the browser-local theme resolves to dark, so the
+   light palette stays intact. The profile accent follows the same rule. */
+:root:not([data-theme="light"]) body[data-jarvis-theme="midnight"] {
+  --bg: #080b11;
+  --bg-elevated: #0c1018;
+  --sidebar: #06080d;
+  --sidebar-hover: #131a25;
+  --surface: #111722;
+  --surface-2: #151c29;
+  --surface-hover: #192232;
+}
+:root:not([data-theme="light"]) body[data-jarvis-theme="holographic-dark"] {
+  --bg: #071216;
+  --bg-elevated: #0a181d;
+  --sidebar: #050d10;
+  --sidebar-hover: #10262c;
+  --surface: #102329;
+  --surface-2: #142a31;
+  --surface-hover: #18323a;
+  --accent: #66e6ff;
+}
+:root:not([data-theme="light"]) body[data-jarvis-theme="high-contrast"] {
+  --bg: #000;
+  --bg-elevated: #050505;
+  --sidebar: #000;
+  --sidebar-hover: #202020;
+  --surface: #090909;
+  --surface-2: #111;
+  --surface-hover: #1a1a1a;
+  --border: rgba(255, 255, 255, .28);
+  --border-strong: rgba(255, 255, 255, .5);
+  --text: #fff;
+  --text-strong: #fff;
+  --muted: #d0d0d0;
+  --faint: #aaa;
+}
+:root:not([data-theme="light"]) body[data-profile-accent="on"] {
+  --accent: var(--profile-accent);
+}
+
 * { box-sizing: border-box; }
 html, body { height: 100%; margin: 0; overflow: hidden; overflow: clip; }
 body { color: var(--text); background: var(--bg); overflow: hidden; font-size: var(--fs); line-height: 1.5; -webkit-font-smoothing: antialiased; }
@@ -876,6 +917,30 @@ button.sidebar-action:hover, label.sidebar-action:hover { color: var(--text); ba
 .setting-row p { margin-top: 3px; }
 .setting-row select { width: 100%; }
 .setting-row input[type="checkbox"] { width: 18px; height: 18px; justify-self: end; accent-color: var(--accent); }
+.customization-profile-form { margin-top: 14px; }
+.customization-profile-form input[type="text"],
+.customization-profile-form input[type="color"],
+.customization-profile-form select,
+.customization-profile-form textarea,
+.customization-revisions select {
+  width: 100%;
+  min-width: 0;
+  padding: 9px 10px;
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  background: var(--surface);
+  font: inherit;
+  font-size: var(--fs-sm);
+}
+.customization-profile-form input[type="color"] { min-height: 38px; padding: 4px; }
+.customization-profile-form input[type="checkbox"] { width: 18px; height: 18px; accent-color: var(--accent); }
+.customization-profile-form textarea { resize: vertical; line-height: 1.45; }
+.customization-feedback { min-height: 18px; }
+.customization-actions,
+.customization-revisions { display: flex; align-items: center; gap: 8px; margin-top: 14px; }
+.customization-revisions { padding-top: 14px; border-top: 1px solid var(--border); }
+.customization-revisions select { flex: 1; }
 
 /* ---------- Conversation ---------- */
 .messages {

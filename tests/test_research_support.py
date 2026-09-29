@@ -176,6 +176,19 @@ class ResearchSupportExtractionTests(unittest.TestCase):
         self.assertIn("stable contract", stable)
         self.assertEqual(current_turn, "")
 
+    def test_counts_and_answer_format_words_are_not_search_terms(self):
+        from jarvis.research_support import compact_research_query, research_topic_terms
+        # "three" led the query to the telecom brand Three instead of the databases.
+        prompt = ("Deep research: compare three open-source vector databases (features, licence, "
+                  "latest version) with a sourced summary table")
+        self.assertEqual(compact_research_query(prompt),
+                         "open-source vector databases features licence latest version")
+        self.assertNotIn("three", research_topic_terms(prompt))
+        # A count word capitalised mid-sentence is a name and stays.
+        self.assertEqual(compact_research_query("the Three UK network coverage"), "three uk network coverage")
+        self.assertIn("three", research_topic_terms("compare Three and Vodafone plans"))
+        self.assertEqual(compact_research_query("Three best laptops for students"), "best laptops students")
+
 
 if __name__ == "__main__":
     unittest.main()

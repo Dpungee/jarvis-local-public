@@ -25,6 +25,7 @@ from .network_defense import (
     assess_network_defense,
     verify_assessment_receipt,
 )
+from .network_metadata import NetworkMetadataResolver
 from .trusted_executables import windows_system_executable
 
 
@@ -476,6 +477,8 @@ class NetworkInventory:
         lease_seconds: int = DEFAULT_SCAN_LEASE_SECONDS,
         require_paired_scope: bool = True,
         incidents_enabled: bool = True,
+        metadata_mode: str = "disabled",
+        metadata_resolver: NetworkMetadataResolver | None = None,
     ) -> None:
         self.path = Path(data_dir).resolve() / "network-inventory.db"
         self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -486,6 +489,10 @@ class NetworkInventory:
         self.lease_seconds = max(10, min(int(lease_seconds), 600))
         self.require_paired_scope = bool(require_paired_scope)
         self.incidents_enabled = bool(incidents_enabled)
+        self.metadata_resolver = metadata_resolver or NetworkMetadataResolver(
+            data_dir,
+            mode=metadata_mode,
+        )
         self._lock = threading.Lock()
         # Presence, the worker, and CLI commands can all start together. Keep
         # their idempotent first-run schema work serial within this process;
@@ -1605,6 +1612,7 @@ class NetworkInventory:
                     )
                 ),
             },
+            "device_metadata": self.metadata_resolver.status(),
             "limitations": self._limitations(),
         }
 
@@ -1689,6 +1697,7 @@ class NetworkInventory:
             "duration_basis": (
                 "Historical Jarvis reachability observations, not router association time."
             ),
+            "device_metadata": self.metadata_resolver.status(),
             "limitations": self._limitations(),
         }
 
@@ -2673,8 +2682,8 @@ class NetworkInventory:
             "last_scan_at": str(last_scan["completed_at"]) if last_scan else None,
         }
 
-    @staticmethod
     def _render_rows(
+        self,
         rows: list[sqlite3.Row],
         *,
         active: set[str],
@@ -2697,7 +2706,21 @@ class NetworkInventory:
                     ),
                 )
             label = str(row["label"] or "").strip() or None
-            device_type = str(row["device_type"] or "").strip() or None
+            stored_device_type = str(row["device_type"] or "").strip() or None
+            metadata = self.metadata_resolver.resolve(
+                mac=row["mac"],
+                hostname=row["hostname"],
+                operator_type=stored_device_type,
+                operator_label=label,
+            )
+            device_type = (
+                str(metadata.get("device_type") or "").strip()
+                or stored_device_type
+            )
+            manufacturer = str(metadata.get("manufacturer") or "").strip() or None
+            type_confidence = metadata.get("device_type_confidence")
+            if stored_device_type and type_confidence is None:
+                type_confidence = 1.0
             item: dict[str, Any] = {
                 "device_id": device_uuid,
                 "display_name": label or (
@@ -2706,6 +2729,20 @@ class NetworkInventory:
                 "label": label,
                 "trust_state": str(row["trust_state"] or "unreviewed"),
                 "device_type": device_type,
+                "manufacturer": manufacturer,
+                "device_type_confidence": type_confidence,
+                "device_type_source": (
+                    metadata.get("device_type_source")
+                    or ("operator-profile" if stored_device_type else None)
+                ),
+                "device_type_basis": (
+                    metadata.get("device_type_basis")
+                    or (
+                        "Operator-authored device profile"
+                        if stored_device_type
+                        else "No reliable type metadata was available"
+                    )
+                ),
                 "identity_confidence": str(row["identity_confidence"] or "limited"),
                 "identity_basis": str(row["identity_basis"] or "limited observation"),
                 "presence_state": "reachable" if reachable else ("cached" if cached_now else "unobserved"),

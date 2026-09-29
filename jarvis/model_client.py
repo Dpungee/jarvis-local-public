@@ -38,8 +38,10 @@ from .trusted_executables import (
 
 
 OPENAI_RESPONSES_URL = "https://api.openai.com/v1/responses"
+XAI_RESPONSES_URL = "https://api.x.ai/v1/responses"
 ANTHROPIC_MESSAGES_URL = "https://api.anthropic.com/v1/messages"
 DEFAULT_OPENAI_MODEL = "gpt-5.6-luna"
+DEFAULT_XAI_MODEL = "grok-4.6"
 DEFAULT_ANTHROPIC_MODEL = "claude-sonnet-5"
 DEFAULT_CLAUDE_CLI_MODEL = "sonnet"
 DEFAULT_CODEX_CLI_MODEL = "gpt-5.5"
@@ -54,7 +56,9 @@ _CODEX_CLI_FORBIDDEN_HOME_COMPONENTS = frozenset({
 _CODEX_CLI_FORBIDDEN_HOME_FILES = frozenset({
     "agents.md", "auth.json", "config.toml", "requirements.toml",
 })
-_CLOUD_PROVIDERS = frozenset({"openai", "anthropic", "claude-cli", "codex-cli"})
+_CLOUD_PROVIDERS = frozenset({
+    "openai", "anthropic", "xai", "claude-cli", "codex-cli", "openrouter"
+})
 _CONTROL = re.compile(r"[\x00-\x1f\x7f]")
 _RUNTIME_DIALOGUE_CONTEXT = re.compile(
     r"\n*<jarvis_runtime_dialogue_context>.*?</jarvis_runtime_dialogue_context>\s*\Z",
@@ -943,6 +947,34 @@ class OpenAIClient(_CloudHTTPClient):
             )
 
 
+class XAIClient(OpenAIClient):
+    """xAI's OpenAI-compatible Responses API on its fixed official origin."""
+
+    provider = "xAI"
+    endpoint = XAI_RESPONSES_URL
+    default_model = DEFAULT_XAI_MODEL
+
+    def _payload(
+        self,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]],
+        model: str,
+        *,
+        think: bool | str | None,
+        response_format: str | dict[str, Any] | None,
+    ) -> dict[str, Any]:
+        # Grok reasoning controls are model-specific and evolve independently
+        # of OpenAI's model-name rules. Preserve the common Responses contract
+        # without sending a provider-incompatible reasoning field.
+        return super()._payload(
+            messages,
+            tools,
+            model,
+            think=None,
+            response_format=response_format,
+        )
+
+
 def _content_parts_anthropic(content: Any) -> list[dict[str, Any]]:
     if isinstance(content, str):
         return [{"type": "text", "text": content}] if content else []
@@ -1685,6 +1717,65 @@ def _claude_cli_tool_schemas(tools: list[dict[str, Any]]) -> tuple[list[str], st
     return names, json.dumps(normalized, ensure_ascii=False, separators=(",", ":"))
 
 
+# With ``tool_calls`` optional, the CLI model sometimes writes the tool-call field as markup
+# text at the end of its answer ('...</content>\n<parameter name="tool_calls">[]').
+_LEAKED_TOOL_CALL_MARKUP = re.compile(
+    r"\s*</content>\s*(?:<parameter\s+name=\"tool_calls\">\s*(?P<calls>.*?)\s*(?:</parameter>)?)?\s*\Z",
+    re.S,
+)
+
+
+def _split_leaked_tool_call_markup(content: str) -> tuple[str, list[dict[str, Any]]]:
+    """Strip trailing tool-call markup from an answer; return well-formed calls it spelled out."""
+    match = _LEAKED_TOOL_CALL_MARKUP.search(content)
+    if match is None:
+        return content, []
+    calls: list[dict[str, Any]] = []
+    try:
+        parsed = json.loads(match.group("calls") or "[]")
+    except (json.JSONDecodeError, ValueError):
+        parsed = []
+    for call in parsed if isinstance(parsed, list) else []:
+        if not isinstance(call, dict):
+            continue
+        arguments = call.get("arguments")
+        if isinstance(arguments, str):
+            try:
+                arguments = json.loads(arguments)
+            except (json.JSONDecodeError, ValueError):
+                continue
+        if isinstance(call.get("name"), str) and isinstance(arguments, dict):
+            calls.append({"name": call["name"], "arguments": arguments})
+    return content[: match.start()], calls
+
+
+def _unescape_double_escaped_text(content: str) -> str:
+    """Real line breaks for an answer the model double-escaped (all \\n, no newline at all)."""
+    if "\n" in content or content.count("\\n") < 2:
+        return content
+    return content.replace("\\r\\n", "\n").replace("\\n", "\n").replace("\\t", "\t")
+
+
+def _recover_visible_answer(structured: str, result_text: Any) -> str:
+    """The model's own visible answer when the structured ``content`` holds only a stub.
+
+    With a long context the CLI model sometimes writes its full answer as ordinary text and
+    then fills the structured field with a placeholder (seen: "test"), which would replace a
+    finished research answer with one word. The visible text is the model's own output, so
+    keeping it trusts nothing new.
+    """
+    stub = structured.strip()
+    if len(stub) >= 40 or not isinstance(result_text, str):
+        return structured
+    text = result_text.strip()
+    try:
+        if isinstance(json.loads(text), (dict, list)):
+            return structured
+    except (json.JSONDecodeError, ValueError):
+        pass
+    return text if len(text) >= max(200, 3 * len(stub)) else structured
+
+
 def _claude_cli_output_schema(
     tool_names: list[str],
     response_format: str | dict[str, Any] | None,
@@ -1704,10 +1795,14 @@ def _claude_cli_output_schema(
         if tool_names
         else {"type": "string", "maxLength": 0}
     )
+    # Neither field is required: a model that answers without calling a tool naturally
+    # submits only ``content``. Requiring ``tool_calls`` too made the CLI reject complete
+    # answers until the model gave up and submitted a probe ({"content": "test"}), which
+    # then became the reply. A missing field defaults to empty when parsed. (The API does
+    # not accept anyOf/oneOf at the top level of a tool input schema.)
     return {
         "type": "object",
         "additionalProperties": False,
-        "required": ["content", "tool_calls"],
         "properties": {
             "content": content_schema,
             "tool_calls": {
@@ -2096,8 +2191,39 @@ class ClaudeCLIClient:
             if plain_response
             else _claude_cli_output_schema(tool_names, response_format)
         )
+        # Images cannot ride inside the conversation JSON (Claude would read base64 as
+        # text). Each one is replaced by a numbered placeholder and sent as a real image
+        # block through --input-format stream-json.
+        images: list[ImageAttachment] = []
+        text_messages: list[dict[str, Any]] = []
+        for message in messages:
+            content = message.get("content")
+            if not isinstance(content, list):
+                text_messages.append(message)
+                continue
+            parts: list[Any] = []
+            for part in content:
+                if not isinstance(part, dict) or str(part.get("type") or "").casefold() != "image":
+                    parts.append(part)
+                    continue
+                if len(images) >= MAX_IMAGE_ATTACHMENTS:
+                    raise ModelProviderError(
+                        self.provider,
+                        f"received more than {MAX_IMAGE_ATTACHMENTS} image attachments",
+                    )
+                try:
+                    images.append(ImageAttachment.from_payload(part))
+                except (ValueError, TypeError, binascii.Error):
+                    raise ModelProviderError(
+                        self.provider, "received an invalid image attachment"
+                    ) from None
+                parts.append({
+                    "type": "image",
+                    "attached": f"image {len(images)}, sent with this request",
+                })
+            text_messages.append({**message, "content": parts})
         conversation_json = json.dumps(
-            messages, ensure_ascii=False, separators=(",", ":"), default=str
+            text_messages, ensure_ascii=False, separators=(",", ":"), default=str
         )
         prompt = (
             "<jarvis_conversation_json>\n"
@@ -2106,14 +2232,27 @@ class ClaudeCLIClient:
             + tool_json
             + "\n</jarvis_tool_schemas_json>"
         )
+        if images:
+            prompt = json.dumps({"type": "user", "message": {"role": "user", "content": [
+                {"type": "text", "text": prompt},
+                *({"type": "image", "source": {
+                    "type": "base64",
+                    "media_type": image.mime,
+                    "data": base64.b64encode(image.data).decode("ascii"),
+                }} for image in images),
+            ]}}, ensure_ascii=False, separators=(",", ":")) + "\n"
         if len(prompt.encode("utf-8")) > 16 * 1024 * 1024:
             raise ModelProviderError(self.provider, "request exceeded the 16 MiB safety limit")
         streaming = _on_delta is not None and plain_response
+        # stream-json input requires stream-json output; the streaming runner returns only
+        # the final result record, so parsing below is unchanged.
+        stream_output = streaming or bool(images)
         args = [
             self.executable,
             "--print",
+            *(("--input-format", "stream-json") if images else ()),
             "--output-format",
-            *(("stream-json", "--verbose", "--include-partial-messages") if streaming else ("json",)),
+            *(("stream-json", "--verbose", "--include-partial-messages") if stream_output else ("json",)),
             "--no-session-persistence",
             "--safe-mode",
             "--disable-slash-commands",
@@ -2193,9 +2332,9 @@ class ClaudeCLIClient:
                         timeout=remaining,
                         flags=flags,
                         cancellation_guard=cancellation_guard,
-                        on_text=forward_delta,
+                        on_text=forward_delta if streaming else (lambda _text: None),
                     )
-                    if streaming
+                    if stream_output
                     else self._run_cli(
                         args,
                         prompt=prompt,
@@ -2333,7 +2472,12 @@ class ClaudeCLIClient:
                 raise ModelProviderError(
                     self.provider, "returned invalid response content"
                 )
-            raw_calls = structured.get("tool_calls")
+            raw_calls = structured.get("tool_calls", [])
+            if isinstance(content, str):
+                content_text = _unescape_double_escaped_text(content_text)
+                content_text, spelled_calls = _split_leaked_tool_call_markup(content_text)
+                if spelled_calls and not raw_calls:
+                    raw_calls = spelled_calls
         if not isinstance(raw_calls, list) or len(raw_calls) > 16:
             raise ModelProviderError(self.provider, "returned malformed tool calls")
         tool_calls: list[dict[str, Any]] = []
@@ -2344,6 +2488,8 @@ class ClaudeCLIClient:
             if name not in allowed or not isinstance(arguments, dict):
                 raise ModelProviderError(self.provider, "returned an unauthorized tool call")
             tool_calls.append({"function": {"name": name, "arguments": arguments}})
+        if not plain_response and not tool_calls and response_format is None:
+            content_text = _recover_visible_answer(content_text, result.get("result"))
         message: dict[str, Any] = {"role": "assistant", "content": content_text}
         if tool_calls:
             message["tool_calls"] = tool_calls
@@ -4274,9 +4420,11 @@ class ModelClient:
         ollama: OllamaClient | None,
         *,
         openai: OpenAIClient | None = None,
+        xai: XAIClient | None = None,
         anthropic: AnthropicClient | None = None,
         claude_cli: ClaudeCLIClient | None = None,
         codex_cli: CodexCLIClient | None = None,
+        openrouter: Any | None = None,
         configured_models: tuple[str, ...] = (),
         local_coding_database: Path | None = None,
         local_coding_context: str = "disabled",
@@ -4286,9 +4434,12 @@ class ModelClient:
     ) -> None:
         self.ollama = ollama
         self.openai = openai
+        self.xai = xai
         self.anthropic = anthropic
         self.claude_cli = claude_cli
         self.codex_cli = codex_cli
+        # ``jarvis.openrouter.OpenRouterClient`` when an OpenRouter key is configured.
+        self.openrouter = openrouter
         self.configured_models = tuple(configured_models)
         self.local_coding_database = (
             Path(local_coding_database) if local_coding_database is not None else None
@@ -4304,7 +4455,10 @@ class ModelClient:
 
     def close(self) -> None:
         """Release long-lived provider transports owned by this model client."""
-        for client in (self.codex_cli, self.claude_cli, self.openai, self.anthropic):
+        for client in (
+            self.codex_cli, self.claude_cli, self.openai, self.xai, self.anthropic,
+            self.openrouter,
+        ):
             closer = getattr(client, "close", None)
             if callable(closer):
                 closer()
@@ -4334,18 +4488,25 @@ class ModelClient:
             "ollama_enabled": self.ollama is not None,
             "ollama_online": self._ollama_online,
             "openai_configured": self.openai is not None,
+            "xai_configured": self.xai is not None,
             "anthropic_configured": self.anthropic is not None,
             "claude_cli_configured": self.claude_cli is not None,
             "codex_cli_configured": self.codex_cli is not None,
+            "openrouter_configured": self.openrouter is not None,
+            "openrouter_healthy": self._cloud_provider_healthy("openrouter", now),
             "codex_cli_auth_method": codex_authentication,
             "openai_healthy": self._cloud_provider_healthy("openai", now),
+            "xai_healthy": self._cloud_provider_healthy("xai", now),
             "anthropic_healthy": self._cloud_provider_healthy("anthropic", now),
             "claude_cli_healthy": self._cloud_provider_healthy("claude-cli", now),
             "codex_cli_healthy": codex_healthy,
             "ollama_model_count": sum(
                 1 for item in self._models_cache
                 if not item.startswith(
-                    ("ollama:", "openai:", "anthropic:", "claude-cli:", "codex-cli:")
+                    (
+                        "ollama:", "openai:", "xai:", "anthropic:",
+                        "claude-cli:", "codex-cli:", "openrouter:",
+                    )
                 )
             ),
         }
@@ -4353,9 +4514,11 @@ class ModelClient:
     def _cloud_provider_healthy(self, provider: str, now: float) -> bool | None:
         client = {
             "openai": self.openai,
+            "xai": self.xai,
             "anthropic": self.anthropic,
             "claude-cli": self.claude_cli,
             "codex-cli": self.codex_cli,
+            "openrouter": self.openrouter,
         }.get(provider)
         if client is None:
             return None
@@ -4368,7 +4531,7 @@ class ModelClient:
     def _cloud_chat(
         self,
         provider: str,
-        client: OpenAIClient | AnthropicClient | ClaudeCLIClient | CodexCLIClient,
+        client: OpenAIClient | XAIClient | AnthropicClient | ClaudeCLIClient | CodexCLIClient,
         messages: list[dict[str, Any]],
         tools: list[dict[str, Any]],
         provider_model: str,
@@ -4411,7 +4574,7 @@ class ModelClient:
     def _cloud_chat_stream(
         self,
         provider: str,
-        client: OpenAIClient | AnthropicClient | ClaudeCLIClient | CodexCLIClient,
+        client: OpenAIClient | XAIClient | AnthropicClient | ClaudeCLIClient | CodexCLIClient,
         messages: list[dict[str, Any]],
         tools: list[dict[str, Any]],
         provider_model: str,
@@ -4475,12 +4638,16 @@ class ModelClient:
 
         if self.openai is not None:
             available.append(f"openai:{self.openai.default_model}")
+        if self.xai is not None:
+            available.append(f"xai:{self.xai.default_model}")
         if self.anthropic is not None:
             available.append(f"anthropic:{self.anthropic.default_model}")
         if self.claude_cli is not None:
             available.append(f"claude-cli:{self.claude_cli.default_model}")
         if self.codex_cli is not None:
             available.append(f"codex-cli:{self.codex_cli.default_model}")
+        if self.openrouter is not None:
+            available.append(f"openrouter:{self.openrouter.default_model}")
         for model in self.configured_models:
             try:
                 provider, _ = split_model_reference(model)
@@ -4488,11 +4655,15 @@ class ModelClient:
                 continue
             if provider == "openai" and self.openai is not None:
                 available.append(model)
+            elif provider == "xai" and self.xai is not None:
+                available.append(model)
             elif provider == "anthropic" and self.anthropic is not None:
                 available.append(model)
             elif provider == "claude-cli" and self.claude_cli is not None:
                 available.append(model)
             elif provider == "codex-cli" and self.codex_cli is not None:
+                available.append(model)
+            elif provider == "openrouter" and self.openrouter is not None:
                 available.append(model)
             elif provider == "ollama" and model.startswith("ollama:"):
                 remote = model.split(":", 1)[1]
@@ -4620,6 +4791,18 @@ class ModelClient:
                 cancellation_guard=cancellation_guard,
                 **kwargs,
             )
+        if provider == "xai":
+            if self.xai is None:
+                raise ModelProviderError("xAI", "is not configured; set XAI_API_KEY")
+            return self._cloud_chat(
+                provider,
+                self.xai,
+                messages,
+                tools,
+                provider_model,
+                cancellation_guard=cancellation_guard,
+                **kwargs,
+            )
         if provider == "anthropic":
             if self.anthropic is None:
                 raise ModelProviderError("Anthropic", "is not configured; set ANTHROPIC_API_KEY")
@@ -4642,6 +4825,21 @@ class ModelClient:
             return self._cloud_chat(
                 provider,
                 self.claude_cli,
+                messages,
+                tools,
+                provider_model,
+                cancellation_guard=cancellation_guard,
+                **kwargs,
+            )
+        if provider == "openrouter":
+            if self.openrouter is None:
+                raise ModelProviderError(
+                    "OpenRouter", "is not configured; add an OpenRouter API key",
+                    provider_unavailable=True,
+                )
+            return self._cloud_chat(
+                provider,
+                self.openrouter,
                 messages,
                 tools,
                 provider_model,
@@ -4729,10 +4927,32 @@ class ModelClient:
                 cancellation_guard=cancellation_guard,
                 **kwargs,
             )
+        if provider == "xai" and self.xai is not None:
+            return self._cloud_chat_stream(
+                provider,
+                self.xai,
+                messages,
+                tools,
+                provider_model,
+                on_delta,
+                cancellation_guard=cancellation_guard,
+                **kwargs,
+            )
         if provider == "anthropic" and self.anthropic is not None:
             return self._cloud_chat_stream(
                 provider,
                 self.anthropic,
+                messages,
+                tools,
+                provider_model,
+                on_delta,
+                cancellation_guard=cancellation_guard,
+                **kwargs,
+            )
+        if provider == "openrouter" and self.openrouter is not None:
+            return self._cloud_chat_stream(
+                provider,
+                self.openrouter,
                 messages,
                 tools,
                 provider_model,
@@ -4796,6 +5016,11 @@ def build_model_client(config: Any) -> ModelClient:
         if cloud_enabled and bool(getattr(config, "anthropic_api_enabled", False))
         else None
     )
+    xai_key = (
+        os.getenv("XAI_API_KEY")
+        if cloud_enabled and bool(getattr(config, "xai_api_enabled", False))
+        else None
+    )
     install_scope = str(
         getattr(config, "data_dir", getattr(config, "root", "jarvis-local"))
     ).casefold()
@@ -4813,7 +5038,19 @@ def build_model_client(config: Any) -> ModelClient:
         if openai_key
         else None
     )
+    xai = XAIClient(xai_key, **cloud_options) if xai_key else None
     anthropic = AnthropicClient(anthropic_key, **cloud_options) if anthropic_key else None
+    openrouter = None
+    openrouter_key = os.getenv("OPENROUTER_API_KEY", "").strip() if cloud_enabled else ""
+    if openrouter_key and any(
+        str(getattr(config, field, "") or "").casefold().startswith("openrouter:")
+        for field in ("model", "fast_model", "reasoning_model", "coding_model", "deep_model")
+    ):
+        # Only when a configured route names an OpenRouter model: the key alone never adds
+        # a provider that private context could fall back to.
+        from .openrouter import OpenRouterClient
+
+        openrouter = OpenRouterClient(openrouter_key, **cloud_options)
     claude_cli_executable = (
         resolve_claude_cli_executable()
         if cloud_enabled and bool(getattr(config, "claude_cli_enabled", False))
@@ -4885,9 +5122,11 @@ def build_model_client(config: Any) -> ModelClient:
             num_thread=getattr(config, "ollama_num_thread", None),
         ) if bool(getattr(config, "ollama_enabled", True)) else None,
         openai=openai,
+        xai=xai,
         anthropic=anthropic,
         claude_cli=claude_cli,
         codex_cli=codex_cli,
+        openrouter=openrouter,
         configured_models=configured,
         local_coding_database=(
             Path(config.data_dir) / "local_coding_context.db"

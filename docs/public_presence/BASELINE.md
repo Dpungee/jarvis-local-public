@@ -8,11 +8,15 @@ Do not record hostnames, usernames, IP addresses, private paths, credentials, ac
 state, conversation content, raw database records, or screen contents. Public Presence
 must remain disabled, externally disconnected, and fail closed for this release.
 
+From a clean candidate commit, run `python -B scripts/build_phase0_baseline.py`
+with `JARVIS_PUBLIC_PRESENCE_ENABLED=false`. Keep its sanitized JSON with the release
+evidence; independently complete the runtime, tests, recovery and sign-off fields.
+Generated evidence does not authorize publication or live operation.
+
 ## Repository
 
 - Capture time (UTC):
 - Commit SHA:
-- Branch:
 - `git status --porcelain` result (must be empty):
 - Release identifier:
 - Reviewer:

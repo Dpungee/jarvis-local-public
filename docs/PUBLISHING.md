@@ -66,6 +66,7 @@ python -B scripts/check_public_publish_source.py `
   --remote-url $publicUrl
 
 python -B scripts/check_public_release.py
+python -B scripts/build_phase0_baseline.py
 gitleaks dir --redact --no-banner .
 gitleaks git --redact --no-banner .
 ```
@@ -76,6 +77,10 @@ storage, unreachable objects, configured push refspecs, and broad ref selection.
 uses the immutable reviewed commit, disables hooks and implicit push behavior, and
 requires an absent destination through a creation-only lease. After review, rerun the
 same command with `--execute-push`; the guard revalidates and performs the push itself.
+The baseline command refuses a dirty tree or enabled Public Presence. Its sanitized
+commit, schema, policy, migration, configuration and tool-manifest digests are release
+evidence, not authorization to connect or publish. CI additionally compares repeat
+wheel/source builds and tests installation from the normalized source archive.
 Its candidate arguments have this shape:
 
 ```powershell

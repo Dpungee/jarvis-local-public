@@ -37,6 +37,7 @@ import hashlib
 import ipaddress
 import json
 import os
+import re
 import shutil
 import socket
 import struct
@@ -497,6 +498,27 @@ _CLOCK_JS = r"""(() => {
 CONTROL_WINDOW_MS = 48  # three 16 ms animation frames of page time
 
 
+def _wait_for_devtools_port(port_file: Path, deadline: float) -> tuple[int, str]:
+    """Wait for a complete startup marker, including Windows writer sharing races."""
+    while time.monotonic() < deadline:
+        try:
+            lines = port_file.read_text(encoding="utf-8").split()
+        except (FileNotFoundError, PermissionError, UnicodeDecodeError):
+            lines = []
+        if (len(lines) == 2 and re.fullmatch(r"[0-9]{1,5}", lines[0])
+                and 1 <= int(lines[0]) <= 65535
+                and re.fullmatch(r"/devtools/browser/[A-Za-z0-9-]+", lines[1])):
+            # Even a successful read must not extend the caller's startup budget.
+            if time.monotonic() < deadline:
+                return int(lines[0]), lines[1]
+            break
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            break
+        time.sleep(min(0.05, remaining))
+    raise WebCheckError("The headless browser did not start.")
+
+
 def run_web_check(url: str, *, actions: Any = None, settle_ms: int = 800, timeout_seconds: int = 60,
                   artifact_dir: Path | None = None, browser: Path | None = None) -> dict[str, Any]:
     """Load ``url`` headlessly, run ``actions`` and return a bounded observation report."""
@@ -577,14 +599,10 @@ def run_web_check(url: str, *, actions: Any = None, settle_ms: int = 800, timeou
                 raise WebCheckError("The headless browser could not be contained; the check did not run.")
             _resume_windows_process(process)
         port_file = profile / "DevToolsActivePort"
-        # The launcher may exit after handing off, so wait for the DevTools port file itself.
-        while not port_file.exists():
-            if time.monotonic() > min(deadline, started + 20):
-                raise WebCheckError("The headless browser did not start.")
-            time.sleep(0.05)
-        time.sleep(0.05)
-        lines = port_file.read_text(encoding="utf-8").split()
-        socket_ = _WebSocket("127.0.0.1", int(lines[0]), lines[1], timeout=10)
+        # The launcher may exit after handing off. Existence alone does not mean
+        # its marker is complete or that Windows has released the writer's handle.
+        debug_port, debug_path = _wait_for_devtools_port(port_file, min(deadline, started + 20))
+        socket_ = _WebSocket("127.0.0.1", debug_port, debug_path, timeout=10)
         devtools = _DevTools(socket_, on_event)
         target = devtools.call("Target.createTarget", {"url": "about:blank"})["targetId"]
         session = devtools.call("Target.attachToTarget", {"targetId": target, "flatten": True})["sessionId"]

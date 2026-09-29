@@ -59,6 +59,7 @@ class ConfigSecurityTests(unittest.TestCase):
         self.assertEqual(config.execution_mode, "disabled")
         self.assertEqual(config.execution_backend, "host")
         self.assertEqual(config.network_defense_mode, "disabled")
+        self.assertEqual(config.network_metadata, "disabled")
         self.assertFalse(config.network_incident_popups_enabled)
         self.assertEqual(config.ollama_health_timeout, 5.0)
         self.assertEqual(config.ollama_generation_timeout, 600.0)
@@ -82,6 +83,7 @@ class ConfigSecurityTests(unittest.TestCase):
         self.assertEqual(config.cloud_retry_backoff, 0.5)
         self.assertFalse(config.openai_api_enabled)
         self.assertFalse(config.openai_images_enabled)
+        self.assertFalse(config.xai_api_enabled)
         self.assertFalse(config.anthropic_api_enabled)
         self.assertFalse(config.codex_cli_enabled)
         self.assertFalse(config.claude_cli_enabled)
@@ -179,6 +181,15 @@ class ConfigSecurityTests(unittest.TestCase):
                 ValueError, "NETWORK_DEFENSE_MODE"
             ):
                 load_config({"JARVIS_NETWORK_DEFENSE_MODE": value})
+
+    def test_network_metadata_requires_an_explicit_bounded_mode(self):
+        enabled = load_config({"JARVIS_NETWORK_METADATA": " HOSTNAME-OUI "})
+        self.assertEqual(enabled.network_metadata, "hostname-oui")
+        for value in ("", "auto", "cloud-lookup", "fingerprint", "active"):
+            with self.subTest(value=value), self.assertRaisesRegex(
+                ValueError, "NETWORK_METADATA"
+            ):
+                load_config({"JARVIS_NETWORK_METADATA": value})
 
     def test_docker_backend_selection_fails_closed_without_daemon(self):
         with patch("jarvis.execution.docker_available", return_value=False):

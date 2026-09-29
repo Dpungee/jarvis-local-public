@@ -18,6 +18,8 @@ Access model (the same pattern JARVIS already uses for Presence):
 from __future__ import annotations
 
 import argparse
+import base64
+import binascii
 import hashlib
 import json
 import os
@@ -30,25 +32,32 @@ from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, quote, urlparse
 
+from . import hub_uploads
 from .agent_hub_runtime import (
     DEFAULT_PERMISSIONS,
     EFFORT_LABELS,
     GOAL_CATEGORIES,
-    KNOWN_MODELS,
+    MAX_BLOB,
     PERMISSION_LABELS,
     TERMINAL_STATES,
     AgentRuntime,
     TaskError,
     _project_file,
+    known_models,
     normalize_permissions,
     validate_model,
 )
+from .openrouter import model_facts as openrouter_model_facts
 from .command_center import CommandCenterService, _jsonable
+from .hub_team import TeamError
 from .multi_agent_runtime import AgentLifecycle, MultiAgentRuntimeError, MultiAgentRuntimeStore
 
 MAX_BODY = 64 * 1024
+# A chat message may carry up to four images (5 MiB each) and files totalling 100 MiB, as base64.
+MAX_MESSAGE_BODY = 176 * 1024 * 1024
+EXPORT_FORMATS = {"md": "text/markdown; charset=utf-8", "json": "application/json; charset=utf-8"}
 STATIC_DIR = Path(__file__).with_name("agent_hub_static")
 STATIC_FILES = {"/": "index.html", "/hub.css": "hub.css", "/hub.js": "hub.js"}
 LOOPBACK = frozenset({"127.0.0.1", "localhost", "::1"})
@@ -74,7 +83,7 @@ class HubError(ValueError):
 class HubService:
     """Read models and commands for the Hub. Backend services do the actual work."""
 
-    def __init__(self, *, state_dir: Path, provider_profile_dir: Path, capacity: int = 2,
+    def __init__(self, *, state_dir: Path, provider_profile_dir: Path, capacity: int | None = None,
                  workspace_roots: dict[str, Path] | None = None, runtime_kwargs: dict[str, Any] | None = None,
                  command_center: CommandCenterService | None = None,
                  chat_providers: dict[str, Any] | None = None) -> None:
@@ -90,7 +99,8 @@ class HubService:
             chat_providers = {'claude-cli': claude, 'codex-cli': CodexSubscription(provider_profile_dir)}
         self.command_center = command_center or CommandCenterService(
             self.state_dir / "runtime.db", self.state_dir / "execution.db",
-            providers=chat_providers, max_workers=capacity, workspace_roots=dict(workspace_roots or {}))
+            # The command center's own conversation pool is separate from agent tasks and keeps a bound.
+            providers=chat_providers, max_workers=capacity or 2, workspace_roots=dict(workspace_roots or {}))
         self.runtime_path = self.command_center.runtime_path
         for project in self.command_center.conversations.projects():
             self._ensure_root(project["project_id"])
@@ -99,59 +109,377 @@ class HubService:
                                     capacity=capacity, **(runtime_kwargs or {}))
         self._audit_init()
 
+    @staticmethod
+    def _images(value: Any) -> list[Any]:
+        """Screenshots or photos sent with a message: validated by type signature and size."""
+        if value in (None, []):
+            return []
+        from .attachments import MAX_IMAGE_ATTACHMENTS, ImageAttachment
+
+        if not isinstance(value, list) or len(value) > MAX_IMAGE_ATTACHMENTS:
+            raise HubError(f'Attach up to {MAX_IMAGE_ATTACHMENTS} images.')
+        images = []
+        for item in value:
+            if not isinstance(item, dict) or set(item) - {'name', 'mime', 'data'}:
+                raise HubError('Each image needs a name, type and data.')
+            try:
+                data = base64.b64decode(str(item.get('data') or ''), validate=True)
+                images.append(ImageAttachment(str(item.get('mime') or ''), data, str(item.get('name') or 'image')))
+            except (ValueError, binascii.Error) as exc:
+                raise HubError(f'That image could not be attached: {exc}') from None
+        return images
+
+    @staticmethod
+    def _uploads(value: Any) -> list[hub_uploads.Upload]:
+        try:
+            return hub_uploads.parse(value)
+        except hub_uploads.UploadError as exc:
+            raise HubError(str(exc)) from None
+
+    @staticmethod
+    def _pictures(uploads: list[hub_uploads.Upload], room: int) -> list[Any]:
+        """Picture files sent as files are also shown to the model, as images are (up to the
+        per-message image limit); anything that is not a valid small picture stays a file only."""
+        from .attachments import ImageAttachment
+
+        pictures: list[Any] = []
+        for upload in uploads:
+            if len(pictures) >= room:
+                break
+            if upload.mime in {"image/png", "image/jpeg", "image/gif", "image/webp"}:
+                try:
+                    pictures.append(ImageAttachment(upload.mime, upload.data, upload.name))
+                except ValueError:
+                    continue
+        return pictures
+
+    @staticmethod
+    def _attachment_line(request: str) -> str:
+        """The "📎 Attached: ..." line a sent message carried, or an empty string."""
+        marker = "📎 Attached: "
+        if request.startswith(marker):
+            return request
+        _head, found, tail = request.rpartition("\n\n" + marker)
+        return marker + tail if found else ""
+
+    @staticmethod
+    def _legacy_history(legacy: dict[str, Any]) -> list[dict[str, str]]:
+        from .subscription_chat import release_operator_text, release_text
+
+        history = [{'role':'user' if m['role']=='operator' else 'assistant','content':m['body']}
+                   for m in legacy['messages'] if m['state'] in {'COMPLETED','APPLIED'}]
+        for message in history:  # screened as text; JSON escaping doubled backslashes
+            (release_operator_text if message['role'] == 'user' else release_text)(message['content'])
+        return history
+
     def chat(self, agent_id: str, chat_id: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
         agent = self.agent_detail(agent_id)
         if not isinstance(chat_id, str) or not chat_id:
             raise HubError('Choose a chat first.')
-        scope = self.command_center.conversations.chat_scope(agent['project_id'], agent_id, chat_id)
-        legacy = self.command_center.conversations.snapshot(scope, agent_id)
         if payload is not None:
-            if set(payload) != {'body', 'request_id'}:
-                raise HubError('Chat accepts only message text and a request identifier; permissions are managed separately.')
-            if agent['archived']:
-                raise HubError('This agent is archived.')
-            from .subscription_chat import release_operator_text, release_text
-            # The operator's own message may carry addresses and paths they chose to give;
-            # secrets are still refused.
-            body = release_operator_text(payload['body'])
-            request_id = payload['request_id']
-            if not isinstance(request_id, str) or not 1 <= len(request_id) <= 200:
-                raise HubError('A bounded request identifier is required.')
-            history = [{'role':'user' if m['role']=='operator' else 'assistant','content':m['body']}
-                       for m in legacy['messages'] if m['state'] in {'COMPLETED','APPLIED'}]
-            for message in history:  # screened as text; JSON escaping doubled backslashes
-                (release_operator_text if message['role'] == 'user' else release_text)(message['content'])
-            digest = hashlib.sha256(json.dumps([agent_id,chat_id,body]).encode()).hexdigest()
-            self.runtime.set_chat_archived(agent_id, chat_id, False)
-            return self.runtime.create_task(agent_id, title=body[:80], request=body,
-                _chat={'chat_id':chat_id,'request_id':request_id,'digest':digest,'history':history})
-        turns = [turn for turn in self.runtime.chat_tasks(agent_id, chat_id)
-                 # A watch that found nothing to report stays out of the conversation.
-                 if not (turn['request'].startswith('⏰') and (turn['result'] or '').strip() == 'NO_UPDATE')]
-        messages = list(legacy['messages'])
-        for turn in turns:
-            reply = {'role':'assistant','body':turn['result'] or turn['blocker'] or turn['progress'] or 'Received — waiting for execution.',
-                     'state':turn['state'],'message_id':turn['task_id']+'-assistant'}
-            if turn['state'] == 'RUNNING' and turn.get('partial'):
-                # Streamed while the model writes; the verified result replaces it at the end.
-                reply.update(body=turn['partial'], provisional=True)
-            messages.extend([
-                {'role':'operator','body':turn['request'],'state':'APPLIED','message_id':turn['task_id']+'-user'},
-                reply])
+            return self._send(agent, chat_id, payload)
+        scope, _legacy, messages, turns, metas = self._thread(agent, chat_id)
 
         def live_steps(turn: dict[str, Any]) -> list[dict[str, Any]]:
             # Real recorded activity for work still in flight: tool calls and phases.
             if turn['state'] not in {'QUEUED', 'RUNNING'}:
                 return []
             events = self.runtime.latest_events(task_id=turn['task_id'], limit=12)
-            return [{'kind': e['kind'], 'summary': e['summary'], 'ts': e['ts']}
+            return [{'kind': e['kind'], 'summary': e['summary'], 'ts': e['ts'], 'detail': e['detail']}
                     for e in events if e['kind'] in {'tool','progress','model','steering','recovery','failover'}][-6:]
 
+        uploaded = {f['artifact_id'] for meta in metas.values() for f in meta['files'] if f.get('artifact_id')}
+        images = self.runtime.turn_images([t['task_id'] for t in turns], exclude=uploaded,
+                                          replies={t['task_id']: t.get('result') or '' for t in turns})
         return {'usage': self.runtime.chat_usage(agent_id, chat_id),
                 'messages':messages,'agent_turns':[dict(t, approval=self.runtime.approval_detail(t), steps=live_steps(t),
-                                                   previews=self.runtime.previews(task_id=t['task_id'])) for t in turns],
+                                                   previews=self.runtime.previews(task_id=t['task_id']),
+                                                   images=[self._image_view(agent_id, i) for i in images.get(t['task_id'], [])])
+                                                  for t in turns],
                 'live_turns':self.command_center.live.snapshot(scope,agent_id)['live_turns'],
                 'capabilities':agent['permissions'],'context_note':'Recent conversation context is retained; older context may be omitted when the context window fills.'}
+
+    def _send(self, agent: dict[str, Any], chat_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+        """A new operator message: text plus optional images (seen by the model) and files (saved
+        in the project under uploads/ and named in the agent's brief)."""
+        agent_id = agent['agent_id']
+        scope = self.command_center.conversations.chat_scope(agent['project_id'], agent_id, chat_id)
+        legacy = self.command_center.conversations.snapshot(scope, agent_id)
+        if not {'body', 'request_id'} <= set(payload) <= {'body', 'request_id', 'images', 'files'}:
+            raise HubError('Chat accepts only message text, images, files and a request identifier; permissions are managed separately.')
+        images = self._images(payload.get('images'))
+        uploads = self._uploads(payload.get('files'))
+        if agent['archived']:
+            raise HubError('This agent is archived.')
+        from .subscription_chat import release_operator_text
+        text = payload['body']
+        if not isinstance(text, str):
+            raise HubError('The message must be text.')
+        if text.strip() or not (images or uploads):
+            # The operator's own message may carry addresses and paths they chose to give;
+            # secrets are still refused.
+            text = release_operator_text(text)
+        else:
+            text = ""
+        request_id = payload['request_id']
+        if not isinstance(request_id, str) or not 1 <= len(request_id) <= 200:
+            raise HubError('A bounded request identifier is required.')
+        history = self._legacy_history(legacy)
+        names = [i.name for i in images] + [u.name for u in uploads]
+        body = f"{text}\n\n{hub_uploads.note(names)}".strip() if names else text
+        images = images + self._pictures(uploads, room=4 - len(images))
+        parts: list[Any] = [agent_id, chat_id, body, [i.sha256 for i in images]]
+        if uploads:
+            parts.append([u.sha256 for u in uploads])
+        digest = hashlib.sha256(json.dumps(parts).encode()).hexdigest()
+        root = self.project_root(agent['project_id'])
+        saved: list[dict[str, Any]] = []
+        if uploads and self.runtime.chat_turn_for_request(request_id) is None:
+            try:
+                saved = hub_uploads.save(root, uploads)
+            except (hub_uploads.UploadError, OSError) as exc:
+                raise HubError(f'The files could not be saved: {exc}') from None
+        try:
+            self.runtime.set_chat_archived(agent_id, chat_id, False)
+            task = self.runtime.create_task(
+                agent_id, title=body[:80], request=body,
+                _chat={'chat_id':chat_id,'request_id':request_id,'digest':digest,'history':history},
+                _turn={'body': text, 'files': saved, 'images': images,
+                       'blobs': {u.sha256: u.data for u in uploads if len(u.data) <= MAX_BLOB}})
+        except BaseException:
+            hub_uploads.remove(root, saved)
+            raise
+        files = (self.runtime.turn_meta([task['task_id']]).get(task['task_id']) or {}).get('files') or []
+        if saved and [f['path'] for f in files] != [f['path'] for f in saved]:
+            hub_uploads.remove(root, saved)  # the same message was already queued; keep the first copy
+        return task | {'files': hub_uploads.public(files)}
+
+    def _thread(self, agent: dict[str, Any], chat_id: str) -> tuple[str, dict[str, Any], list[dict[str, Any]],
+                                                                    list[dict[str, Any]], dict[str, dict[str, Any]]]:
+        """The visible conversation: legacy messages, then each chat turn that is not superseded
+        (and not a watch that found nothing), as operator message + reply."""
+        agent_id = agent['agent_id']
+        if not isinstance(chat_id, str) or not chat_id:
+            raise HubError('Choose a chat first.')
+        scope = self.command_center.conversations.chat_scope(agent['project_id'], agent_id, chat_id)
+        legacy = self.command_center.conversations.snapshot(scope, agent_id)
+        turns = [turn for turn in self.runtime.chat_tasks(agent_id, chat_id)
+                 # A watch that found nothing to report stays out of the conversation.
+                 if not (turn['request'].startswith('⏰') and (turn['result'] or '').strip() == 'NO_UPDATE')]
+        metas = self.runtime.turn_meta([t['task_id'] for t in turns])
+        turns = [t for t in turns if not (metas.get(t['task_id']) or {}).get('superseded_at')]
+        messages = list(legacy['messages'])
+        for turn in turns:
+            meta = metas.get(turn['task_id']) or {}
+            reply = {'role':'assistant','body':turn['result'] or turn['blocker'] or turn['progress'] or 'Received — waiting for execution.',
+                     'state':turn['state'],'message_id':turn['task_id']+'-assistant','task_id':turn['task_id'],
+                     'created_at':turn['finished_at'] or turn['updated_at'],
+                     'feedback':None if not meta.get('feedback') else {
+                         'rating':meta['feedback'],'note':meta.get('feedback_note'),'at':meta.get('feedback_at')}}
+            if turn['state'] == 'RUNNING' and turn.get('partial'):
+                # Streamed while the model writes; the verified result replaces it at the end.
+                reply.update(body=turn['partial'], provisional=True)
+            messages.extend([
+                {'role':'operator','body':turn['request'],'state':'APPLIED','message_id':turn['task_id']+'-user',
+                 'task_id':turn['task_id'],'text':meta.get('body', turn['request']),
+                 'files':hub_uploads.public(meta.get('files') or []),'created_at':turn['created_at']},
+                reply])
+        return scope, legacy, messages, turns, metas
+
+    @staticmethod
+    def _image_view(agent_id: str, row: dict[str, Any]) -> dict[str, Any]:
+        # The stored copy is this turn's exact version; larger files are served from the project.
+        url = (f"/api/artifacts/{row['artifact_id']}/content" if row.get('sha256') else
+               f"/api/agents/{quote(agent_id, safe='')}/files/content?path={quote(row['path'], safe='')}")
+        return {'artifact_id': row['artifact_id'], 'path': row['path'], 'url': url, 'mime': row['mime']}
+
+    @staticmethod
+    def _locate(messages: list[dict[str, Any]], payload: dict[str, Any]) -> dict[str, Any]:
+        """The message a command names by position (index) or by message_id."""
+        index, message_id = payload.get('index'), payload.get('message_id')
+        if index is None and message_id is None:
+            raise HubError('Name the message by index or message_id.')
+        found = None
+        if index is not None:
+            if isinstance(index, bool) or not isinstance(index, int) or not 0 <= index < len(messages):
+                raise HubError('That message index is not in this chat.')
+            found = messages[index]
+        if message_id is not None:
+            if not isinstance(message_id, str) or len(message_id) > 200:
+                raise HubError('That message_id is not valid.')
+            match = next((m for m in messages if m.get('message_id') == message_id), None)
+            if match is None or (found is not None and match is not found):
+                raise HubError('That message is not in this chat (the thread may have changed; reload it).')
+            found = match
+        return found
+
+    def regenerate(self, agent_id: str, chat_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+        """Send the last operator message again as a new turn (same words, files and images);
+        the previous attempt is kept but superseded."""
+        if set(payload) - {'request_id'}:
+            raise HubError('Regenerate takes no fields (an optional request_id).')
+        agent = self.agent_detail(agent_id)
+        replay = self._replay(agent_id, chat_id, payload.get('request_id'))
+        if replay is not None:
+            return replay
+        _scope, legacy, messages, _turns, metas = self._thread(agent, chat_id)
+        last = next((m for m in reversed(messages) if m['role'] == 'operator' and m.get('task_id')), None)
+        if last is None:
+            raise HubError('There is no message of yours in this chat to regenerate.')
+        return self._resend(agent, chat_id, legacy, last['task_id'], metas.get(last['task_id']), None,
+                            payload.get('request_id'))
+
+    def edit(self, agent_id: str, chat_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+        """Replace one operator message: it and everything after it are superseded (kept, hidden
+        from the thread and from the model's history) and the new text is sent as a new turn."""
+        if not {'body'} <= set(payload) <= {'index', 'message_id', 'body', 'request_id'}:
+            raise HubError('Edit takes index (or message_id), body and an optional request_id.')
+        if not isinstance(payload['body'], str):
+            raise HubError('The edited message must be text.')
+        agent = self.agent_detail(agent_id)
+        replay = self._replay(agent_id, chat_id, payload.get('request_id'))
+        if replay is not None:
+            return replay
+        _scope, legacy, messages, _turns, metas = self._thread(agent, chat_id)
+        target = self._locate(messages, payload)
+        if target.get('role') != 'operator' or not target.get('task_id'):
+            raise HubError('Only your own messages in this chat can be edited.')
+        return self._resend(agent, chat_id, legacy, target['task_id'], metas.get(target['task_id']),
+                            payload['body'], payload.get('request_id'))
+
+    def _replay(self, agent_id: str, chat_id: str, request_id: Any) -> dict[str, Any] | None:
+        """The same regenerate or edit arriving twice (a double click, a retried request) answers
+        with the first result instead of replacing the conversation again."""
+        if request_id is None:
+            return None
+        if not isinstance(request_id, str) or not 1 <= len(request_id) <= 200:
+            raise HubError('A bounded request identifier is required.')
+        earlier = self.runtime.chat_turn_for_request(request_id)
+        if earlier is None:
+            return None
+        if (earlier['agent_id'], earlier['chat_id']) != (agent_id, chat_id):
+            raise HubError('Request ID reused for a different chat.')
+        return {'ok': True, 'task_id': earlier['task_id'], 'task': self.runtime.task(earlier['task_id']),
+                'superseded': [], 'replayed': True}
+
+    def _resend(self, agent: dict[str, Any], chat_id: str, legacy: dict[str, Any], task_id: str,
+                meta: dict[str, Any] | None, text: str | None, request_id: Any) -> dict[str, Any]:
+        agent_id = agent['agent_id']
+        if agent['archived']:
+            raise HubError('This agent is archived.')
+        if agent['lifecycle'] != 'RUNNING':
+            raise HubError('Enable this agent before assigning work.')
+        request_id = request_id or f"resend-{secrets.token_hex(12)}"
+        original = self.runtime.task(task_id)
+        files = list((meta or {}).get('files') or [])
+        images = list(self.runtime._load_attachments(task_id))
+        if text is None:  # regenerate: exactly what was sent before
+            typed, body = (meta or {}).get('body', original['request']), original['request']
+        else:
+            from .subscription_chat import release_operator_text
+            typed = text
+            if text.strip() or not (images or files):
+                typed = release_operator_text(text)
+            else:
+                typed = ""
+            # The edited message keeps the attachments, and the line naming them, of the original.
+            line = self._attachment_line(original['request'])
+            body = f"{typed}\n\n{line}".strip() if line else typed
+        if not body.strip() or len(body) > 20000:
+            raise HubError('Write the message (up to 20,000 characters).')
+        history = self._legacy_history(legacy)
+        digest = hashlib.sha256(json.dumps([agent_id, chat_id, body, [i.sha256 for i in images],
+                                            [f.get('sha256') for f in files], 'resend', task_id]).encode()).hexdigest()
+        marked = self.runtime.supersede_from(agent_id, chat_id, task_id)
+        try:
+            self.runtime.set_chat_archived(agent_id, chat_id, False)
+            task = self.runtime.create_task(
+                agent_id, title=body[:80], request=body,
+                _chat={'chat_id': chat_id, 'request_id': request_id, 'digest': digest, 'history': history},
+                _turn={'body': typed, 'files': files, 'recorded': True, 'images': images})
+        except BaseException:
+            self.runtime.restore_superseded(agent_id, chat_id, marked)
+            raise
+        return {'ok': True, 'task_id': task['task_id'], 'task': task, 'superseded': marked['task_ids'],
+                'files': hub_uploads.public(files)}
+
+    def feedback(self, agent_id: str, chat_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+        if not {'rating'} <= set(payload) <= {'index', 'message_id', 'rating', 'note'}:
+            raise HubError('Feedback takes index (or message_id), rating ("up", "down" or null) and an optional note.')
+        note = payload.get('note')
+        if note is not None and (not isinstance(note, str) or len(note) > 1000):
+            raise HubError('A feedback note is text up to 1,000 characters.')
+        agent = self.agent_detail(agent_id)
+        _scope, _legacy, messages, _turns, _metas = self._thread(agent, chat_id)
+        target = self._locate(messages, payload)
+        if target.get('role') != 'assistant' or not target.get('task_id'):
+            raise HubError("Only the agent's replies in this chat can be rated.")
+        return self.runtime.set_feedback(target['task_id'], chat_id, payload['rating'], note)
+
+    def export(self, agent_id: str, chat_id: str, fmt: str) -> tuple[bytes, str, str]:
+        """The visible conversation as Markdown or JSON: (content, content type, file name)."""
+        if fmt not in EXPORT_FORMATS:
+            raise HubError('Export as md or json.')
+        agent = self.agent_detail(agent_id)
+        _scope, _legacy, messages, _turns, _metas = self._thread(agent, chat_id)
+        chat = next((c for c in agent['chats'] if c['chat_id'] == chat_id), {'title': 'Conversation'})
+        stamp = time.strftime('%Y-%m-%d %H:%M', time.localtime())
+
+        def when(value: Any) -> str | None:
+            try:
+                return time.strftime('%Y-%m-%d %H:%M', time.localtime(float(value)))
+            except (TypeError, ValueError, OverflowError, OSError):
+                return None
+
+        entries = []
+        for message in messages:
+            mine = message['role'] == 'operator'
+            entries.append({'role': 'operator' if mine else message['role'],
+                            'author': 'You' if mine else agent['name'] if message['role'] == 'assistant'
+                            else str(message['role']).capitalize(),
+                            'text': message.get('text', message.get('body', '')) if mine else message.get('body', ''),
+                            'at': when(message.get('created_at')), 'state': message.get('state'),
+                            'files': [f['name'] for f in message.get('files') or []],
+                            'feedback': (message.get('feedback') or {}).get('rating')})
+        name = "".join(c if c.isalnum() or c in ' -_' else '-' for c in str(chat['title']))[:80].strip() or 'conversation'
+        if fmt == 'json':
+            document = {'title': chat['title'], 'chat_id': chat_id, 'agent': {'name': agent['name'],
+                        'provider': agent['provider'], 'model': agent['model']}, 'exported_at': stamp,
+                        'messages': entries}
+            return json.dumps(document, ensure_ascii=False, indent=2).encode('utf-8'), EXPORT_FORMATS[fmt], f'{name}.json'
+        lines = [f"# {chat['title']}", "", f"*{agent['name']} · {agent['provider']} · {agent['model']} · exported {stamp}*", ""]
+        for entry in entries:
+            lines.append(f"### {entry['author']}" + (f" · {entry['at']}" if entry['at'] else ""))
+            lines.append("")
+            lines.append(str(entry['text'] or '').strip() or '_(empty)_')
+            if entry['files']:
+                lines.extend(["", "Attached: " + ", ".join(entry['files'])])
+            if entry['state'] not in (None, 'COMPLETED', 'APPLIED'):
+                lines.extend(["", f"_({str(entry['state']).replace('_', ' ').lower()})_"])
+            lines.append("")
+        return "\n".join(lines).encode('utf-8'), EXPORT_FORMATS[fmt], f'{name}.md'
+
+    def set_personalization(self, payload: dict[str, Any]) -> dict[str, str]:
+        if not payload or set(payload) - {'about_you', 'response_style'}:
+            raise HubError('Personalization takes about_you and response_style.')
+        from .subscription_chat import release_operator_text
+        for key, value in payload.items():
+            if not isinstance(value, str):
+                raise HubError(f'{key} must be text.')
+            if value.strip():
+                try:
+                    release_operator_text(value)
+                except PermissionError as exc:
+                    raise HubError(str(exc)) from None
+                except ValueError:
+                    raise HubError(f'{key} is too long.') from None
+        return self.runtime.set_personalization(**payload)
+
+    def workspace(self, project_id: str | None) -> dict[str, Any]:
+        """Folder name, Git branch and uncommitted-changes flag of a project (cached; never raises)."""
+        from .hub_github import workspace_state
+
+        return workspace_state(self.project_root(project_id or "command-center"))
 
     def create_chat(self, agent_id: str, payload: dict[str, Any]) -> dict[str, Any]:
         if set(payload) != {'title'}:
@@ -208,6 +536,10 @@ class HubService:
             return status("not_enabled", "Not enabled", "Enable it before assigning work.", "attention")
         if lifecycle == "PAUSED":
             return status("paused", "Paused", "Queued work waits until you resume the agent.", "attention")
+        inline = self.runtime.team.inline_label(agent["agent_id"])
+        if inline and not (current and current["state"] == "RUNNING"):
+            # Answering another agent or speaking in a team room, inside that other agent's task.
+            return status("running", "Running", inline, "live")
         if current and current["state"] == "RUNNING":
             running = current["task_id"] in self.runtime.running_ids()
             quiet = time.time() - float((last_event or {}).get("ts") or current["started_at"] or time.time())
@@ -276,7 +608,8 @@ class HubService:
             "defaults": self.runtime.defaults(),
             "capacity": {"slots": self.runtime.capacity, "running": len(self.runtime.running_ids())},
             "permissions": {"labels": PERMISSION_LABELS, "defaults": DEFAULT_PERMISSIONS},
-            "known_models": KNOWN_MODELS,
+            "known_models": known_models(),
+            "openrouter_models": openrouter_model_facts(),
             "features": {"archive": True, "goals": True, "search": True, "artifacts": True, "schedules": True,
                          "effort": True, "usage": True},
             "goal_categories": GOAL_CATEGORIES,
@@ -318,10 +651,12 @@ class HubService:
             "errors": [e for e in self.runtime.latest_events(agent_id=agent_id, limit=200)
                        if e["level"] in {"error", "warn"}][-20:],
             "providers": overview["providers"],
-            "known_models": KNOWN_MODELS,
+            "known_models": known_models(),
             "permission_labels": PERMISSION_LABELS,
             "goals": self.runtime.goals(agent_id, include_archived=True),
             "schedules": self.runtime.schedules(agent_id),
+            "workspace": self.workspace(agent["project_id"]),
+            "team": self.runtime.team.counts(agent_id),
         }
 
     # ------------------------------------------------ conversations and tasks
@@ -334,6 +669,27 @@ class HubService:
     def archive_chat(self, agent_id: str, chat_id: str, archived: bool) -> dict[str, Any]:
         self.command_center.conversations.chat_scope(self._agent_project(agent_id), agent_id, str(chat_id))
         return self.runtime.set_chat_archived(agent_id, str(chat_id), archived)
+
+    def rename_chat(self, agent_id: str, chat_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+        """Give a chat a new title. Only the title changes; archived chats can be renamed too."""
+        import unicodedata
+
+        if set(payload) != {'title'} or not isinstance(payload['title'], str):
+            raise HubError('Rename takes one field: title.')
+        title = " ".join(payload['title'].split())
+        if any(unicodedata.category(ch) in {'Cc', 'Cf'} for ch in title):
+            raise HubError('A chat title cannot contain control characters.')
+        if not 1 <= len(title) <= 120:
+            raise HubError('Give the chat a title of 1-120 characters.')
+        project, chat_id = self._agent_project(agent_id), str(chat_id)
+        conversations = self.command_center.conversations
+        conversations.chat_scope(project, agent_id, chat_id)  # refuses another agent's or project's chat
+        with conversations.db() as db:
+            db.execute('UPDATE cc_chats SET title=? WHERE chat_id=? AND project_id=? AND agent_id=?',
+                       (title, chat_id, project, agent_id))
+        self.runtime.event(agent_id, None, project, 'settings', 'Conversation renamed')
+        chat = next(c for c in conversations.chats(project, agent_id) if c['chat_id'] == chat_id)
+        return chat | {'archived': chat_id in self.runtime.archived(agent_id, 'chat')}
 
     def delete_chat(self, agent_id: str, chat_id: str) -> dict[str, Any]:
         project, chat_id = self._agent_project(agent_id), str(chat_id)
@@ -635,12 +991,12 @@ class HubHandler(BaseHTTPRequestHandler):
         self._send(status, json.dumps(payload, default=_json_default, separators=(",", ":")).encode(),
                    "application/json; charset=utf-8")
 
-    def _body(self) -> dict[str, Any]:
+    def _body(self, limit: int = MAX_BODY) -> dict[str, Any]:
         try:
             length = int(self.headers.get("Content-Length", "0"))
         except ValueError as exc:
             raise HubError("Invalid request length.") from exc
-        if length < 1 or length > MAX_BODY:
+        if length < 1 or length > limit:
             raise HubError("Request body is missing or too large.")
         if not (self.headers.get("Content-Type") or "").startswith("application/json"):
             raise HubError("Requests must be JSON.")
@@ -651,6 +1007,12 @@ class HubHandler(BaseHTTPRequestHandler):
 
     def _actor(self) -> str | None:
         return self.server.auth.actor(self.headers.get("Authorization") or "")
+
+    @staticmethod
+    def _decision(body: dict[str, Any]) -> bool:
+        if set(body) != {"decision"} or body["decision"] not in {"approve", "deny"}:
+            raise HubError("Choose approve or deny.")
+        return body["decision"] == "approve"
 
     # ----------------------------------------------------------------- GET
     def do_GET(self) -> None:
@@ -666,6 +1028,9 @@ class HubHandler(BaseHTTPRequestHandler):
             return
         if not path.startswith("/api/"):
             self._json(HTTPStatus.NOT_FOUND, {"error": "Not found."})
+            return
+        if path == "/api/connections/oauth/callback":
+            self._oauth_callback({k: v[0] for k, v in query.items()})
             return
         actor = self._actor()
         if actor is None:
@@ -687,6 +1052,9 @@ class HubHandler(BaseHTTPRequestHandler):
                 result = service.audit_log()
             elif parts == ["api", "sessions"]:
                 result = self.server.auth.sessions()
+            elif parts == ["api", "connections"]:
+                from .connections import presets
+                result = {"connections": service.runtime.connections.list(), "presets": presets()}
             elif parts == ["api", "events"]:
                 kinds = [k for k in (q.get("kinds") or "").split(",") if k]
                 result = {"events": service.runtime.events(after=int(q.get("after") or 0), agent_id=q.get("agent"),
@@ -697,6 +1065,23 @@ class HubHandler(BaseHTTPRequestHandler):
                 result = service.agent_detail(parts[2])
             elif len(parts) == 4 and parts[1] == "agents" and parts[3] == "chat":
                 result = service.chat(parts[2], q.get('chat', ''))
+            elif len(parts) == 6 and parts[1] == "agents" and parts[3] == "chats" and parts[5] == "export":
+                content, kind, name = service.export(parts[2], parts[4], q.get("format", "md"))
+                self._send(HTTPStatus.OK, content, kind, {
+                    "Content-Disposition": f'attachment; filename="{name}"',
+                    "Content-Security-Policy": "default-src 'none'; sandbox"})
+                return
+            elif parts == ["api", "personalization"]:
+                result = service.runtime.personalization()
+            elif len(parts) == 4 and parts[1] == "agents" and parts[3] == "threads":
+                service._agent_project(parts[2])  # unknown agents are refused
+                result = {"threads": service.runtime.team.threads(parts[2])}
+            elif len(parts) == 3 and parts[1] == "threads":
+                result = service.runtime.team.thread(parts[2])
+            elif parts == ["api", "rooms"]:
+                result = {"rooms": service.runtime.team.rooms()}
+            elif len(parts) == 3 and parts[1] == "rooms":
+                result = service.runtime.team.room(parts[2])
             elif len(parts) == 4 and parts[1] == "agents" and parts[3] == "usage":
                 result = service.runtime.chat_usage(parts[2], q.get("chat") or None)
             elif len(parts) == 4 and parts[1] == "agents" and parts[3] == "search":
@@ -720,7 +1105,7 @@ class HubHandler(BaseHTTPRequestHandler):
                 self._json(HTTPStatus.NOT_FOUND, {"error": "Not found."})
                 return
             self._json(HTTPStatus.OK, result)
-        except (HubError, TaskError, MultiAgentRuntimeError, PermissionError) as exc:
+        except (HubError, TaskError, TeamError, MultiAgentRuntimeError, PermissionError) as exc:
             self._json(HTTPStatus.BAD_REQUEST, {"error": str(exc)})
         except (ValueError, sqlite3.Error):
             self._json(HTTPStatus.BAD_REQUEST, {"error": "The request could not be processed."})
@@ -763,6 +1148,28 @@ class HubHandler(BaseHTTPRequestHandler):
         headers["Content-Disposition"] = f'attachment; filename="{name}"'
         self._send(HTTPStatus.OK, data, "application/octet-stream", headers)
 
+    def _oauth_callback(self, query: dict[str, str]) -> None:
+        import html as _html
+
+        service = self.server.service
+        if query.get("error"):
+            message, ok = f"Sign-in was cancelled or refused: {query.get('error_description') or query['error']}", False
+        else:
+            try:
+                connection = service.runtime.connections.oauth_callback(query.get("state", ""), query.get("code", ""))
+                ok = connection["status"] == "connected"
+                message = (f"{connection['name']} is connected with {len(connection['tools'])} tools. "
+                           "You can close this tab." if ok else
+                           f"Signed in, but {connection['name']} did not connect: {connection.get('error') or ''}")
+                service.audit("oauth", "connections/oauth", connection["id"], "ok" if ok else "error")
+            except Exception as exc:  # noqa: BLE001 - shown to the operator, never a crash
+                message, ok = f"Sign-in did not finish: {exc}", False
+        page = (f"<!doctype html><meta charset=utf-8><title>JARVIS connection</title>"
+                f"<body style=\"font-family:system-ui;background:#111;color:#eee;padding:40px\">"
+                f"<h2>{'Connected' if ok else 'Not connected'}</h2><p>{_html.escape(message)}</p></body>")
+        self._send(HTTPStatus.OK if ok else HTTPStatus.BAD_REQUEST, page.encode("utf-8"), "text/html; charset=utf-8",
+                   {"Content-Security-Policy": "default-src 'none'; style-src 'unsafe-inline'"})
+
     # ---------------------------------------------------------------- POST
     def do_POST(self) -> None:
         if not self._host_ok() or not self._origin_ok():
@@ -790,7 +1197,8 @@ class HubHandler(BaseHTTPRequestHandler):
         action = "/".join(parts[1:3]) if len(parts) >= 3 else "/".join(parts[1:])
         target = parts[2] if len(parts) >= 3 else None
         try:
-            body = self._body()
+            body = self._body(MAX_MESSAGE_BODY if len(parts) == 4 and parts[1] == "agents" and parts[3] == "messages"
+                              else MAX_BODY)
             if parts == ["api", "agents"]:
                 result = service.create_agent(body)
                 target = result["agent_id"]
@@ -798,6 +1206,46 @@ class HubHandler(BaseHTTPRequestHandler):
                 result = service.create_project(str(body.get("name") or ""))
             elif parts == ["api", "providers", "refresh"]:
                 result = {"providers": runtime.refresh_providers()}
+            elif parts == ["api", "connections"]:
+                allowed = {"preset", "name", "url", "token", "command", "env", "kind"}
+                if set(body) - allowed:
+                    raise HubError("Unknown connection field.")
+                action = "connections/add"
+                added = runtime.connections.add(body)
+                target = added["id"]
+                result = runtime.connections.test(added["id"]) if added["kind"] == "stdio" or added["signed_in"] \
+                    or added["auth"] == "none" else added
+            elif len(parts) == 4 and parts[1] == "connections":
+                connection_id, verb = parts[2], parts[3]
+                action, target = f"connections/{verb}", connection_id
+                if verb == "test":
+                    result = runtime.connections.test(connection_id)
+                elif verb == "settings":
+                    if set(body) - {"enabled", "ask", "token"}:
+                        raise HubError("Settings take enabled, ask or token.")
+                    result = runtime.connections.update(
+                        connection_id, enabled=body.get("enabled"), ask=body.get("ask"),
+                        token=str(body["token"]) if isinstance(body.get("token"), str) else None)
+                    if "token" in body:
+                        result = runtime.connections.test(connection_id)
+                elif verb == "delete":
+                    runtime.connections.delete(connection_id)
+                    result = {"deleted": connection_id}
+                elif verb == "connect":
+                    result = {"authorize_url": runtime.connections.oauth_start(connection_id)}
+                else:
+                    raise HubError("Unknown connection command.")
+            elif parts == ["api", "providers", "openrouter", "key"]:
+                # The key goes straight to the key store; it is never echoed, logged or audited.
+                if set(body) != {"key"} or not isinstance(body["key"], str):
+                    raise HubError("Send only the key.")
+                action, target = "providers/openrouter-key", "openrouter"
+                result = {"providers": runtime.set_openrouter_key(body["key"])}
+            elif parts == ["api", "providers", "openrouter", "forget-key"]:
+                if body:
+                    raise HubError("Removing the key takes no fields.")
+                action, target = "providers/openrouter-forget-key", "openrouter"
+                result = {"providers": runtime.clear_openrouter_key()}
             elif parts == ["api", "providers", "verify"]:
                 result = runtime.verify_model(str(body.get("provider")), str(body.get("model")))
             elif parts == ["api", "settings", "default-model"]:
@@ -809,6 +1257,39 @@ class HubHandler(BaseHTTPRequestHandler):
                 result = service.grant_full_access()
             elif parts == ["api", "sessions", "revoke"]:
                 result = {"revoked": self.server.auth.revoke(str(body.get("session_id") or ""))}
+            elif parts == ["api", "personalization"]:
+                action, target = "personalization", None
+                result = service.set_personalization(body)
+            elif parts == ["api", "rooms"]:
+                action = "rooms/create"
+                result = runtime.team.create_room(body)
+                target = result["room_id"]
+            elif len(parts) == 4 and parts[1] == "rooms":
+                room_id, verb = parts[2], parts[3]
+                action, target = f"room/{verb}", room_id
+                if verb == "messages":
+                    if set(body) != {"body"}:
+                        raise HubError("A room message takes one field: body.")
+                    result = runtime.team.post(room_id, body["body"])
+                elif verb in {"stop", "resume"}:
+                    if body:
+                        raise HubError(f"{verb.capitalize()} takes no fields.")
+                    result = runtime.team.stop_room(room_id) if verb == "stop" else runtime.team.resume_room(room_id)
+                elif verb == "approval":
+                    result = runtime.decide_approval(runtime.team.room_task(room_id), self._decision(body))
+                else:
+                    raise HubError("Unknown room command.")
+            elif len(parts) == 4 and parts[1] == "threads":
+                thread_id, verb = parts[2], parts[3]
+                action, target = f"thread/{verb}", thread_id
+                if verb == "stop":
+                    if body:
+                        raise HubError("Stop takes no fields.")
+                    result = runtime.team.stop_thread(thread_id)
+                elif verb == "approval":
+                    result = runtime.decide_approval(runtime.team.thread_task(thread_id), self._decision(body))
+                else:
+                    raise HubError("Unknown thread command.")
             elif len(parts) == 6 and parts[1] == "agents" and parts[3] == "chats":
                 agent_id, chat_id, verb = parts[2], parts[4], parts[5]
                 action, target = f"chat/{verb}", chat_id
@@ -825,6 +1306,14 @@ class HubHandler(BaseHTTPRequestHandler):
                         raise HubError("Compact takes no fields.")
                     service.command_center.conversations.chat_scope(service._agent_project(agent_id), agent_id, chat_id)
                     result = runtime.compact_chat(agent_id, chat_id)
+                elif verb == "regenerate":
+                    result = service.regenerate(agent_id, chat_id, body)
+                elif verb == "edit":
+                    result = service.edit(agent_id, chat_id, body)
+                elif verb == "feedback":
+                    result = service.feedback(agent_id, chat_id, body)
+                elif verb == "rename":
+                    result = service.rename_chat(agent_id, chat_id, body)
                 else:
                     raise HubError("Unknown conversation command.")
             elif len(parts) == 4 and parts[1] == "agents" and parts[3] == "goals":
@@ -920,9 +1409,15 @@ class HubHandler(BaseHTTPRequestHandler):
                 return
             service.audit(actor, action, target, "ok")
             self._json(HTTPStatus.OK, result)
-        except (HubError, TaskError, MultiAgentRuntimeError, PermissionError) as exc:
+        except (HubError, TaskError, TeamError, MultiAgentRuntimeError, PermissionError) as exc:
             service.audit(actor, action, target, "refused", str(exc))
             self._json(HTTPStatus.BAD_REQUEST, {"error": str(exc)})
+        except KeyError as exc:
+            service.audit(actor, action, target, "refused", "unknown item")
+            self._json(HTTPStatus.NOT_FOUND, {"error": str(exc.args[0]) if exc.args else "Not found."})
+        except (OSError, RuntimeError) as exc:  # connection and sign-in failures, in plain words
+            service.audit(actor, action, target, "error", type(exc).__name__)
+            self._json(HTTPStatus.BAD_GATEWAY, {"error": str(exc)[:300]})
         except (ValueError, sqlite3.Error) as exc:
             service.audit(actor, action, target, "error", type(exc).__name__)
             self._json(HTTPStatus.BAD_REQUEST, {"error": "The request could not be processed."})
@@ -962,7 +1457,8 @@ def main(argv: list[str] | None = None) -> int:
                         default=Path(__file__).resolve().parent.parent / "data",
                         help="JARVIS data directory holding the signed-in provider profile")
     parser.add_argument("--port", type=int, default=8790)
-    parser.add_argument("--capacity", type=int, default=2)
+    parser.add_argument("--capacity", type=int, default=None,
+                        help="Most agent tasks running at once (default: no limit)")
     parser.add_argument("--remote-access", choices=("disabled", "paired"), default="disabled")
     parser.add_argument("--trusted-host", action="append", default=[],
                         help="Exact HTTPS proxy hostname accepted for remote access (repeatable)")
@@ -986,6 +1482,7 @@ def main(argv: list[str] | None = None) -> int:
     auth = HubAuth(args.state_dir, remote_mode=args.remote_access, trusted_hosts=tuple(args.trusted_host))
     server = HubHTTPServer(("127.0.0.1", args.port), service, auth, static_dir=args.static_dir)
     service.runtime.reserved_ports.add(server.server_port)
+    service.runtime.hub_origin = f"http://127.0.0.1:{server.server_port}"
     print(f"JARVIS Agent Hub: http://127.0.0.1:{server.server_port}/#token={auth.operator_token}", flush=True)
     print(f"State: {args.state_dir}", flush=True)
     try:

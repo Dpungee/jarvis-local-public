@@ -42,6 +42,7 @@ from .bluetooth_inventory import BluetoothInventory, BluetoothInventoryError
 from .feature_onboarding import FEATURE_SPECS, FeatureOnboardingStore
 from .capability_gateway import CapabilityGateway
 from .companion_chat import public_screen_companion_state  # noqa: F401 - domain export
+from .code_context_graph import build_python_code_graph, impacted_modules  # noqa: F401 - domain exports
 from .config import PACKAGE_ROOT, SOURCE_ROOT, Config
 from .desktop import (
     WindowsDesktopController,
@@ -49,7 +50,7 @@ from .desktop import (
     resolve_computer_path,
     system_snapshot,  # noqa: F401 - domain export
 )
-from .execution import ExecutionHandle, HostBackend, build_execution_backend  # noqa: F401 - domain exports
+from .execution import ExecutionBoundary, ExecutionHandle, HostBackend, build_execution_backend  # noqa: F401 - domain exports
 from .github_provider import GitHubProvider
 from .google_drive import GoogleDriveProvider
 from .home_assistant import HomeAssistantProvider
@@ -1657,6 +1658,7 @@ class _ManagedProcess:
     job: Any
     execution_handle: ExecutionHandle
     backend: str
+    boundary: ExecutionBoundary
     stdout_path: Path
     stderr_path: Path
     stdout_collector: _FileOutputCollector
@@ -1967,6 +1969,9 @@ class ToolBox(
         self.network_inventory_store = (
             NetworkInventory(
                 config.data_dir,
+                metadata_mode=str(
+                    getattr(config, "network_metadata", "disabled")
+                ),
                 incidents_enabled=(
                     str(getattr(config, "network_defense_mode", "disabled"))
                     != "disabled"

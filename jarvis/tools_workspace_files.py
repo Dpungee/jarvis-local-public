@@ -31,6 +31,68 @@ class WorkspaceFileToolsMixin:
                 break
         return results
 
+    def code_context_graph(
+        self,
+        path: str = ".",
+        module: str | None = None,
+        max_depth: int = 2,
+        max_files: int = 500,
+    ) -> dict[str, _tools().Any]:
+        """Return a deterministic, source-free Python repository map.
+
+        Supplying a module returns only that module's symbols plus local modules
+        that depend on it.  This lets the planner select relevant files before
+        spending context on source reads.
+        """
+
+        target = _tools()._safe_target(self.config.workspace, path)
+        graph = _tools().build_python_code_graph(target, max_files=max_files)
+        module_nodes = [
+            item for item in graph["nodes"] if item.get("kind") == "module"
+        ]
+        summary: dict[str, _tools().Any] = {
+            "schema_version": graph["schema_version"],
+            "root": str(target.relative_to(self.config.workspace)) or ".",
+            "module_count": graph["modules"],
+            "symbol_count": sum(
+                1 for item in graph["nodes"] if item.get("kind") != "module"
+            ),
+            "import_edge_count": sum(
+                1 for edge in graph["edges"] if edge.get("kind") == "imports"
+            ),
+            "parse_errors": graph["parse_errors"],
+        }
+        if module is None:
+            summary["modules"] = [
+                {"module": item["module"], "path": item["path"]}
+                for item in module_nodes
+            ]
+            return summary
+
+        dependents = _tools().impacted_modules(graph, module, max_depth=max_depth)
+        selected = {module, *dependents}
+        summary.update({
+            "focus_module": module,
+            "impacted_modules": dependents,
+            "selected_modules": [
+                {"module": item["module"], "path": item["path"]}
+                for item in module_nodes
+                if item.get("module") in selected
+            ],
+            "symbols": [
+                {
+                    "module": item["module"],
+                    "kind": item["kind"],
+                    "qualified_name": item["qualified_name"],
+                    "line": item["line"],
+                }
+                for item in graph["nodes"]
+                if item.get("kind") != "module"
+                and item.get("module") in selected
+            ],
+        })
+        return summary
+
     def read_file(self, path: str, start_line: int = 1, end_line: int = 2000) -> dict[str, _tools().Any]:
         target = _tools()._safe_target(self.config.workspace, path)
         stat_result = target.stat()

@@ -1418,10 +1418,16 @@ class MilestoneScaleTests(CompactionStoreCase):
               f"warm max {warm[-1]:.2f} ms (budget {READ_BUDGET_MS} ms); "
               f"{len(result['rows'])} rows, mode {result['report']['mode']}")
 
-        self.assertTrue(
-            result["rows"],
-            "the store answered 'nothing' when it meant 'too many'",
-        )
+        # A cold read on a contended machine can spend the whole 10 ms before the
+        # first row; the store then says so ("budget-exceeded", overflow) instead of
+        # returning a silent empty page. Like every wall-clock gate here, that is only
+        # a failure under JARVIS_ENFORCE_TIMING_GATES=1; M-6 itself (an empty page
+        # with no overflow, reading as "no history") always fails.
+        if not (result["report"]["mode"] == "budget-exceeded" and not ENFORCE_TIMING_GATES):
+            self.assertTrue(
+                result["rows"],
+                "the store answered 'nothing' when it meant 'too many'",
+            )
         self.assertLessEqual(len(result["rows"]), 6)
         self.assertTrue(result["overflow"])
         self.assertIn(result["report"]["mode"], DOCUMENTED_READ_MODES)

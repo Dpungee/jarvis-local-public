@@ -81,6 +81,12 @@ class TranscriptRecallStoreTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temp = tempfile.TemporaryDirectory()
         self.memory = Memory(Path(self.temp.name) / "store.db")
+        # These tests assert WHICH rows recall returns. The whole-call deadline has its own
+        # tests below; a slow or contended runner must not turn it into a missing row here.
+        for name in ("TRANSCRIPT_RECALL_TIME_BUDGET_MS", "TRANSCRIPT_RECALL_COLD_TIME_BUDGET_MS"):
+            patcher = patch.object(memory_module, name, 60_000.0)
+            patcher.start()
+            self.addCleanup(patcher.stop)
 
     def tearDown(self) -> None:
         self.memory.close()
@@ -188,16 +194,22 @@ class TranscriptRecallStoreTests(unittest.TestCase):
 
     def test_first_read_is_cold_then_warm(self) -> None:
         _seed(self.memory, "note", [("user", "The Wren lathe sprocket batch is on shelf four.")])
-        self.memory.prior_conversation_excerpts("Wren lathe sprocket batch")
-        self.assertEqual(
-            self.memory.transcript_recall_report()["budget_ms"],
-            TRANSCRIPT_RECALL_COLD_TIME_BUDGET_MS,
-        )
-        self.memory.prior_conversation_excerpts("Wren lathe sprocket batch")
-        self.assertEqual(
-            self.memory.transcript_recall_report()["budget_ms"],
-            TRANSCRIPT_RECALL_TIME_BUDGET_MS,
-        )
+        # This test is about the shipped budgets themselves, so restore them.
+        with (
+            patch.object(memory_module, "TRANSCRIPT_RECALL_TIME_BUDGET_MS", TRANSCRIPT_RECALL_TIME_BUDGET_MS),
+            patch.object(memory_module, "TRANSCRIPT_RECALL_COLD_TIME_BUDGET_MS",
+                         TRANSCRIPT_RECALL_COLD_TIME_BUDGET_MS),
+        ):
+            self.memory.prior_conversation_excerpts("Wren lathe sprocket batch")
+            self.assertEqual(
+                self.memory.transcript_recall_report()["budget_ms"],
+                TRANSCRIPT_RECALL_COLD_TIME_BUDGET_MS,
+            )
+            self.memory.prior_conversation_excerpts("Wren lathe sprocket batch")
+            self.assertEqual(
+                self.memory.transcript_recall_report()["budget_ms"],
+                TRANSCRIPT_RECALL_TIME_BUDGET_MS,
+            )
 
     def test_widened_privacy_screen_drops_the_excerpt(self) -> None:
         aws_shaped = "AK" + "IA" + "IOSFODNN7EXAMPLE"

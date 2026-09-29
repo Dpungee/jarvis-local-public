@@ -4,6 +4,7 @@ import contextlib
 import hashlib
 import hmac
 import json
+import re
 import sqlite3
 import tempfile
 import unittest
@@ -1561,7 +1562,8 @@ class MemorySpineModuleTests(unittest.TestCase):
         items = spine.recent_events(self.db, limit=5)
         self.assertEqual(items[0]["kind"], "claim.created")
         self.assertIn("value", items[0]["payload_keys"])
-        self.assertNotIn("9090", json.dumps(items))
+        # Event digests are random per store and can contain any digit run by chance.
+        self.assertNotIn("9090", re.sub(r"\b[0-9a-f]{64}\b", "<digest>", json.dumps(items)))
 
     def test_key_sidecar_round_trips(self) -> None:
         with tempfile.TemporaryDirectory() as folder:

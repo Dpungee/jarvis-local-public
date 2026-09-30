@@ -471,7 +471,9 @@ class LessonSecurityBoundaryTests(unittest.TestCase):
             "provenance_valid": True,
             "provenance_sha256": "a" * 64,
             "observed_at": "2026-08-29T12:00:00Z",
-            "valid_until": "2026-09-29T12:00:00Z",
+            # Relative to the real clock: a fixed date expired the lesson on 2026-09-30 and
+            # every selection test below then failed although nothing had changed.
+            "valid_until": (datetime.now(timezone.utc) + timedelta(days=30)).strftime("%Y-%m-%dT%H:%M:%SZ"),
             "contradicted_by": [],
             "strategies": ["verify_output"],
             "authority_claims": [],

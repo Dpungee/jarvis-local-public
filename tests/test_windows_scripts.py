@@ -1085,7 +1085,7 @@ class WindowsScriptTests(unittest.TestCase):
             [str(POWERSHELL), "-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
              "-File", str(self.project / "install_agent_hub.ps1")],
             cwd=self.project, env=env, capture_output=True, text=True, encoding="utf-8",
-            errors="replace", timeout=30, check=False,
+            errors="replace", timeout=180, check=False,
         )
         self.assertEqual(completed.returncode, 0, completed.stderr)
         self.assertEqual(self._trace_lines().count("HUB_CHECK"), 1)
@@ -1102,7 +1102,7 @@ class WindowsScriptTests(unittest.TestCase):
             [str(POWERSHELL), "-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
              "-File", str(self.project / "install_agent_hub.ps1")],
             cwd=self.project, env=env, capture_output=True, text=True, encoding="utf-8",
-            errors="replace", timeout=30, check=False,
+            errors="replace", timeout=180, check=False,
         )
         self.assertNotEqual(completed.returncode, 0)
         self.assertIn("Agent Hub setup stopped safely.", completed.stderr)

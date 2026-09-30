@@ -3,6 +3,7 @@ import io
 import json
 import os
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -331,6 +332,9 @@ class SubagentTests(unittest.TestCase):
         self.root = Path(tmp.name)
         self.seen, self.lock = [], threading.Lock()
         self.running, self.peak = 0, 0
+        # Concurrency tests set a barrier every helper must reach together: proof that they
+        # all run at once that does not depend on how fast the machine starts threads.
+        self.barrier = None
 
         def factory(config, memory, on_event, client):
             test = self
@@ -350,7 +354,10 @@ class SubagentTests(unittest.TestCase):
                         test.peak = max(test.peak, test.running)
                         test.seen.append((text, sorted(self.toolbox.tools), self.operator_brief, self.open_toolset))
                     self.toolbox.execute("web_search", {"query": text})
-                    clock.sleep(0.3)
+                    if test.barrier is not None:
+                        test.barrier.wait(timeout=30)
+                    else:
+                        clock.sleep(0.3)
                     with test.lock:
                         test.running -= 1
                     if "explode" in text:
@@ -378,6 +385,7 @@ class SubagentTests(unittest.TestCase):
                                                      {"cancel": threading.Event()}, helpers, minutes)
 
     def test_helpers_run_in_parallel_with_research_tools_only(self):
+        self.barrier = threading.Barrier(2)
         out = self.spawn([{"name": "launched", "task": "coins launched on Robinhood Chain"},
                           {"name": "gaps", "task": "ideas not launched yet"}])
         self.assertEqual([h["status"] for h in out["helpers"]], ["done", "done"])
@@ -396,6 +404,7 @@ class SubagentTests(unittest.TestCase):
         self.assertEqual([h["status"] for h in out["helpers"]], ["done", "failed"])
 
     def test_no_cap_on_helpers_all_run_at_once(self):
+        self.barrier = threading.Barrier(6)
         out = self.spawn([{"name": f"h{i}", "task": f"part {i}"} for i in range(6)])
         self.assertEqual([h["status"] for h in out["helpers"]], ["done"] * 6)
         self.assertEqual(self.peak, 6)

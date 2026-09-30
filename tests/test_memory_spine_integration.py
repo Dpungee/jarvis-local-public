@@ -4,6 +4,7 @@ import hashlib
 import io
 import json
 import random
+import re
 import sqlite3
 import tempfile
 import unittest
@@ -840,8 +841,10 @@ class MemorySpineIntegrationTests(_SpineStoreCase):
         ).fetchall()
         for row in rows:
             payload = json.loads(str(row["payload_json"]))
-            self.assertNotIn("9191", json.dumps(payload))
-            self.assertEqual(len(payload["command_sha256"]), 64)
+            # Keyed SHA-256 digests are random per store and can contain any digit run
+            # by chance ("...c919162..."); the raw value must be absent everywhere else.
+            self.assertNotIn("9191", re.sub(r"\b[0-9a-f]{64}\b", "<digest>", json.dumps(payload)))
+            self.assertRegex(payload["command_sha256"], r"^[0-9a-f]{64}$")
         self.assertTrue(self.memory.verify_spine()["ok"])
 
     def test_conversation_deletion_is_receipted(self) -> None:
